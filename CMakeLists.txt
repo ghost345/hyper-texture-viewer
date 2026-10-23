@@ -69,12 +69,16 @@ if(HTV_WITH_KTX)
     set(KTX_FEATURE_GL_UPLOAD OFF CACHE BOOL "" FORCE)
     set(KTX_FEATURE_VK_UPLOAD OFF CACHE BOOL "" FORCE)
     set(KTX_FEATURE_LOADTEST_APPS "" CACHE STRING "" FORCE)
+    set(KTX_FEATURE_ETC_UNPACK OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(ktx
         GIT_REPOSITORY https://github.com/KhronosGroup/KTX-Software.git
         GIT_TAG v4.4.2
         GIT_SHALLOW TRUE
         GIT_SUBMODULES "")
     FetchContent_MakeAvailable(ktx)
+    # Basis Universal is only transcoded to BC formats here; drop the mobile targets from the transcoder.
+    target_compile_definitions(ktx_read PRIVATE BASISD_SUPPORT_PVRTC1=0 BASISD_SUPPORT_PVRTC2=0 BASISD_SUPPORT_ATC=0
+        BASISD_SUPPORT_ASTC=0 BASISD_SUPPORT_ETC2_EAC_A8=0 BASISD_SUPPORT_ETC2_EAC_RG11=0)
 endif()
 
 if(HTV_WITH_AVIF)
@@ -148,7 +152,7 @@ if(HTV_WITH_JXL)
 endif()
 if(HTV_WITH_KTX)
     target_compile_definitions(htv_image PRIVATE HTV_HAVE_KTX)
-    target_link_libraries(htv_image PRIVATE ktx)
+    target_link_libraries(htv_image PRIVATE ktx_read)  # the read-only library, without the encoders
 endif()
 if(HTV_WITH_AVIF)
     target_compile_definitions(htv_image PRIVATE HTV_HAVE_AVIF)
