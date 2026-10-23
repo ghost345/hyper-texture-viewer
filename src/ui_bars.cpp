@@ -19,7 +19,8 @@ struct Readout {
     bool valid = false;       // a pixel is under the cursor (or locked)
     bool readable = false;    // its values could be read
     int x = 0, y = 0;
-    int tileX = -1, tileY = -1;  // which tile of the 3x3 preview
+    bool inTile = false;
+    int tileX = 0, tileY = 0;  // copy of the 3x3 preview relative to the original: -1, 0 or 1
     float raw[4] = {0, 0, 0, 1};      // stored values of the pixel
     float display[4] = {0, 0, 0, 1};  // as an sRGB colour in 0..1, before view adjustments
     float avgRaw[4] = {0, 0, 0, 1};   // averaged over the Avg area
@@ -71,8 +72,9 @@ Readout readPixelUnderCursor() {
         if (r.valid && app.tiling != Tiling::Off) {
             const float w = float(app.rotation & 1 ? app.image.height : app.image.width) * app.zoom;
             const float h = float(app.rotation & 1 ? app.image.width : app.image.height) * app.zoom;
-            r.tileX = int((app.mouseX - app.originX) / w);
-            r.tileY = int((app.mouseY - app.originY) / h);
+            r.inTile = true;
+            r.tileX = std::clamp(int(std::floor((app.mouseX - app.originX) / w)), -1, 1);
+            r.tileY = std::clamp(int(std::floor((app.mouseY - app.originY) / h)), -1, 1);
         }
     }
     if (!r.valid) return r;
@@ -96,6 +98,14 @@ Readout readPixelUnderCursor() {
 
 const char* kColorFormatNames[int(ColorFormat::Count)] = {"HTML", "Hex", "Delphi Hex", "VB Hex", "RGB",
                                                           "RGB Float", "HSV", "HSL", "Long"};
+// The longest text of each format, so the status row does not move as the value changes.
+const char* kColorFormatWidest[int(ColorFormat::Count)] = {
+    "#FFFFFF", "FFFFFF", "$00FFFFFF", "&H00FFFFFF&", "255, 255, 255", "0.000, 0.000, 0.000",
+    "360\xC2\xB0, 100%, 100%", "360\xC2\xB0, 100%, 100%", "16777215"};
+const char* kColorFormatTips[int(ColorFormat::Count)] = {
+    "HTML color", "Hex RGB", "Delphi hex: $00BBGGRR", "Visual Basic hex: &H00BBGGRR&", "RGB, 0-255",
+    "RGB as floats: stored values for float images, 0-1 for others", "Hue, saturation, value",
+    "Hue, saturation, lightness", "Long: BGR packed into one integer (Windows COLORREF)"};
 
 void hsvHsl(const float c[3], float& h, float& sv, float& v, float& sl, float& l) {
     const float mx = std::max({c[0], c[1], c[2]}), mn = std::min({c[0], c[1], c[2]}), d = mx - mn;
@@ -346,7 +356,8 @@ void fileGroup(Row& r, const TopLayout& L) {
     if (app.folderIndex >= 0 && L.counter) {
         char pos[32];
         std::snprintf(pos, sizeof pos, "%d / %d", app.folderIndex + 1, int(app.folder.size()));
-        r.text(pos, fontMono, 12, t.tx3, 0, 2);
+        r.field("counter", pos, fontMono, 12, t.tx3, "Position in the folder", nullptr);
+        r.x += S(2);
     }
 }
 
@@ -361,7 +372,7 @@ void viewGroup(Row& r, const TopLayout& L) {
         zoomCentered(1.0f);
     const std::string zoom = off ? std::string("\xE2\x80\x94") : formatZoom(app.zoom);
     ImRect zr;
-    toggleMenuOnPress(r.dropdown("zoom", zoom.c_str(), fontRegular, 12, 22, 7, 4, "Zoom", "Wheel", &zr, off), "zoom menu");
+    toggleMenuOnPress(r.dropdown("zoom", zoom.c_str(), fontRegular, 12, 22, 7, 4, "Zoom", "Wheel", &zr, off, "3200%"), "zoom menu");
     if (!r.measure && beginMenu("zoom menu", ImVec2(zr.Min.x, zr.Max.y + S(4)))) {
         zoomMenuItems();
         endMenu();
@@ -431,7 +442,8 @@ void channelsGroup(Row& r) {
     channelSwitch(r);
     ImRect tr;
     const std::string mode = textureModeLabel();
-    toggleMenuOnPress(r.dropdown("texmode", mode.c_str(), fontRegular, 12, 22, 7, 4, "Texture mode", nullptr, &tr, noImage()),
+    toggleMenuOnPress(r.dropdown("texmode", mode.c_str(), fontRegular, 12, 22, 7, 4, "Texture mode", nullptr, &tr, noImage(),
+                                 "Linear \xC2\xB7 Normal"),
                       "texmode menu");
     if (!r.measure && beginMenu("texmode menu", ImVec2(tr.Min.x, tr.Max.y + S(4)))) {
         textureMenuItems();
@@ -534,6 +546,9 @@ void rightGroup(Row& r, const TopLayout& L) {
                                "Window opacity", "Alt+Wheel"),
                       "opacity menu");
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
+    if (r.button("clickthrough", Icon::ClickThrough, nullptr, app.clickThrough ? kOn : 0,
+                 "Transparent to mouse: clicks go to the window below", "Ctrl+Shift+T"))
+        setClickThrough(!app.clickThrough);
     if (!L.compact) {
         if (r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
                      app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
@@ -595,10 +610,8 @@ void cycleAlphaBackground() {
     app.alphaBackground = AlphaBackground((int(app.alphaBackground) + 1) % int(AlphaBackground::Count));
 }
 
-void setTiling(Tiling t) {
-    app.tiling = t;
-    if (app.fit) fitToWindow();
-}
+// The original stays where it is and the copies appear around it.
+void setTiling(Tiling t) { app.tiling = t; }
 
 void copyColorValue() {
     if (!lastReadout.readable) return;
@@ -698,6 +711,19 @@ void topBar() {
 namespace {
 
 // 4 significant digits as in the design: 0.0625, 4.000, 48236.
+// Stored float values in the status row: four decimals, fewer as the integer part grows.
+std::string formatFloat(float v) {
+    char buf[32];
+    const float a = std::fabs(v);
+    if (!std::isfinite(v)) std::snprintf(buf, sizeof buf, "%s", std::isnan(v) ? "NaN" : v > 0 ? "+Inf" : "-Inf");
+    else if (a < 10.0f) std::snprintf(buf, sizeof buf, "%.4f", double(v));
+    else if (a < 100.0f) std::snprintf(buf, sizeof buf, "%.3f", double(v));
+    else if (a < 1000.0f) std::snprintf(buf, sizeof buf, "%.2f", double(v));
+    else if (a < 100000.0f) std::snprintf(buf, sizeof buf, "%.0f", double(v));
+    else std::snprintf(buf, sizeof buf, "%.2e", double(v));
+    return buf;
+}
+
 std::string formatValue(float v) {
     char buf[32];
     const float a = std::fabs(v);
@@ -711,9 +737,11 @@ std::string formatValue(float v) {
     return buf;
 }
 
-void label(ImDrawList* dl, float& x, float cy, const char* text, float gap) {
+void label(ImDrawList* dl, float& x, float cy, const char* text, float gap, const char* tip) {
     drawText(dl, fontMedium, 11, x, cy, T().tx3, text);
-    x += textSize(fontMedium, 11, text).x + gap;
+    const float w = textSize(fontMedium, 11, text).x;
+    tipArea(text, ImRect(ImVec2(x, cy - S(8)), ImVec2(x + w, cy + S(8))), tip);
+    x += w + gap;
 }
 
 void vs2(ImDrawList* dl, float& x, float cy, float gap) {
@@ -725,10 +753,7 @@ void vs2(ImDrawList* dl, float& x, float cy, float gap) {
 void gammaSlider(ImDrawList* dl, float& x, float cy, float width, float gap) {
     float g = (std::log2(app.gamma) + 2.0f) / 4.0f;
     bool reset = false;
-    if (slider(dl, "gamma", x, cy, width, g, 0.0f, &reset)) {
-        app.gamma = std::exp2(g * 4.0f - 2.0f);
-        if (std::fabs(app.gamma - 1.0f) < 0.03f) app.gamma = 1.0f;  // snaps to 1.00 at the centre
-    }
+    if (slider(dl, "gamma", x, cy, width, g, 0.0f, &reset, -1.0f, 0.5f)) app.gamma = std::exp2(g * 4.0f - 2.0f);
     if (reset) app.gamma = 1.0f;
     requestTip(ImRect(ImVec2(x, cy - S(8)), ImVec2(x + S(width), cy + S(8))), "Display gamma; double-click resets", nullptr,
                true);
@@ -736,7 +761,9 @@ void gammaSlider(ImDrawList* dl, float& x, float cy, float width, float gap) {
     char buf[16];
     std::snprintf(buf, sizeof buf, "%.2f", double(app.gamma));
     drawText(dl, fontMono, 12, x, cy, T().tx, buf);
-    x += textSize(fontMono, 12, buf).x + gap;
+    const float w = textSize(fontMono, 12, "0.00").x;
+    tipArea("gamma value", ImRect(ImVec2(x, cy - S(8)), ImVec2(x + w, cy + S(8))), "Display gamma");
+    x += w + gap;
 }
 
 // The Range control: black and white points on a log2 scale over the image's values, with the luminance
@@ -819,16 +846,30 @@ void rangeSlider(ImDrawList* dl, float x, float cy, float width) {
     knob(wx, hex(0xf2f2f2), t.knb);
 
     // Dragging moves the nearer point; a double click resets to 0 .. 1.
+    // The points stick to 0, 1.0 and the marks when dragged close to them (Alt drags freely).
     static int dragging = -1;
     ImGui::SetCursorScreenPos(ImVec2(x - S(4), top + S(8)));
     ImGui::InvisibleButton("range", ImVec2(w + S(8), S(28)));
-    const float mp = std::clamp((ImGui::GetIO().MousePos.x - x) / w, 0.0f, 1.0f);
+    const float mp = std::clamp((mouseClientX() - x) / w, 0.0f, 1.0f);
     if (ImGui::IsItemActivated()) dragging = std::fabs(mp * w - (bx - x)) <= std::fabs(mp * w - (wx - x)) ? 0 : 1;
-    if (ImGui::IsItemActive() && dragging >= 0) {
-        if (dragging == 0) app.blackPoint = std::min(valueAt(mp), app.whitePoint * 0.99f);
-        else app.whitePoint = std::max(valueAt(std::max(mp, 0.006f)), app.blackPoint * 1.01f + 1e-6f);
+    if (dragging >= 0 && !leftButtonHeld()) dragging = -1;
+    if (dragging >= 0) {
+        const float minMark = st.valid ? pos(st.minLuminance) : -1.0f, maxMark = st.valid ? pos(st.maxValue) : -1.0f;
+        const float peakMark = app.displayPeak > 0 ? pos(app.displayPeak) : -1.0f;
+        if (dragging == 0) {
+            const float p = snapPosition(mp, {0.0f, minMark, pos(1.0f)}, w);
+            app.blackPoint = std::min(p == pos(1.0f) ? 1.0f : p == minMark ? st.minLuminance : valueAt(p),
+                                      app.whitePoint * 0.99f);
+        } else {
+            const float p = snapPosition(mp, {pos(1.0f), peakMark, maxMark, minMark}, w);
+            const float v = p == pos(1.0f)   ? 1.0f
+                            : p == peakMark  ? app.displayPeak
+                            : p == maxMark   ? st.maxValue
+                            : p == minMark   ? st.minLuminance
+                                             : valueAt(std::max(p, 0.006f));
+            app.whitePoint = std::max(v, app.blackPoint * 1.01f + 1e-6f);
+        }
     }
-    if (ImGui::IsItemDeactivated()) dragging = -1;
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         app.blackPoint = 0.0f;
         app.whitePoint = 1.0f;
@@ -860,7 +901,7 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
                         gap + S(12) + gap + nanW + S(12);
     const float rangeW = std::clamp((W - fixed) / s, 120.0f, 520.0f);
 
-    label(dl, x, cy, "Exposure", gap);
+    label(dl, x, cy, "Exposure", gap, "Exposure in stops (EV): 2^EV multiplies the values before display");
     float e = (app.exposure + 10.0f) / 20.0f;
     bool reset = false;
     if (slider(dl, "exposure", x, cy, 180, e, 0.5f, &reset, 0.5f))
@@ -875,7 +916,7 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     x += S(70) + gap;
     vs2(dl, x, cy, gap);
 
-    label(dl, x, cy, "Range", gap);
+    label(dl, x, cy, "Range", gap, "Black and white points: values between them fill the display range");
     float black = app.blackPoint, white = app.whitePoint;
     if (numberField(dl, "black point", x, cy, 58, formatValue(app.blackPoint).c_str(), black, "Black point"))
         app.blackPoint = std::clamp(black, 0.0f, app.whitePoint * 0.99f);
@@ -896,11 +937,12 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     x = r.x;
     vs2(dl, x, cy, gap);
 
-    label(dl, x, cy, "Tone map", gap);
+    label(dl, x, cy, "Tone map", gap, "How values above the white point are compressed for display");
     r.x = x;
     ImRect tr;
     toggleMenuOnPress(r.dropdown("tonemap", kToneMapNames[int(app.toneMap)], fontRegular, 12, 22, 7, 4,
-                                 app.dataIsLinear ? "Tone mapping" : "Tone mapping applies to linear data", nullptr, &tr),
+                                 app.dataIsLinear ? "Tone mapping" : "Tone mapping applies to linear data", nullptr, &tr,
+                                 false, "Linear clip"),
                       "tonemap menu");
     if (beginMenu("tonemap menu", ImVec2(tr.Min.x, tr.Min.y - S(4)), ImVec2(0, 1))) {
         for (int i = 0; i < int(ToneMap::Count); ++i)
@@ -910,7 +952,7 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     x = r.x;
     vs2(dl, x, cy, gap);
 
-    label(dl, x, cy, "Gamma", gap);
+    label(dl, x, cy, "Gamma", gap, "Display gamma applied after everything else; 1.00 shows the image as is");
     gammaSlider(dl, x, cy, 70, gap);
     vs2(dl, x, cy, gap);
 
@@ -918,11 +960,14 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     if (r.button("clip", Icon::Clip, "Clip", app.showClipping ? kOn : 0, "Show clipping and NaN", "Z")) app.showClipping = !app.showClipping;
     x = r.x;
     const float sw = S(12);
+    const float nanX = x;
     dl->AddRectFilled(ImVec2(x, std::round(cy - sw * 0.5f)), ImVec2(x + sw, std::round(cy - sw * 0.5f) + sw), kNan);
     x += sw + gap;
     if (app.stats.valid) std::snprintf(buf, sizeof buf, "NaN %llu", static_cast<unsigned long long>(app.stats.nonFinite));
     else std::snprintf(buf, sizeof buf, "NaN \xE2\x80\x93");
     drawText(dl, fontMono, 11, x, cy, t.tx3, buf);
+    tipArea("nan", ImRect(ImVec2(nanX, cy - S(8)), ImVec2(x + textSize(fontMono, 11, buf).x, cy + S(8))),
+            "Pixels that are NaN or infinite; with Clip on they show in magenta");
 }
 
 // 8-bit images: Gamma only, 30 px.
@@ -931,12 +976,13 @@ void gammaRow(ImDrawList* dl, float y0, float W) {
     dl->AddRectFilled(ImVec2(0, y0 + h - line()), ImVec2(W, y0 + h), T().bd);
     const float cy = y0 + (h - line()) * 0.5f;
     float x = S(12);
-    label(dl, x, cy, "Gamma", S(8));
+    label(dl, x, cy, "Gamma", S(8), "Display gamma; 1.00 shows the image as is");
     gammaSlider(dl, x, cy, 160, S(8));
 }
 
 // Right side of the status row: texts separated by .vs, laid out from the right edge.
-void statusRight(ImDrawList* dl, float cy, float W, float leftEnd, const std::vector<std::pair<std::string, ImU32>>& items) {
+void statusRight(ImDrawList* dl, float cy, float W, float leftEnd, const std::vector<std::pair<std::string, ImU32>>& items,
+                 const std::vector<const char*>& tips = {}) {
     const float vsW = S(6) * 2 + line(), gap = S(6);
     float x = W - S(4);
     for (size_t i = items.size(); i-- > 0;) {
@@ -947,6 +993,11 @@ void statusRight(ImDrawList* dl, float cy, float W, float leftEnd, const std::ve
         const float tw = textSize(fontMono, 12, shown.c_str()).x;
         x -= tw;
         drawText(dl, fontMono, 12, x, cy, col, shown.c_str());
+        if (i < tips.size() && tips[i]) {
+            ImGui::PushID(int(i));
+            tipArea("status right", ImRect(ImVec2(x, cy - S(9)), ImVec2(x + tw, cy + S(9))), tips[i]);
+            ImGui::PopID();
+        }
         if (i > 0) {
             x -= gap + vsW;
             dl->AddRectFilled(ImVec2(x + S(6), std::round(cy - S(7))), ImVec2(x + S(6) + line(), std::round(cy - S(7)) + S(14)),
@@ -1013,65 +1064,73 @@ void statusRow(ImDrawList* dl, float y0, float W) {
     // Coordinates, padded to the image's digit count so the rest of the row stays put.
     const int digits = int(std::to_string(std::max(app.image.width, app.image.height)).size());
     char buf[96];
+    const float xyStart = r.x;
     r.text("X", fontMono, 12, t.tx3);
     std::snprintf(buf, sizeof buf, "%*s", digits, px.valid ? std::to_string(px.x).c_str() : "-");
     r.text(buf, fontMono, 12, t.tx);
     r.text("Y", fontMono, 12, t.tx3);
     std::snprintf(buf, sizeof buf, "%*s", digits, px.valid ? std::to_string(px.y).c_str() : "-");
     r.text(buf, fontMono, 12, t.tx);
-    if (px.tileX >= 0) {
-        std::snprintf(buf, sizeof buf, "tile %d,%d", px.tileX, px.tileY);
-        r.text(buf, fontMono, 12, t.tx3);
+    tipArea("xy", ImRect(ImVec2(xyStart, r.cy - S(9)), ImVec2(r.x - r.gap, r.cy + S(9))),
+            app.pixelLocked ? "Locked pixel, image coordinates" : "Pixel under the cursor, image coordinates", nullptr);
+    if (app.tiling != Tiling::Off) {
+        if (px.inTile) std::snprintf(buf, sizeof buf, "tile %d,%d", px.tileX, px.tileY);
+        else std::snprintf(buf, sizeof buf, "tile -");
+        r.field("tile", buf, fontMono, 12, t.tx3, "Copy of the tiling preview, relative to the original (0,0)", "tile -1,-1");
     }
     r.separator(14, 6);
 
     // Swatch and value; a click on the value copies it.
     const float sw = S(12);
-    auto swatch = [&](const float display[4], bool show) {
+    auto swatch = [&](const char* id, const float display[4], bool show, const char* tip) {
         const ImVec2 sa(r.x, std::round(r.cy - sw * 0.5f));
         if (show) dl->AddRectFilled(sa, ImVec2(sa.x + sw, sa.y + sw), swatchColor(display));
         dl->AddRect(sa, ImVec2(sa.x + sw, sa.y + sw), t.bd2, 0, 0, line());
+        tipArea(id, ImRect(sa, ImVec2(sa.x + sw, sa.y + sw)), tip);
         r.advance(sw);
     };
-    swatch(px.display, px.readable);
+    swatch("swatch", px.display, px.readable, "Color as displayed");
     const ImGuiID copyId = ImGui::GetID("##colorvalue");
-    if (px.readable) {
-        const std::string value = formatColor(px.display, px.raw, app.colorFormat);
-        const float vw = textSize(fontMono, 12, value.c_str()).x;
+    {
+        const std::string value = px.readable ? formatColor(px.display, px.raw, app.colorFormat) : std::string("-");
+        const float textW = textSize(fontMono, 12, value.c_str()).x;
+        const float vw = std::max(textW, textSize(fontMono, 12, kColorFormatWidest[int(app.colorFormat)]).x);
         const ImVec2 va(r.x, r.cy - S(10));
         ImGui::SetCursorScreenPos(va);
-        if (ImGui::InvisibleButton("value", ImVec2(vw, S(20)))) copyColorValue();
-        const bool hovered = ImGui::IsItemHovered();
-        requestTip(ImRect(va, ImVec2(r.x + vw, r.cy + S(10))), "Click to copy", "Ctrl+C", true);
-        if (copiedRecently(copyId)) {
-            r.text("Copied", fontMono, 12, t.ok);
-            r.x += std::max(0.0f, vw - textSize(fontMono, 12, "Copied").x);
+        if (ImGui::InvisibleButton("value", ImVec2(vw, S(20))) && px.readable) copyColorValue();
+        const bool hovered = ImGui::IsItemHovered() && px.readable;
+        std::snprintf(buf, sizeof buf, "%s \xC2\xB7 click to copy", kColorFormatTips[int(app.colorFormat)]);
+        requestTip(ImRect(va, ImVec2(r.x + vw, r.cy + S(10))), buf, "Ctrl+C", true);
+        if (px.readable && copiedRecently(copyId)) {
+            drawText(dl, fontMono, 12, r.x, r.cy, t.ok, "Copied");
         } else {
-            drawText(dl, fontMono, 12, r.x, r.cy, t.tx, value.c_str());
-            if (hovered) dl->AddRectFilled(ImVec2(r.x, r.cy + S(7)), ImVec2(r.x + vw, r.cy + S(7) + line()), t.tx3);
-            r.advance(vw);
+            drawText(dl, fontMono, 12, r.x, r.cy, px.readable ? t.tx : t.tx3, value.c_str());
+            if (hovered) dl->AddRectFilled(ImVec2(r.x, r.cy + S(7)), ImVec2(r.x + textW, r.cy + S(7) + line()), t.tx3);
         }
+        r.advance(vw);
         if (app.imageAlpha && !hdr) {
-            std::snprintf(buf, sizeof buf, "\xCE\xB1 %d", int(std::lround(std::clamp(px.raw[3], 0.0f, 1.0f) * 255)));
-            r.text(buf, fontMono, 12, t.tx3);
+            if (px.readable)
+                std::snprintf(buf, sizeof buf, "\xCE\xB1 %d", int(std::lround(std::clamp(px.raw[3], 0.0f, 1.0f) * 255)));
+            else
+                std::snprintf(buf, sizeof buf, "\xCE\xB1 -");
+            r.field("alpha", buf, fontMono, 12, t.tx3, "Alpha, 0-255", "\xCE\xB1 255");
         }
-    } else {
-        r.text("-", fontMono, 12, t.tx3);
     }
-    if (valueIsApproximate(px)) {
+    // The warning slot is always kept so the row does not jump when it appears.
+    {
         const ImVec2 wa(r.x, std::round(r.cy - S(7)));
-        drawIcon(dl, Icon::Warning, wa, S(14), t.warn);
-        ImGui::SetCursorScreenPos(wa);
-        ImGui::InvisibleButton("warn", ImVec2(S(14), S(14)));
-        std::snprintf(buf, sizeof buf, "%s %s", kColorFormatNames[int(app.colorFormat)],
-                      px.outOfRange ? "clips the value to 0-1 and rounds it to 8 bits" : "rounds the value to 8 bits");
-        requestTip(ImRect(wa, ImVec2(wa.x + S(14), wa.y + S(14))), buf, nullptr, true);
+        if (valueIsApproximate(px)) {
+            drawIcon(dl, Icon::Warning, wa, S(14), t.warn);
+            std::snprintf(buf, sizeof buf, "%s %s", kColorFormatNames[int(app.colorFormat)],
+                          px.outOfRange ? "clips the value to 0-1 and rounds it to 8 bits" : "rounds the value to 8 bits");
+            tipArea("warn", ImRect(wa, ImVec2(wa.x + S(14), wa.y + S(14))), buf);
+        }
         r.advance(S(14));
     }
 
     ImRect fr;
     toggleMenuOnPress(r.dropdown("colorfmt", kColorFormatNames[int(app.colorFormat)], fontRegular, 11, 18, 6, 3,
-                                 "Color value format", nullptr, &fr),
+                                 "Color value format", nullptr, &fr, false, "Delphi Hex"),
                       "colorfmt menu");
     if (beginMenu("colorfmt menu", ImVec2(fr.Min.x, fr.Min.y - S(4)), ImVec2(0, 1), S(300))) {
         menuHeading("Color format");
@@ -1089,30 +1148,34 @@ void statusRow(ImDrawList* dl, float y0, float W) {
     if (hdr) {
         // Exact values: float RGB in channel colours and luminance.
         r.separator(14, 6);
-        r.text("float", fontMono, 12, t.tx3);
+        r.field("float", "float", fontMono, 12, t.tx3, "Stored values, before exposure, range and tone mapping");
         const ImU32 channel[3] = {app.darkTheme ? hex(0xff8a80) : hex(0xc0322b), app.darkTheme ? hex(0x8fe39a) : hex(0x1e7f3e),
                                   app.darkTheme ? hex(0x8ab6ff) : hex(0x1f62d0)};
-        for (int c = 0; c < 3; ++c) {
-            std::snprintf(buf, sizeof buf, "%.4f", px.readable ? double(px.raw[c]) : 0.0);
-            r.text(px.readable ? buf : "-", fontMono, 12, channel[c]);
-        }
+        static const char* ids[3] = {"red", "green", "blue"};
+        static const char* tips[3] = {"Red, stored value", "Green, stored value", "Blue, stored value"};
+        for (int c = 0; c < 3; ++c)
+            r.field(ids[c], px.readable ? formatFloat(px.raw[c]).c_str() : "-", fontMono, 12, channel[c], tips[c], "-0.0000");
+        const float lum = 0.2126f * px.raw[0] + 0.7152f * px.raw[1] + 0.0722f * px.raw[2];
+        const float lumStart = r.x;
         r.text("L", fontMono, 12, t.tx3);
-        std::snprintf(buf, sizeof buf, "%.4f", double(0.2126f * px.raw[0] + 0.7152f * px.raw[1] + 0.0722f * px.raw[2]));
-        r.text(px.readable ? buf : "-", fontMono, 12, t.tx);
-        if (app.imageAlpha) {
-            std::snprintf(buf, sizeof buf, "\xCE\xB1 %.3g", double(px.raw[3]));
-            r.text(buf, fontMono, 12, t.tx3);
-        }
+        r.field("luma", px.readable ? formatFloat(lum).c_str() : "-", fontMono, 12, t.tx, nullptr, "-0.0000");
+        tipArea("luma tip", ImRect(ImVec2(lumStart, r.cy - S(9)), ImVec2(r.x - r.gap, r.cy + S(9))),
+                "Luminance (Rec. 709): 0.2126 R + 0.7152 G + 0.0722 B");
+        if (app.imageAlpha)
+            r.field("float alpha", px.readable ? ("\xCE\xB1 " + formatFloat(px.raw[3])).c_str() : "\xCE\xB1 -", fontMono, 12,
+                    t.tx3, "Alpha, stored value", "\xCE\xB1 0.0000");
     }
     if (r.button("copy", Icon::Copy, nullptr, px.readable ? 0 : kDisabled, "Copy value", "Ctrl+C", 14, 20)) copyColorValue();
     if (r.button("lock", Icon::Pin, nullptr, app.pixelLocked ? kOn : (px.valid ? 0 : kDisabled),
                  app.pixelLocked ? "Unlock pixel" : "Lock pixel", "Ctrl+Click", 14, 20))
         toggleLock(px);
     r.separator(14, 6);
-    r.text("Avg", fontMono, 12, t.tx3);
+    r.field("avg label", "Avg", fontMono, 12, t.tx3, "Average color over an area around the pixel");
     std::snprintf(buf, sizeof buf, "%d\xC3\x97%d", app.averageSize, app.averageSize);
     ImRect ar;
-    toggleMenuOnPress(r.dropdown("avg", buf, fontRegular, 11, 18, 6, 3, "Average over an area", nullptr, &ar), "avg menu");
+    toggleMenuOnPress(r.dropdown("avg", buf, fontRegular, 11, 18, 6, 3, "Average over an area", nullptr, &ar, false,
+                                 "5\xC3\x97" "5"),
+                      "avg menu");
     if (beginMenu("avg menu", ImVec2(ar.Min.x, ar.Min.y - S(4)), ImVec2(0, 1))) {
         for (int n : {1, 3, 5}) {
             char item[16];
@@ -1121,12 +1184,15 @@ void statusRow(ImDrawList* dl, float y0, float W) {
         }
         endMenu();
     }
-    if (app.averageSize > 1 && px.readable) {
-        swatch(px.avgDisplay, true);
-        r.text(formatColor(px.avgDisplay, px.avgRaw, ColorFormat::Html).c_str(), fontMono, 12, t.tx2);
+    if (app.averageSize > 1) {
+        std::snprintf(buf, sizeof buf, "Average of %d\xC3\x97%d pixels", app.averageSize, app.averageSize);
+        swatch("avg swatch", px.avgDisplay, px.readable, buf);
+        r.field("avg value", px.readable ? formatColor(px.avgDisplay, px.avgRaw, ColorFormat::Html).c_str() : "-", fontMono,
+                12, t.tx2, buf, "#FFFFFF");
     }
 
-    statusRight(dl, r.cy, W, r.x, {{imageDescription(), t.tx2}, {formatZoom(app.zoom), t.tx}, {formatBytes(app.fileSize), t.tx2}});
+    statusRight(dl, r.cy, W, r.x, {{imageDescription(), t.tx2}, {formatZoom(app.zoom), t.tx}, {formatBytes(app.fileSize), t.tx2}},
+                {"Image size, format and bit depth", "Zoom", "File size"});
 }
 
 }  // namespace

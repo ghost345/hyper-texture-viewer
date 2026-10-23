@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -116,16 +117,33 @@ struct Row {
     }
     bool button(const char* id, Icon icon, const char* label, int flags, const char* tip, const char* key,
                 float iconSize = 16, float height = 24, float padding = -1);
+    // `widest` is the longest value the dropdown can show: its width does not change with the value.
     bool dropdown(const char* id, const char* value, ImFont* f, float fontSize, float height, float padL, float padR,
-                  const char* tip, const char* key, ImRect* outRect = nullptr, bool disabled = false);
+                  const char* tip, const char* key, ImRect* outRect = nullptr, bool disabled = false,
+                  const char* widest = nullptr);
     void separator(float height, float margin, ImU32 color = 0);
     void text(const char* t, ImFont* f, float size, ImU32 col, float marginL = 0, float marginR = 0);
+    // Text with a tooltip that takes at least the width of `widest`, so changing values keep the row still.
+    void field(const char* id, const char* t, ImFont* f, float size, ImU32 col, const char* tip,
+               const char* widest = nullptr);
 };
+
+// A tooltip over a passive area such as a label or a swatch.
+void tipArea(const char* id, ImRect r, const char* text, const char* key = nullptr, bool above = true);
+
+// Dragging a control keeps working while the window changes under the mouse (opacity switches the
+// window to a layered one, which can drop ImGui's mouse state): these read the mouse from Windows.
+float mouseClientX();
+bool leftButtonHeld();
+// Snapping while dragging: `p` (0..1 along a control `widthPx` wide) moves to a target closer than 6 px.
+// Alt drags freely.
+float snapPosition(float p, std::initializer_list<float> targets, float widthPx);
 
 // Horizontal slider (.trk/.fill/.kn). `t` is the knob position 0..1, the fill runs from fillFrom to the knob.
 // `mark` (0..1, or < 0 for none) draws a tick at that position, e.g. the centre of the exposure slider.
+// `snap` (0..1, or < 0 for none) is a default the knob sticks to; the mark snaps too.
 bool slider(ImDrawList* dl, const char* id, float x, float cy, float width, float& t, float fillFrom, bool* reset,
-            float mark = -1.0f);
+            float mark = -1.0f, float snap = -1.0f);
 
 // Read-only number box (.num) that turns into a text field when clicked. Returns true when a value was entered.
 bool numberField(ImDrawList* dl, const char* id, float x, float cy, float width, const char* text, float& value,

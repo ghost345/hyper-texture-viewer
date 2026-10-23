@@ -58,6 +58,7 @@ const IconDef kIcons[int(Icon::Count)] = {
     /* Search */ {{{"M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM15.5 15.5L20 20", false}}},
     /* Clip */ {{{"M4 4h16v16H4z", false}, {"M4 12l8-8M4 20L20 4M12 20l8-8", false}}},
     /* Dismiss */ {{{"M6 6l12 12M18 6L6 18", false}}},
+    /* ClickThrough: a pointer with arrows going through it */ {{{"M7 3.5l10.5 6.2-4.6 1.2-2.3 4.4z", false}, {"M13.5 14.5l3 3M3.5 19.5l3-3", false}, {"M17 20.5h3.5V17", false}}},
 };
 
 // Minimal SVG path interpreter: M L H V A C Z and their relative forms, which is all the icon set uses.

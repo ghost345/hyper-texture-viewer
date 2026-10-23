@@ -182,7 +182,8 @@ bool uiKeyDown(int vk) {
             app.forcedMip = std::min(app.forcedMip + 1, std::max(app.textureMips - 1, 0));
             break;
         case 'T':
-            if (ctrl) setTopmost(!app.topmost);
+            if (ctrl && shift) setClickThrough(!app.clickThrough);
+            else if (ctrl) setTopmost(!app.topmost);
             else setTiling(Tiling((int(app.tiling) + 1) % 3));
             break;
 

@@ -334,9 +334,8 @@ void viewportOverlays() {
     const ImVec2 va(app.vpX, app.vpY), vb(app.vpX + app.vpW, app.vpY + app.vpH);
     dl->PushClipRect(va, vb);
     if (app.hasImage) {
-        float tw, th;
-        imageSizeOnScreen(tw, th);
-        const float x0 = app.originX, y0 = app.originY, x1 = x0 + tw * app.zoom, y1 = y0 + th * app.zoom;
+        float x0, y0, x1, y1;
+        shownArea(x0, y0, x1, y1);
         // Pixel grid every `gridStep` image pixels, once the cells are big enough to see.
         if (app.grid && app.gridStep * app.zoom >= S(4)) {
             const float stepPx = app.gridStep * app.zoom;
@@ -704,6 +703,7 @@ const std::vector<HelpGroup>& helpColumn(int c) {
          {"Window",
           {{"Always on top", {"Ctrl+T"}},
            {"Opacity", {"Alt+Wheel"}},
+           {"Transparent to mouse", {"Ctrl+Shift+T"}},
            {"Move window", {"Alt+drag"}},
            {"Settings", {"Ctrl+,"}},
            {"Keyboard shortcuts", {"F1"}},

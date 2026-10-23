@@ -188,6 +188,9 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             render();
             ValidateRect(hwnd, nullptr);
             return 0;
+        case WM_HOTKEY:
+            if (wp == kClickThroughHotkey) setClickThrough(false);
+            return 0;
         case WM_TIMER:
             if (wp == kWatchTimer) {
                 if (app.toastUntilMs > 0 && nowMs() > app.toastUntilMs) {
@@ -197,6 +200,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 checkFileChanged();
             } else if (wp == kLoadingTimer) {
                 checkFileChanged();  // updates the progress
+                redraw = true;
+            } else if (wp == kZebraTimer) {
                 redraw = true;
             }
             return 0;
@@ -371,10 +376,17 @@ void showOpenDialog() {
 void imageSizeOnScreen(float& w, float& h) {
     w = float(app.rotation & 1 ? app.image.height : app.image.width);
     h = float(app.rotation & 1 ? app.image.width : app.image.height);
-    if (app.tiling != Tiling::Off) {
-        w *= 3;
-        h *= 3;
-    }
+}
+
+// The origin is always the original image; tiling adds a copy on every side of it.
+void shownArea(float& x0, float& y0, float& x1, float& y1) {
+    float w, h;
+    imageSizeOnScreen(w, h);
+    const int around = app.tiling != Tiling::Off ? 1 : 0;
+    x0 = app.originX - around * w * app.zoom;
+    y0 = app.originY - around * h * app.zoom;
+    x1 = app.originX + (1 + around) * w * app.zoom;
+    y1 = app.originY + (1 + around) * h * app.zoom;
 }
 
 void fitToWindow() {
@@ -418,13 +430,13 @@ void rotate(int quarterTurns) {
 
 bool windowToPixel(float wx, float wy, int& x, int& y) {
     if (!app.hasImage) return false;
-    float tw, th;
-    imageSizeOnScreen(tw, th);
-    float u = std::floor((wx - app.originX) / app.zoom), v = std::floor((wy - app.originY) / app.zoom);
-    if (u < 0 || v < 0 || u >= tw || v >= th) return false;
+    float x0, y0, x1, y1;
+    shownArea(x0, y0, x1, y1);
+    if (wx < x0 || wy < y0 || wx >= x1 || wy >= y1) return false;
     const int sw = int(app.rotation & 1 ? app.image.height : app.image.width);
     const int sh = int(app.rotation & 1 ? app.image.width : app.image.height);
-    int du = int(u) % sw, dv = int(v) % sh;
+    const int u = int(std::floor((wx - x0) / app.zoom)), v = int(std::floor((wy - y0) / app.zoom));
+    int du = std::min(u, 3 * sw - 1) % sw, dv = std::min(v, 3 * sh - 1) % sh;
     if (app.flipH) du = sw - 1 - du;
     if (app.flipV) dv = sh - 1 - dv;
     switch (app.rotation) {
@@ -441,11 +453,9 @@ void setTopmost(bool on) {
     SetWindowPos(app.hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
-void setOpacity(float opacity) {
-    opacity = std::clamp(std::round(opacity * 20.0f) / 20.0f, 0.1f, 1.0f);
-    const bool wasLayered = app.opacity < 1.0f;
-    const bool layered = opacity < 1.0f;
-    app.opacity = opacity;
+// Opacity and click-through both need a layered window.
+static void applyLayering(bool wasLayered) {
+    const bool layered = app.opacity < 1.0f || app.clickThrough;
     if (layered != wasLayered) {
         // Flip-model swap chains do not compose with layered windows; switch presentation models.
         app.rtv.reset();
@@ -457,7 +467,27 @@ void setOpacity(float opacity) {
         createSwapChain(!layered);
         createRenderTarget();
     }
-    if (layered) SetLayeredWindowAttributes(app.hwnd, 0, BYTE(std::lround(opacity * 255)), LWA_ALPHA);
+    const LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+    const LONG_PTR wanted = app.clickThrough ? (ex | WS_EX_TRANSPARENT) : (ex & ~LONG_PTR(WS_EX_TRANSPARENT));
+    if (wanted != ex) SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, wanted);
+    if (layered) SetLayeredWindowAttributes(app.hwnd, 0, BYTE(std::lround(app.opacity * 255)), LWA_ALPHA);
+}
+
+void setOpacity(float opacity) {
+    const bool wasLayered = app.opacity < 1.0f || app.clickThrough;
+    app.opacity = std::clamp(std::round(opacity * 20.0f) / 20.0f, 0.1f, 1.0f);
+    applyLayering(wasLayered);
+}
+
+void setClickThrough(bool on) {
+    if (on == app.clickThrough) return;
+    const bool wasLayered = app.opacity < 1.0f || app.clickThrough;
+    app.clickThrough = on;
+    applyLayering(wasLayered);
+    // The window gets no mouse input while on, so a system-wide hotkey turns it off.
+    if (on) RegisterHotKey(app.hwnd, kClickThroughHotkey, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 'T');
+    else UnregisterHotKey(app.hwnd, kClickThroughHotkey);
+    redraw = true;
 }
 
 void toggleMaximize() { ShowWindow(app.hwnd, IsZoomed(app.hwnd) ? SW_RESTORE : SW_MAXIMIZE); }
@@ -533,6 +563,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     // A one-pixel sliver of DWM frame brings back the window shadow without drawing anything visible.
     const MARGINS shadow{0, 0, 1, 0};
     DwmExtendFrameIntoClientArea(app.hwnd, &shadow);
+    // Windows 11 draws a 1 px border around the frame; the bars already end the window. Older versions ignore it.
+    const DWORD noBorder = 0xFFFFFFFE;  // DWMWA_COLOR_NONE
+    DwmSetWindowAttribute(app.hwnd, 34 /* DWMWA_BORDER_COLOR */, &noBorder, sizeof(noBorder));
 
     std::string error;
     const double tDevice0 = nowMs();
@@ -564,7 +597,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     // Frames are drawn while something changes and for a moment after the last input, then the loop sleeps.
     MSG msg{};
     int exitCode = 0;
+    bool zebraTimer = false;
     for (;;) {
+        // The clipping stripes move, so they need frames while they are on screen (15 a second is plenty).
+        const bool zebra = app.showClipping && app.hasImage && isHighPrecision(app.image) && app.benchPath.empty();
+        if (zebra != zebraTimer) {
+            if (zebra) SetTimer(app.hwnd, kZebraTimer, 66, nullptr);
+            else KillTimer(app.hwnd, kZebraTimer);
+            zebraTimer = zebra;
+        }
         const bool active = nowMs() - lastInputMs < 1500.0 || app.dragging || app.loading;
         if (!active || IsIconic(app.hwnd)) WaitMessage();
         bool quit = false;

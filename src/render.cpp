@@ -40,7 +40,8 @@ cbuffer View : register(b0) {
     uint toneMap;          // 0 clip, 1 Reinhard, 2 ACES, 3 AgX
     uint clipping;         // zebra above the white point, magenta NaN and Inf
     float zebraWidth;      // target pixels per stripe
-    float2 padding;
+    float zebraPhase;      // the stripes crawl slowly so small clipped spots do not hide on a white stripe
+    float padding;
     float4 checker1;       // alpha background: checker colours (equal for a solid colour)
     float4 checker2;
     float4 background;     // viewport outside the image
@@ -139,7 +140,7 @@ float4 psMain(float4 pos : SV_Position) : SV_Target {
     if (transfer >= 1) rgb = srgbEncode(rgb);
     if (transfer >= 2) rgb = srgbEncode(rgb);
     rgb = pow(saturate(rgb), invGamma);
-    if (clipped) rgb = fmod(floor((pos.x + pos.y) / zebraWidth), 2) < 1 ? float3(0, 0, 0) : float3(1, 1, 1);
+    if (clipped) rgb = fmod(floor((pos.x + pos.y + zebraPhase) / zebraWidth), 2) < 1 ? float3(0, 0, 0) : float3(1, 1, 1);
 
     float2 cell = floor((pos.xy - imageOrigin) / checkerSize);
     float3 under = fmod(cell.x + cell.y, 2) < 1 ? checker1.rgb : checker2.rgb;
@@ -174,7 +175,8 @@ struct ViewConstants {
     uint32_t toneMap;
     uint32_t clipping;
     float zebraWidth;
-    float padding[2];  // checker1 starts a new 16-byte register
+    float zebraPhase;
+    float padding;  // checker1 starts a new 16-byte register
     float checker1[4];
     float checker2[4];
     float background[4];
@@ -217,6 +219,8 @@ ViewConstants makeConstants(float originX, float originY, float zoom, float tile
     c.toneMap = hdr && app.dataIsLinear ? uint32_t(app.toneMap) : 0u;
     c.clipping = hdr && app.showClipping ? 1u : 0u;
     c.zebraWidth = std::round(4 * app.scale);
+    // One stripe pair every two seconds; the period keeps the float exact over long sessions.
+    c.zebraPhase = float(std::fmod(nowMs() * 0.001 * c.zebraWidth, 2.0 * c.zebraWidth));
     if (app.alphaBackground == AlphaBackground::Checker) {
         c.checkerSize = checkerSize;
         for (int i = 0; i < 3; ++i) {
@@ -527,7 +531,9 @@ void render() {
     float clear[4] = {colors.viewport[0], colors.viewport[1], colors.viewport[2], 1.0f};
     app.context->ClearRenderTargetView(app.rtv.get(), clear);
     if (app.hasImage && app.srv) {
-        const ViewConstants c = makeConstants(app.originX, app.originY, app.zoom, app.tiling == Tiling::Off ? 1.0f : 3.0f,
+        float x0, y0, x1, y1;
+        shownArea(x0, y0, x1, y1);
+        const ViewConstants c = makeConstants(x0, y0, app.zoom, app.tiling == Tiling::Off ? 1.0f : 3.0f,
                                               std::round(kCheckerSizes[app.checkerSize] * app.scale), colors);
         // SV_Position is in window pixels whatever the viewport; the viewport only clips to the image area.
         D3D11_VIEWPORT vp{app.vpX, app.vpY, app.vpW, app.vpH, 0, 1};

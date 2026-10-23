@@ -443,8 +443,9 @@ bool Row::button(const char* id, Icon icon, const char* label, int flags, const 
 
 // Dropdown field (.dd): bordered box with a value and a chevron; accent border while its menu is open.
 bool Row::dropdown(const char* id, const char* value, ImFont* f, float fontSize, float height, float padL, float padR,
-                   const char* tip, const char* key, ImRect* outRect, bool disabled) {
-    const float w = line() + S(padL) + textSize(f, fontSize, value).x + S(5) + S(10) + S(padR) + line();
+                   const char* tip, const char* key, ImRect* outRect, bool disabled, const char* widest) {
+    const float textW = std::max(textSize(f, fontSize, value).x, widest ? textSize(f, fontSize, widest).x : 0.0f);
+    const float w = line() + S(padL) + textW + S(5) + S(10) + S(padR) + line();
     if (measure) {
         advance(w);
         return false;
@@ -486,15 +487,63 @@ void Row::text(const char* t, ImFont* f, float size, ImU32 col, float marginL, f
     x += gap;
 }
 
+void Row::field(const char* id, const char* t, ImFont* f, float size, ImU32 col, const char* tip, const char* widest) {
+    const float w = std::max(textSize(f, size, t).x, widest ? textSize(f, size, widest).x : 0.0f);
+    if (!measure) {
+        drawText(dl, f, size, x, cy, col, t);
+        if (tip) {
+            const ImRect r(ImVec2(x, cy - S(9)), ImVec2(x + w, cy + S(9)));
+            tipArea(id, r, tip, nullptr, !topBar);
+            hole(r);
+        }
+    }
+    advance(w);
+}
+
+void tipArea(const char* id, ImRect r, const char* text, const char* key, bool above) {
+    ImGui::SetCursorScreenPos(r.Min);
+    ImGui::InvisibleButton(id, ImVec2(std::max(1.0f, r.GetWidth()), std::max(1.0f, r.GetHeight())));
+    requestTip(r, text, key, above);
+}
+
+float mouseClientX() {
+    POINT p;
+    if (!GetCursorPos(&p) || !ScreenToClient(app.hwnd, &p)) return ImGui::GetIO().MousePos.x;
+    return float(p.x);
+}
+
+bool leftButtonHeld() {
+    return GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON) & 0x8000;
+}
+
+float snapPosition(float p, std::initializer_list<float> targets, float widthPx) {
+    if (GetKeyState(VK_MENU) & 0x8000) return p;
+    float best = p, bestDist = S(6);
+    for (float target : targets) {
+        const float d = std::fabs(p - target) * widthPx;
+        if (target >= 0 && d < bestDist) {
+            best = target;
+            bestDist = d;
+        }
+    }
+    return best;
+}
+
 bool slider(ImDrawList* dl, const char* id, float x, float cy, float width, float& t, float fillFrom, bool* reset,
-            float mark) {
+            float mark, float snap) {
     const Theme& th = T();
     const float w = S(width), knobW = S(8), knobH = S(16);
     ImGui::SetCursorScreenPos(ImVec2(x - knobW * 0.5f, std::round(cy - knobH * 0.5f)));
     ImGui::InvisibleButton(id, ImVec2(w + knobW, knobH));
+    // The drag follows the mouse button itself, not ImGui's active item (see mouseClientX).
+    static ImGuiID dragging = 0;
+    const ImGuiID self = ImGui::GetItemID();
+    if (ImGui::IsItemActivated()) dragging = self;
+    if (dragging == self && !leftButtonHeld()) dragging = 0;
     bool changed = false;
-    if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) || ImGui::IsItemActivated())) {
-        t = std::clamp((ImGui::GetIO().MousePos.x - x) / w, 0.0f, 1.0f);
+    if (dragging == self) {
+        const float p = std::clamp((mouseClientX() - x) / w, 0.0f, 1.0f);
+        t = snapPosition(p, {mark, snap}, w);
         changed = true;
     }
     if (reset) *reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);

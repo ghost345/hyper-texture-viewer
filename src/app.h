@@ -114,6 +114,7 @@ struct App {
     bool showBars = true;
     bool darkTheme = true;
     bool topmost = false;
+    bool clickThrough = false;  // "Transparent to mouse": clicks reach the windows below
     float opacity = 1.0f;
 
     // View: none of this ever changes the file.
@@ -135,7 +136,7 @@ struct App {
     bool flipH = false, flipV = false;
     AlphaBackground alphaBackground = AlphaBackground::Checker;
     int checkerSize = 0;  // 0, 1, 2: 8, 16 or 32 px cells
-    float customBackground[3] = {0.48f, 0.25f, 0.56f};
+    float customBackground[3] = {1.0f, 0.0f, 1.0f};  // magenta: stands out from any texture
     Tiling tiling = Tiling::Off;
     bool grid = false;
     int gridStep = 1;
@@ -186,9 +187,13 @@ void zoomCentered(float newZoom);
 void rotate(int quarterTurns);
 void setTopmost(bool on);
 void setOpacity(float opacity);
+// Clicks go through the window to whatever is below; Ctrl+Shift+T anywhere turns it off again.
+void setClickThrough(bool on);
 void toggleMaximize();
 void toggleBars();
-void imageSizeOnScreen(float& w, float& h);  // after rotation and tiling, in image pixels
+void imageSizeOnScreen(float& w, float& h);  // after rotation, in image pixels; one copy when tiling
+// The area the image covers in window pixels: the image itself, or the 3x3 tiling preview around it.
+void shownArea(float& x0, float& y0, float& x1, float& y1);
 // Image pixel under a window position, honouring rotation, flips and tiling. False outside the image.
 bool windowToPixel(float wx, float wy, int& x, int& y);
 
