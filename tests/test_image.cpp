@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -319,6 +320,36 @@ void testJxl() {
 #endif
 }
 
+void testAvif() {
+#ifdef HTV_HAVE_AVIF
+    auto load = [](const char* name) {
+        std::ifstream f(std::filesystem::path(HTV_AVIF_TEST_DATA) / name, std::ios::binary);
+        const Bytes bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        CHECK(!bytes.empty());
+        LoadResult r = loadImage(bytes.data(), bytes.size(), "avif");
+        if (!r.ok) std::printf("  %s: %s\n", name, r.error.c_str());
+        CHECK(r.ok);
+        return r;
+    };
+    LoadResult r = load("white_1x1.avif");
+    float px[4];
+    CHECK(r.image.format == GpuFormat::RGBA8Srgb);
+    CHECK(readPixel(r.image, 0, 0, px) && px[0] > 0.99f && px[1] > 0.99f && px[2] > 0.99f);
+
+    r = load("colors_sdr_srgb.avif");
+    CHECK(r.image.format == GpuFormat::RGBA8Srgb);
+
+    // PQ in BT.2020: linear half floats, brighter than SDR white.
+    r = load("colors_hdr_rec2020.avif");
+    CHECK(r.image.format == GpuFormat::RGBA16F);
+    CHECK(r.image.maxValue > 1.5f);
+    std::printf("  %s, max %.2f\n", r.image.description.c_str(), r.image.maxValue);
+    r = load("colors_hdr_p3.avif");
+    CHECK(r.image.format == GpuFormat::RGBA16F);
+    CHECK(r.image.description.find("Display P3") != std::string::npos);
+#endif
+}
+
 void testKtx() {
 #ifdef HTV_HAVE_KTX
     Bytes plain = makeKtx2(32, 16, false);
@@ -342,10 +373,10 @@ void testHdrTransfer() {
     // PQ code value 0.58 is about 203 nits, which is reference white (1.0).
     const float pq[4] = {0.5806f, 0.5806f, 0.5806f, 1.0f};
     uint16_t out[4];
-    encodedToLinearHalf(pq, 1, Transfer::Pq, false, out);
+    encodedToLinearHalf(pq, 1, Transfer::Pq, Primaries::Bt709, out);
     CHECK(std::fabs(halfToFloat(out[0]) - 1.0f) < 0.02f);
     const float srgb[4] = {0.5f, 0.5f, 0.5f, 0.5f};
-    encodedToLinearHalf(srgb, 1, Transfer::Srgb, false, out);
+    encodedToLinearHalf(srgb, 1, Transfer::Srgb, Primaries::Bt709, out);
     CHECK(std::fabs(halfToFloat(out[0]) - 0.214f) < 0.002f && halfToFloat(out[3]) == 0.5f);
 }
 
@@ -406,7 +437,7 @@ void testDds() {
 
 void testGarbage() {
     const uint8_t junk[64] = {1, 2, 3};
-    for (const char* ext : {"png", "exr", "dds", "hdr", "webp", "qoi"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
+    for (const char* ext : {"png", "exr", "dds", "hdr", "webp", "qoi", "jxl", "ktx2", "avif"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
 }
 
 bool writeFile(const std::filesystem::path& path, const Bytes& data) {
@@ -431,6 +462,14 @@ int main(int argc, char** argv) {
 #ifdef HTV_HAVE_KTX
                   writeFile(dir / "gradient_2048_uastc.ktx2", makeKtx2(2048, 2048, true)) &&
 #endif
+#ifdef HTV_HAVE_AVIF
+                  std::filesystem::copy_file(std::filesystem::path(HTV_AVIF_TEST_DATA) / "colors_hdr_rec2020.avif",
+                                             dir / "colors_hdr_rec2020.avif",
+                                             std::filesystem::copy_options::overwrite_existing) &&
+                  std::filesystem::copy_file(std::filesystem::path(HTV_AVIF_TEST_DATA) / "colors_sdr_srgb.avif",
+                                             dir / "colors_sdr_srgb.avif",
+                                             std::filesystem::copy_options::overwrite_existing) &&
+#endif
                   writeFile(dir / "spot_2048.hdr", makeHdr(2048, 2048)) &&
                   writeFile(dir / "spot_4096_half.exr", makeExr(4096, 4096, true)) &&
                   writeFile(dir / "spot_2048_float.exr", makeExr(2048, 2048, false)) &&
@@ -445,6 +484,7 @@ int main(int argc, char** argv) {
     testQoi();
     testJxl();
     testKtx();
+    testAvif();
     testHdrTransfer();
     testHdr();
     testExr();

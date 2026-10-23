@@ -15,10 +15,11 @@ LoadResult loadKtx(const uint8_t* data, size_t size);
 
 // HDR transfer functions shared by the AVIF and JPEG XL loaders.
 enum class Transfer { Linear, Srgb, Pq, Hlg };
+enum class Primaries { Bt709, Bt2020, DisplayP3 };
 
 // Converts encoded RGB(A) values in [0, 1] (or linear floats for Transfer::Linear) to linear light where
-// SDR reference white (203 nits for PQ and HLG) is 1.0, optionally converting BT.2020 primaries to BT.709,
+// SDR reference white (203 nits for PQ and HLG) is 1.0, converting BT.2020 or Display P3 primaries to BT.709,
 // and writes RGBA16F. Returns the brightest RGB value.
-float encodedToLinearHalf(const float* rgba, size_t pixels, Transfer transfer, bool bt2020, uint16_t* out);
+float encodedToLinearHalf(const float* rgba, size_t pixels, Transfer transfer, Primaries primaries, uint16_t* out);
 
 }  // namespace htv

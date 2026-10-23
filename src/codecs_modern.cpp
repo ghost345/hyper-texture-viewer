@@ -57,13 +57,20 @@ float hlgToScene(float e) {
     return e <= 0.5f ? e * e / 3.0f : (std::exp((e - c) / a) + b) / 12.0f;
 }
 
+[[maybe_unused]] const char* primariesName(Primaries p) {
+    return p == Primaries::Bt2020 ? ", BT.2020" : p == Primaries::DisplayP3 ? ", Display P3" : "";
+}
+
 constexpr float kReferenceWhiteNits = 203.0f;  // ITU-R BT.2408: HDR graphics white maps to 1.0
 
 }  // namespace
 
-float encodedToLinearHalf(const float* rgba, size_t pixels, Transfer transfer, bool bt2020, uint16_t* out) {
-    // BT.2020 -> BT.709 primaries (linear light).
-    const float m[3][3] = {{1.6605f, -0.5876f, -0.0728f}, {-0.1246f, 1.1329f, -0.0083f}, {-0.0182f, -0.1006f, 1.1187f}};
+float encodedToLinearHalf(const float* rgba, size_t pixels, Transfer transfer, Primaries primaries, uint16_t* out) {
+    // BT.2020 -> BT.709 and Display P3 -> BT.709 (linear light, D65).
+    static const float fromBt2020[3][3] = {
+        {1.6605f, -0.5876f, -0.0728f}, {-0.1246f, 1.1329f, -0.0083f}, {-0.0182f, -0.1006f, 1.1187f}};
+    static const float fromP3[3][3] = {{1.2249f, -0.2247f, 0.0f}, {-0.0420f, 1.0419f, 0.0f}, {-0.0197f, -0.0786f, 1.0979f}};
+    const float(*m)[3] = primaries == Primaries::Bt2020 ? fromBt2020 : primaries == Primaries::DisplayP3 ? fromP3 : nullptr;
     float brightest = 0.0f;
     for (size_t i = 0; i < pixels; ++i) {
         float c[3] = {};
@@ -82,7 +89,7 @@ float encodedToLinearHalf(const float* rgba, size_t pixels, Transfer transfer, b
             const float gain = 1000.0f * std::pow(std::max(ys, 1e-6f), 0.2f) / kReferenceWhiteNits;
             for (float& v : c) v *= gain;
         }
-        if (bt2020) {
+        if (m) {
             const float r = c[0], g = c[1], b = c[2];
             for (int k = 0; k < 3; ++k) c[k] = m[k][0] * r + m[k][1] * g + m[k][2] * b;
         }
@@ -125,7 +132,9 @@ LoadResult loadAvif(const uint8_t* data, size_t size) {
     const bool pq = im->transferCharacteristics == AVIF_TRANSFER_CHARACTERISTICS_PQ;
     const bool hlg = im->transferCharacteristics == AVIF_TRANSFER_CHARACTERISTICS_HLG;
     const bool linear = im->transferCharacteristics == AVIF_TRANSFER_CHARACTERISTICS_LINEAR;
-    const bool bt2020 = im->colorPrimaries == AVIF_COLOR_PRIMARIES_BT2020;
+    const Primaries primaries = im->colorPrimaries == AVIF_COLOR_PRIMARIES_BT2020  ? Primaries::Bt2020
+                                : im->colorPrimaries == AVIF_COLOR_PRIMARIES_SMPTE432 ? Primaries::DisplayP3
+                                                                                      : Primaries::Bt709;
 
     avifRGBImage rgb;
     avifRGBImageSetDefaults(&rgb, im);
@@ -146,16 +155,16 @@ LoadResult loadAvif(const uint8_t* data, size_t size) {
     img.width = im->width;
     img.height = im->height;
     const size_t pixels = size_t(im->width) * im->height;
-    if (pq || hlg || linear) {
-        // HDR: decode the transfer function to linear light and keep it as half floats.
+    if (pq || hlg || linear || primaries != Primaries::Bt709) {
+        // HDR or wide gamut: decode to linear BT.709 light and keep it as half floats.
         std::vector<float> encoded(pixels * 4);
         const float scale = rgb.depth == 16 ? 1.0f / 65535.0f : 1.0f / 255.0f;
         for (size_t i = 0; i < pixels * 4; ++i)
             encoded[i] = (rgb.depth == 16 ? reinterpret_cast<const uint16_t*>(buffer.data())[i] : buffer[i]) * scale;
         img.format = GpuFormat::RGBA16F;
         Surface s = surfaceFor(img.format, img.width, img.height);
-        img.maxValue = encodedToLinearHalf(encoded.data(), pixels,
-                                           pq ? Transfer::Pq : hlg ? Transfer::Hlg : Transfer::Linear, bt2020,
+        const Transfer transfer = pq ? Transfer::Pq : hlg ? Transfer::Hlg : linear ? Transfer::Linear : Transfer::Srgb;
+        img.maxValue = encodedToLinearHalf(encoded.data(), pixels, transfer, primaries,
                                            reinterpret_cast<uint16_t*>(s.data.data()));
         img.mips.push_back(std::move(s));
     } else {
@@ -165,7 +174,7 @@ LoadResult loadAvif(const uint8_t* data, size_t size) {
         img.mips.push_back(std::move(s));
     }
     img.description = "AVIF, " + std::to_string(im->depth) + " bit" + (pq ? ", PQ HDR" : hlg ? ", HLG HDR" : "") +
-                      (bt2020 ? ", BT.2020" : "") + (im->alphaPlane ? ", alpha" : "");
+                      primariesName(primaries) + (im->alphaPlane ? ", alpha" : "");
     if (decoder->imageCount > 1) img.note = "sequence: frame 1 of " + std::to_string(decoder->imageCount) + " shown";
     r.ok = true;
     return r;
@@ -203,7 +212,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
     JxlBasicInfo info{};
     bool hdr = false;
     Transfer transfer = Transfer::Srgb;
-    bool bt2020 = false;
+    Primaries primaries = Primaries::Bt709;
     JxlPixelFormat format{4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
     std::vector<float> floats;
     Image& img = r.image;
@@ -244,7 +253,9 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
                            : ce.transfer_function == JXL_TRANSFER_FUNCTION_HLG ? Transfer::Hlg
                            : ce.transfer_function == JXL_TRANSFER_FUNCTION_LINEAR ? Transfer::Linear
                                                                                   : Transfer::Srgb;
-                bt2020 = ce.primaries == JXL_PRIMARIES_2100;
+                primaries = ce.primaries == JXL_PRIMARIES_2100 ? Primaries::Bt2020
+                            : ce.primaries == JXL_PRIMARIES_P3 ? Primaries::DisplayP3
+                                                               : Primaries::Bt709;
                 if (transfer == Transfer::Pq || transfer == Transfer::Hlg) hdr = true;
             }
         } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
@@ -287,7 +298,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
     if (hdr) {
         img.format = GpuFormat::RGBA16F;
         s = surfaceFor(img.format, img.width, img.height);
-        img.maxValue = encodedToLinearHalf(floats.data(), size_t(img.width) * img.height, transfer, bt2020,
+        img.maxValue = encodedToLinearHalf(floats.data(), size_t(img.width) * img.height, transfer, primaries,
                                            reinterpret_cast<uint16_t*>(s.data.data()));
     }
     img.mips.push_back(std::move(s));

@@ -77,6 +77,63 @@ if(HTV_WITH_KTX)
     FetchContent_MakeAvailable(ktx)
 endif()
 
+if(HTV_WITH_AVIF)
+    # dav1d builds only with meson (and nasm for its assembly), so it is an external project feeding libavif.
+    find_program(HTV_MESON meson)
+    find_program(HTV_NINJA NAMES ninja ninja-build)
+    if(NOT HTV_MESON OR NOT HTV_NINJA)
+        message(FATAL_ERROR "AVIF support needs meson and ninja (pip install meson ninja), or -DHTV_WITH_AVIF=OFF")
+    endif()
+    FetchContent_Declare(dav1d
+        GIT_REPOSITORY https://github.com/videolan/dav1d.git
+        GIT_TAG 1.5.3
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(dav1d)  # no CMakeLists.txt: this only fetches the source
+
+    set(dav1d_install "${CMAKE_BINARY_DIR}/dav1d-install")
+    set(dav1d_meson_args --buildtype=release --default-library=static --prefix=${dav1d_install} --libdir=lib
+        -Denable_asm=true -Denable_tools=false -Denable_examples=false -Denable_tests=false)
+    set(dav1d_env)
+    if(MSVC)
+        # Meson finds Visual Studio itself; /MT matches this project's static runtime.
+        list(APPEND dav1d_meson_args --vsenv -Db_vscrt=static_from_buildtype)
+    elseif(CMAKE_CROSSCOMPILING)
+        set(dav1d_cross "${CMAKE_BINARY_DIR}/dav1d-cross.ini")
+        file(WRITE ${dav1d_cross} "[binaries]\nc = '${CMAKE_C_COMPILER}'\nar = '${CMAKE_AR}'\n"
+            "windres = '${CMAKE_RC_COMPILER}'\n[host_machine]\nsystem = 'windows'\ncpu_family = 'x86_64'\n"
+            "cpu = 'x86_64'\nendian = 'little'\n")
+        list(APPEND dav1d_meson_args --cross-file=${dav1d_cross})
+    else()
+        set(dav1d_env CC=${CMAKE_C_COMPILER})
+    endif()
+    include(ExternalProject)
+    ExternalProject_Add(dav1d_build
+        SOURCE_DIR ${dav1d_SOURCE_DIR}
+        BINARY_DIR ${CMAKE_BINARY_DIR}/dav1d-build
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ${dav1d_env} ${HTV_MESON} setup ${dav1d_meson_args} <BINARY_DIR> <SOURCE_DIR>
+        BUILD_COMMAND ${HTV_NINJA} -C <BINARY_DIR>
+        INSTALL_COMMAND ${HTV_NINJA} -C <BINARY_DIR> install
+        BUILD_BYPRODUCTS ${dav1d_install}/lib/libdav1d.a)
+    file(MAKE_DIRECTORY ${dav1d_install}/include)
+    add_library(dav1d::dav1d STATIC IMPORTED GLOBAL)
+    set_target_properties(dav1d::dav1d PROPERTIES IMPORTED_LOCATION ${dav1d_install}/lib/libdav1d.a)
+    target_include_directories(dav1d::dav1d INTERFACE ${dav1d_install}/include)
+    add_dependencies(dav1d::dav1d dav1d_build)
+
+    set(AVIF_CODEC_DAV1D SYSTEM CACHE STRING "" FORCE)  # the dav1d::dav1d target above
+    set(AVIF_LIBYUV OFF CACHE STRING "" FORCE)
+    set(AVIF_LIBSHARPYUV OFF CACHE STRING "" FORCE)
+    set(AVIF_LIBXML2 OFF CACHE STRING "" FORCE)
+    set(AVIF_ZLIBPNG OFF CACHE STRING "" FORCE)
+    set(AVIF_JPEG OFF CACHE STRING "" FORCE)
+    set(AVIF_BUILD_APPS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(libavif
+        GIT_REPOSITORY https://github.com/AOMediaCodec/libavif.git
+        GIT_TAG v1.4.2
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(libavif)
+endif()
+
 unset(BUILD_TESTING)
 
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
@@ -92,6 +149,10 @@ endif()
 if(HTV_WITH_KTX)
     target_compile_definitions(htv_image PRIVATE HTV_HAVE_KTX)
     target_link_libraries(htv_image PRIVATE ktx)
+endif()
+if(HTV_WITH_AVIF)
+    target_compile_definitions(htv_image PRIVATE HTV_HAVE_AVIF)
+    target_link_libraries(htv_image PRIVATE avif)
 endif()
 if(MSVC)
     # Third-party headers are compiled inside image.cpp; keep their warnings out of the log.
@@ -119,6 +180,10 @@ if(BUILD_TESTING)
     if(HTV_WITH_KTX)
         target_compile_definitions(htv_tests PRIVATE HTV_HAVE_KTX)
         target_link_libraries(htv_tests PRIVATE ktx)
+    endif()
+    if(HTV_WITH_AVIF)
+        # libavif's own test images; the tests have no AV1 encoder to make samples with.
+        target_compile_definitions(htv_tests PRIVATE HTV_HAVE_AVIF HTV_AVIF_TEST_DATA="${libavif_SOURCE_DIR}/tests/data")
     endif()
     if(MINGW)
         target_link_options(htv_tests PRIVATE -static)

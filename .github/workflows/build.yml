@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # dav1d (the AV1 decoder behind AVIF) builds with meson and uses nasm for its assembly.
+      - uses: ilammy/setup-nasm@v1
+      - name: Install meson
+        run: pip install meson ninja
+
       - name: Configure
         run: cmake -S . -B build -A x64
 
@@ -48,6 +53,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and test
         run: |
+          sudo apt-get install -y nasm
+          pip install meson ninja
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
