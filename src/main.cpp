@@ -722,6 +722,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
             file = argv[i];
     }
     LocalFree(argv);
+    app.path = file;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -735,15 +736,25 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
 
     app.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Hyper Texture Viewer", WS_OVERLAPPEDWINDOW,
                                CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, nullptr, instance, nullptr);
-    if (!app.hwnd) return 1;
+    // A start-up failure is reported in a message box, or in the benchmark file when benchmarking.
+    auto failStartup = [](const std::string& reason) {
+        app.error = reason;
+        if (!app.benchPath.empty()) {
+            writeBench(false);
+        } else {
+            const std::wstring msg = L"Cannot start Direct3D 11.\n" + widen(reason);
+            MessageBoxW(app.hwnd, msg.c_str(), L"Hyper Texture Viewer", MB_ICONERROR);
+        }
+        return 1;
+    };
+    if (!app.hwnd) return failStartup("cannot create the window");
 
     std::string error;
     const double tDevice0 = qpcMs();
-    if (!createDevice() || !createSwapChain() || !createRenderTarget() || !createPipeline(error)) {
-        const std::wstring msg = L"Cannot start Direct3D 11.\n" + widen(error);
-        if (app.benchPath.empty()) MessageBoxW(app.hwnd, msg.c_str(), L"Hyper Texture Viewer", MB_ICONERROR);
-        return 1;
-    }
+    if (!createDevice()) return failStartup("no Direct3D 11 device, not even WARP");
+    if (!createSwapChain()) return failStartup("cannot create the swap chain");
+    if (!createRenderTarget()) return failStartup("cannot create the render target");
+    if (!createPipeline(error)) return failStartup(error);
     app.tDevice = qpcMs() - tDevice0;
 
     RECT rc;
