@@ -140,7 +140,11 @@ float4 psMain(float4 pos : SV_Position) : SV_Target {
     if (transfer >= 1) rgb = srgbEncode(rgb);
     if (transfer >= 2) rgb = srgbEncode(rgb);
     rgb = pow(saturate(rgb), invGamma);
-    if (clipped) rgb = fmod(floor((pos.x + pos.y + zebraPhase) / zebraWidth), 2) < 1 ? float3(0, 0, 0) : float3(1, 1, 1);
+    if (clipped) {
+        // Integer stripe index: fmod on floats is emulated differently by each driver.
+        int stripe = int(floor((pos.x + pos.y + zebraPhase) / max(zebraWidth, 1.0)));
+        rgb = (stripe & 1) ? float3(1, 1, 1) : float3(0, 0, 0);
+    }
 
     float2 cell = floor((pos.xy - imageOrigin) / checkerSize);
     float3 under = fmod(cell.x + cell.y, 2) < 1 ? checker1.rgb : checker2.rgb;
@@ -218,9 +222,9 @@ ViewConstants makeConstants(float originX, float originY, float zoom, float tile
     c.rangeScale = hdr ? 1.0f / std::max(app.whitePoint - app.blackPoint, 1e-6f) : 1.0f;
     c.toneMap = hdr && app.dataIsLinear ? uint32_t(app.toneMap) : 0u;
     c.clipping = hdr && app.showClipping ? 1u : 0u;
-    c.zebraWidth = std::round(4 * app.scale);
+    c.zebraWidth = std::max(1.0f, std::round(4 * app.scale));
     // One stripe pair every two seconds; the period keeps the float exact over long sessions.
-    c.zebraPhase = float(std::fmod(nowMs() * 0.001 * c.zebraWidth, 2.0 * c.zebraWidth));
+    c.zebraPhase = float(std::floor(std::fmod(nowMs() * 0.001 * c.zebraWidth, 2.0 * c.zebraWidth)));
     if (app.alphaBackground == AlphaBackground::Checker) {
         c.checkerSize = checkerSize;
         for (int i = 0; i < 3; ++i) {

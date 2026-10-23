@@ -518,7 +518,7 @@ bool leftButtonHeld() {
 
 float snapPosition(float p, std::initializer_list<float> targets, float widthPx) {
     if (GetKeyState(VK_MENU) & 0x8000) return p;
-    float best = p, bestDist = S(6);
+    float best = p, bestDist = S(3);  // a mouse lands within a few pixels; more feels sticky
     for (float target : targets) {
         const float d = std::fabs(p - target) * widthPx;
         if (target >= 0 && d < bestDist) {
