@@ -6,13 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static C runtime: the exe runs without the Visual C++ Redistributable.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# Warnings for this project's own targets only (htv_warnings), so third-party noise stays out of the log.
+# Flags for this project's own targets only: third-party warnings stay out of the log, and libavif's
+# /source-charset:utf-8 clashes with a global /utf-8.
 if(MSVC)
-    add_compile_options(/utf-8)
     add_link_options($<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
-    set(htv_warnings /W4 /permissive-)
+    set(htv_options /W4 /utf-8 /permissive-)
 else()
-    set(htv_warnings -Wall -Wextra)
+    set(htv_options -Wall -Wextra)
 endif()
 
 # libwebp: only the libraries, none of its command-line tools.
@@ -146,7 +146,7 @@ unset(BUILD_TESTING)
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
 find_package(Threads REQUIRED)
 add_library(htv_image STATIC src/image.cpp)
-target_compile_options(htv_image PRIVATE ${htv_warnings})
+target_compile_options(htv_image PRIVATE ${htv_options})
 target_include_directories(htv_image PUBLIC src third_party)
 target_sources(htv_image PRIVATE src/codecs_modern.cpp)
 target_link_libraries(htv_image PUBLIC Threads::Threads PRIVATE webpdemux webp)
@@ -169,7 +169,7 @@ endif()
 
 if(WIN32)
     add_executable(hyper-texture-viewer WIN32 src/main.cpp src/wic_loader.cpp)
-    target_compile_options(hyper-texture-viewer PRIVATE ${htv_warnings})
+    target_compile_options(hyper-texture-viewer PRIVATE ${htv_options})
     target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE)
     target_link_libraries(hyper-texture-viewer PRIVATE htv_image d3d11 dxgi shlwapi windowscodecs ole32)
     if(MINGW)
@@ -180,7 +180,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(htv_tests tests/test_image.cpp)
-    target_compile_options(htv_tests PRIVATE ${htv_warnings})
+    target_compile_options(htv_tests PRIVATE ${htv_options})
     # The tests encode WebP samples, so they link libwebp's encoder too.
     target_link_libraries(htv_tests PRIVATE htv_image webp)
     if(HTV_WITH_JXL)
