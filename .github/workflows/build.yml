@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Startup benchmark
+        shell: pwsh
+        run: |
+          build/Release/htv_tests.exe --write-samples samples
+          $exe = "build/Release/hyper-texture-viewer.exe"
+          $failed = $false
+          foreach ($f in Get-ChildItem samples) {
+            $p = Start-Process $exe -ArgumentList "--bench", "bench.txt", "`"$($f.FullName)`"" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Write-Host "FAILED: $($f.Name)"; $failed = $true }
+          }
+          Get-Content bench.txt
+          "exe size: {0:N0} bytes" -f (Get-Item $exe).Length
+          if ($failed) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyper-texture-viewer
+          path: |
+            build/Release/hyper-texture-viewer.exe
+            bench.txt
+
+  loader-tests:
+    # The loaders are platform independent; run them with sanitizers to catch memory errors in file parsing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
