@@ -32,6 +32,7 @@ All shortcuts are listed in the app under F1. The most used:
 | Ctrl+A, `Z` | Auto range, show clipping |
 | Ctrl + click, Ctrl+C | Lock the readout to a pixel, copy its value |
 | `T`, Shift+A, Shift+L, `N` | Tiling, alpha background, sRGB/linear, normal map mode |
+| Right drag, Alt + drag | Move the window |
 | Tab, `I`, F1 | Hide bars, info panel, shortcuts |
 | Ctrl+O, Ctrl+V, F5 | Open, paste from clipboard, reload |
 | Esc | Close a panel or quit |

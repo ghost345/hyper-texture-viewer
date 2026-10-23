@@ -114,6 +114,19 @@ void startDrag(LPARAM lp) {
     SetCapture(app.hwnd);
 }
 
+// Right drag anywhere moves the window: the top bar leaves little empty space to grab.
+bool movingWindow = false;
+POINT moveCursorStart{};
+RECT moveWindowStart{};
+
+void startWindowMove() {
+    if (IsZoomed(app.hwnd)) return;
+    movingWindow = true;
+    GetCursorPos(&moveCursorStart);
+    GetWindowRect(app.hwnd, &moveWindowStart);
+    if (GetCapture() != app.hwnd) SetCapture(app.hwnd);  // ImGui may hold it already
+}
+
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
     if ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
@@ -246,6 +259,25 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             startDrag(lp);
             return 0;
+        case WM_RBUTTONDOWN:
+            startWindowMove();
+            return 0;
+        case WM_NCRBUTTONDOWN:
+            if (wp != HTCAPTION) break;
+            startWindowMove();
+            return 0;
+        case WM_RBUTTONUP:
+            if (movingWindow) {
+                movingWindow = false;
+                ReleaseCapture();
+            }
+            return 0;
+        case WM_CAPTURECHANGED:
+            if (reinterpret_cast<HWND>(lp) != hwnd) {  // lost to another window, not re-taken by this one
+                movingWindow = false;
+                app.dragging = false;
+            }
+            break;
         case WM_MBUTTONDOWN:
             if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
             startDrag(lp);
@@ -263,6 +295,14 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             fitToWindow();
             return 0;
         case WM_MOUSEMOVE:
+            if (movingWindow) {
+                POINT p;
+                GetCursorPos(&p);
+                SetWindowPos(hwnd, nullptr, moveWindowStart.left + p.x - moveCursorStart.x,
+                             moveWindowStart.top + p.y - moveCursorStart.y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                return 0;
+            }
             app.mouseX = GET_X_LPARAM(lp);
             app.mouseY = GET_Y_LPARAM(lp);
             if (app.dragging) {

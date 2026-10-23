@@ -704,7 +704,7 @@ const std::vector<HelpGroup>& helpColumn(int c) {
           {{"Always on top", {"Ctrl+T"}},
            {"Opacity", {"Alt+Wheel"}},
            {"Transparent to mouse", {"Ctrl+Shift+T"}},
-           {"Move window", {"Alt+drag"}},
+           {"Move window", {"Right drag", "Alt+drag"}},
            {"Settings", {"Ctrl+,"}},
            {"Keyboard shortcuts", {"F1"}},
            {"Close", {"Esc", "Ctrl+W"}}}}},
