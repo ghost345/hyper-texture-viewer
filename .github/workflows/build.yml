@@ -55,7 +55,7 @@ jobs:
         run: |
           sudo apt-get install -y nasm
           pip install meson ninja
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHTV_SANITIZE=address,undefined
           # Only what the tests need, with bounded parallelism: an unbounded make -j runs the runner out of memory.
           cmake --build build --parallel 4 --target htv_tests
           ctest --test-dir build --output-on-failure

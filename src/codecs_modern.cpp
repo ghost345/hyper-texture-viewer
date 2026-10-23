@@ -395,6 +395,13 @@ LoadResult loadKtx(const uint8_t* data, size_t size) {
     return unavailable("KTX");
 #else
     LoadResult r;
+    // libktx leaks its memory stream when the identifier is wrong, so check it first.
+    static const uint8_t ktx1[12] = {0xAB, 'K', 'T', 'X', ' ', '1', '1', 0xBB, '\r', '\n', 0x1A, '\n'};
+    static const uint8_t ktx2[12] = {0xAB, 'K', 'T', 'X', ' ', '2', '0', 0xBB, '\r', '\n', 0x1A, '\n'};
+    if (size < 12 || (std::memcmp(data, ktx1, 12) != 0 && std::memcmp(data, ktx2, 12) != 0)) {
+        r.error = "not a KTX file";
+        return r;
+    }
     ktxTexture* tex = nullptr;
     KTX_error_code err =
         ktxTexture_CreateFromMemory(data, size, KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &tex);

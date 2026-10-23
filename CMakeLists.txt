@@ -14,6 +14,12 @@ if(MSVC)
 else()
     set(htv_options -Wall -Wextra)
 endif()
+# Sanitizers for this project's code (including the single-header decoders in image.cpp), e.g. "address,undefined".
+# The fetched libraries stay uninstrumented: their own sanitizer findings are theirs to fix.
+set(HTV_SANITIZE "" CACHE STRING "Comma-separated -fsanitize= list for the loaders and tests")
+if(HTV_SANITIZE)
+    list(APPEND htv_options -fsanitize=${HTV_SANITIZE} -fno-sanitize-recover=all)
+endif()
 
 # libwebp: only the libraries, none of its command-line tools.
 include(FetchContent)
@@ -181,6 +187,9 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(htv_tests tests/test_image.cpp)
     target_compile_options(htv_tests PRIVATE ${htv_options})
+    if(HTV_SANITIZE)
+        target_link_options(htv_tests PRIVATE -fsanitize=${HTV_SANITIZE})
+    endif()
     # The tests encode WebP samples, so they link libwebp's encoder too.
     target_link_libraries(htv_tests PRIVATE htv_image webp)
     if(HTV_WITH_JXL)
