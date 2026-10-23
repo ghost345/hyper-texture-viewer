@@ -134,7 +134,7 @@ cbuffer View : register(b0) {
     uint channelMode;      // 0 RGBA, 1 R, 2 G, 3 B, 4 A, 5 RGB without alpha
     uint channels;         // channels the texture format stores
     uint encodeSrgb;       // sampled values are linear light
-    uint snorm;
+    uint signedValues;     // snorm data in [-1, 1]
     float2 pad;
     float4 background;
 };
@@ -167,7 +167,7 @@ float4 psMain(float4 pos : SV_Position) : SV_Target {
         float2 g = 1.0 / (zoom * imageSize);
         c = tex.SampleGrad(trilinear, uv, float2(g.x, 0), float2(0, g.y));
     }
-    if (snorm) c.rgb = c.rgb * 0.5 + 0.5;
+    if (signedValues) c.rgb = c.rgb * 0.5 + 0.5;
     if (channels == 1) c = float4(c.rrr, 1);
     else if (channels == 2) c = float4(c.rg, 0, 1);
 
@@ -199,7 +199,7 @@ struct ViewConstants {
     uint32_t channelMode;
     uint32_t channels;
     uint32_t encodeSrgb;
-    uint32_t snorm;
+    uint32_t signedValues;
     float pad[2];
     float background[4];
 };
@@ -530,7 +530,7 @@ void render() {
             c.channelMode = uint32_t(app.channelMode);
             c.channels = uint32_t(info.channels);
             c.encodeSrgb = info.linear ? 1u : 0u;
-            c.snorm = info.snorm ? 1u : 0u;
+            c.signedValues = info.snorm ? 1u : 0u;
             for (int i = 0; i < 4; ++i) c.background[i] = bg[i];
             *static_cast<ViewConstants*>(m.pData) = c;
             app.context->Unmap(app.constants.get(), 0);
