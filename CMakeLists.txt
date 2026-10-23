@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HyperTextureViewer LANGUAGES CXX)
+project(HyperTextureViewer LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,11 +31,68 @@ FetchContent_Declare(libwebp
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(libwebp)
 
+option(HTV_WITH_JXL "Build the JPEG XL decoder (libjxl)" ON)
+option(HTV_WITH_KTX "Build the KTX/KTX2 decoder (libktx with Basis Universal)" ON)
+option(HTV_WITH_AVIF "Build the AVIF decoder (libavif with dav1d; needs meson and nasm)" ON)
+
+# Third-party test suites stay out of the build: a normal variable shadows the cache entry while they configure.
+set(BUILD_TESTING OFF)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+if(HTV_WITH_JXL)
+    set(JPEGXL_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_JPEGLI OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_DOXYGEN OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_MANPAGES OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_BENCHMARK OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_JNI OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_SJPEG OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_OPENEXR OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_TRANSCODE_JPEG OFF CACHE BOOL "" FORCE)
+    set(JPEGXL_ENABLE_SKCMS OFF CACHE BOOL "" FORCE)  # lcms2 instead; both are bundled
+    set(JPEGXL_BUNDLE_LIBPNG OFF CACHE BOOL "" FORCE)
+    # JPEGXL_STATIC would inject "-Wl,-Bdynamic" into MinGW links; BUILD_SHARED_LIBS OFF is enough.
+    set(JPEGXL_STATIC OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(libjxl
+        GIT_REPOSITORY https://github.com/libjxl/libjxl.git
+        GIT_TAG v0.11.1
+        GIT_SHALLOW TRUE
+        GIT_SUBMODULES third_party/brotli third_party/highway third_party/lcms)
+    FetchContent_MakeAvailable(libjxl)
+endif()
+
+if(HTV_WITH_KTX)
+    set(KTX_FEATURE_TESTS OFF CACHE BOOL "" FORCE)
+    set(KTX_FEATURE_TOOLS OFF CACHE BOOL "" FORCE)
+    set(KTX_FEATURE_DOC OFF CACHE BOOL "" FORCE)
+    set(KTX_FEATURE_GL_UPLOAD OFF CACHE BOOL "" FORCE)
+    set(KTX_FEATURE_VK_UPLOAD OFF CACHE BOOL "" FORCE)
+    set(KTX_FEATURE_LOADTEST_APPS "" CACHE STRING "" FORCE)
+    FetchContent_Declare(ktx
+        GIT_REPOSITORY https://github.com/KhronosGroup/KTX-Software.git
+        GIT_TAG v4.4.2
+        GIT_SHALLOW TRUE
+        GIT_SUBMODULES "")
+    FetchContent_MakeAvailable(ktx)
+endif()
+
+unset(BUILD_TESTING)
+
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
 find_package(Threads REQUIRED)
 add_library(htv_image STATIC src/image.cpp)
 target_include_directories(htv_image PUBLIC src third_party)
+target_sources(htv_image PRIVATE src/codecs_modern.cpp)
 target_link_libraries(htv_image PUBLIC Threads::Threads PRIVATE webpdemux webp)
+if(HTV_WITH_JXL)
+    target_compile_definitions(htv_image PRIVATE HTV_HAVE_JXL)
+    target_link_libraries(htv_image PRIVATE jxl jxl_threads)
+endif()
+if(HTV_WITH_KTX)
+    target_compile_definitions(htv_image PRIVATE HTV_HAVE_KTX)
+    target_link_libraries(htv_image PRIVATE ktx)
+endif()
 if(MSVC)
     # Third-party headers are compiled inside image.cpp; keep their warnings out of the log.
     set_source_files_properties(src/image.cpp PROPERTIES COMPILE_OPTIONS "/W1")
@@ -55,6 +112,14 @@ if(BUILD_TESTING)
     add_executable(htv_tests tests/test_image.cpp)
     # The tests encode WebP samples, so they link libwebp's encoder too.
     target_link_libraries(htv_tests PRIVATE htv_image webp)
+    if(HTV_WITH_JXL)
+        target_compile_definitions(htv_tests PRIVATE HTV_HAVE_JXL)
+        target_link_libraries(htv_tests PRIVATE jxl)
+    endif()
+    if(HTV_WITH_KTX)
+        target_compile_definitions(htv_tests PRIVATE HTV_HAVE_KTX)
+        target_link_libraries(htv_tests PRIVATE ktx)
+    endif()
     if(MINGW)
         target_link_options(htv_tests PRIVATE -static)
     endif()

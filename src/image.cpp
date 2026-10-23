@@ -1,5 +1,7 @@
 #include "image.h"
 
+#include "codecs.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -553,8 +555,21 @@ const FormatInfo& formatInfo(GpuFormat format) {
 }
 
 const std::vector<std::string>& supportedExtensions() {
-    static const std::vector<std::string> list = {"exr", "dds", "hdr", "png", "jpg", "jpeg", "webp", "qoi", "tga",
-                                                  "bmp", "psd", "gif", "pic", "pnm", "ppm", "pgm"};
+    static const std::vector<std::string> list = [] {
+        std::vector<std::string> l = {"exr", "dds", "hdr", "png", "jpg", "jpeg", "webp", "qoi", "tga",
+                                      "bmp", "psd", "gif", "pic", "pnm", "ppm", "pgm"};
+#ifdef HTV_HAVE_AVIF
+        l.push_back("avif");
+#endif
+#ifdef HTV_HAVE_JXL
+        l.push_back("jxl");
+#endif
+#ifdef HTV_HAVE_KTX
+        l.push_back("ktx");
+        l.push_back("ktx2");
+#endif
+        return l;
+    }();
     return list;
 }
 
@@ -572,6 +587,9 @@ LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extens
     if (extension == "dds") return loadDds(data, size);
     if (extension == "webp") return loadWebp(data, size);
     if (extension == "qoi") return loadQoi(data, size);
+    if (extension == "avif") return loadAvif(data, size);
+    if (extension == "jxl") return loadJxl(data, size);
+    if (extension == "ktx" || extension == "ktx2") return loadKtx(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
     return r;
 }

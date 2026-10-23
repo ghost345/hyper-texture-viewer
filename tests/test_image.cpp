@@ -10,12 +10,20 @@
 #include <string>
 #include <vector>
 
+#include "codecs.h"
 #include "image.h"
 #include "stb_image_write.h"
 #include "qoi.h"
 #include "tinyexr.h"
 
 #include <webp/encode.h>
+
+#ifdef HTV_HAVE_JXL
+#include <jxl/encode.h>
+#endif
+#ifdef HTV_HAVE_KTX
+#include <ktx.h>
+#endif
 
 using namespace htv;
 
@@ -116,6 +124,90 @@ Bytes makeExr(int w, int h, bool half) {
     return out;
 }
 
+#ifdef HTV_HAVE_JXL
+// Lossless JPEG XL: 8-bit sRGB from testPixels, or 32-bit float linear from hdrPixels.
+Bytes makeJxl(int w, int h, bool hdr) {
+    JxlEncoder* enc = JxlEncoderCreate(nullptr);
+    JxlBasicInfo info;
+    JxlEncoderInitBasicInfo(&info);
+    info.xsize = uint32_t(w);
+    info.ysize = uint32_t(h);
+    info.num_color_channels = 3;
+    info.num_extra_channels = 1;
+    info.alpha_bits = hdr ? 32 : 8;
+    info.alpha_exponent_bits = hdr ? 8 : 0;
+    info.bits_per_sample = hdr ? 32 : 8;
+    info.exponent_bits_per_sample = hdr ? 8 : 0;
+    info.uses_original_profile = JXL_TRUE;
+    JxlEncoderSetBasicInfo(enc, &info);
+    JxlColorEncoding color;
+    if (hdr)
+        JxlColorEncodingSetToLinearSRGB(&color, JXL_FALSE);
+    else
+        JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    JxlEncoderSetColorEncoding(enc, &color);
+    JxlEncoderFrameSettings* settings = JxlEncoderFrameSettingsCreate(enc, nullptr);
+    JxlEncoderSetFrameLossless(settings, JXL_TRUE);
+    std::vector<float> f = hdrPixels(w, h);
+    std::vector<uint8_t> b = testPixels(w, h);
+    JxlPixelFormat format{4, hdr ? JXL_TYPE_FLOAT : JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+    if (hdr)
+        JxlEncoderAddImageFrame(settings, &format, f.data(), f.size() * sizeof(float));
+    else
+        JxlEncoderAddImageFrame(settings, &format, b.data(), b.size());
+    JxlEncoderCloseInput(enc);
+    Bytes out(1 << 16);
+    uint8_t* next = out.data();
+    size_t avail = out.size();
+    JxlEncoderStatus st;
+    while ((st = JxlEncoderProcessOutput(enc, &next, &avail)) == JXL_ENC_NEED_MORE_OUTPUT) {
+        const size_t used = size_t(next - out.data());
+        out.resize(out.size() * 2);
+        next = out.data() + used;
+        avail = out.size() - used;
+    }
+    out.resize(st == JXL_ENC_SUCCESS ? size_t(next - out.data()) : 0);
+    JxlEncoderDestroy(enc);
+    return out;
+}
+#endif
+
+#ifdef HTV_HAVE_KTX
+// KTX2 with an RGBA8 sRGB image, optionally Basis Universal (UASTC) compressed.
+Bytes makeKtx2(int w, int h, bool basis) {
+    ktxTextureCreateInfo ci{};
+    ci.vkFormat = 43;  // VK_FORMAT_R8G8B8A8_SRGB
+    ci.baseWidth = uint32_t(w);
+    ci.baseHeight = uint32_t(h);
+    ci.baseDepth = 1;
+    ci.numDimensions = 2;
+    ci.numLevels = 1;
+    ci.numLayers = 1;
+    ci.numFaces = 1;
+    ktxTexture2* tex = nullptr;
+    if (ktxTexture2_Create(&ci, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &tex) != KTX_SUCCESS) return {};
+    std::vector<uint8_t> px = testPixels(w, h);
+    ktxTexture_SetImageFromMemory(ktxTexture(tex), 0, 0, 0, px.data(), px.size());
+    if (basis) {
+        ktxBasisParams params{};
+        params.structSize = sizeof(params);
+        params.uastc = KTX_TRUE;
+        params.threadCount = 1;
+        if (ktxTexture2_CompressBasisEx(tex, &params) != KTX_SUCCESS) {
+            ktxTexture_Destroy(ktxTexture(tex));
+            return {};
+        }
+    }
+    ktx_uint8_t* data = nullptr;
+    ktx_size_t size = 0;
+    ktxTexture_WriteToMemory(ktxTexture(tex), &data, &size);
+    Bytes out(data, data + size);
+    free(data);
+    ktxTexture_Destroy(ktxTexture(tex));
+    return out;
+}
+#endif
+
 // DDS with a full mip chain of BC1 blocks (legacy header) or 16-byte blocks of `dx10` (DX10 header).
 Bytes makeDds(uint32_t w, uint32_t h, bool bc7, GpuFormat dx10 = GpuFormat::BC7Srgb) {
     uint32_t levels = 1;
@@ -204,6 +296,59 @@ void testQoi() {
     CHECK(r.image.mips[0].data == testPixels(40, 30));
 }
 
+void testJxl() {
+#ifdef HTV_HAVE_JXL
+    Bytes sdr = makeJxl(32, 16, false);
+    CHECK(!sdr.empty());
+    LoadResult r = loadImage(sdr.data(), sdr.size(), "jxl");
+    CHECK(r.ok);
+    if (!r.ok) std::printf("  %s\n", r.error.c_str());
+    CHECK(r.image.format == GpuFormat::RGBA8Srgb);
+    if (r.ok) CHECK(r.image.mips[0].data == testPixels(32, 16));
+
+    Bytes hdr = makeJxl(32, 16, true);
+    CHECK(!hdr.empty());
+    r = loadImage(hdr.data(), hdr.size(), "jxl");
+    CHECK(r.ok);
+    if (!r.ok) std::printf("  %s\n", r.error.c_str());
+    CHECK(r.image.format == GpuFormat::RGBA16F);
+    CHECK(std::fabs(r.image.maxValue - 16.0f) < 0.01f);
+    float px[4];
+    CHECK(readPixel(r.image, 31, 0, px));
+    CHECK(std::fabs(px[0] - 1.0f) < 1e-3f && std::fabs(px[2] - 0.25f) < 1e-3f);
+#endif
+}
+
+void testKtx() {
+#ifdef HTV_HAVE_KTX
+    Bytes plain = makeKtx2(32, 16, false);
+    LoadResult r = loadImage(plain.data(), plain.size(), "ktx2");
+    CHECK(r.ok);
+    if (!r.ok) std::printf("  %s\n", r.error.c_str());
+    CHECK(r.image.format == GpuFormat::RGBA8Srgb);
+    if (r.ok) CHECK(r.image.mips[0].data == testPixels(32, 16));
+
+    Bytes basis = makeKtx2(64, 32, true);
+    CHECK(!basis.empty());
+    r = loadImage(basis.data(), basis.size(), "ktx2");
+    CHECK(r.ok);
+    if (!r.ok) std::printf("  %s\n", r.error.c_str());
+    CHECK(r.image.format == GpuFormat::BC7Srgb);
+    if (r.ok) CHECK(r.image.mips[0].data.size() == size_t(16 * 8 * 16));
+#endif
+}
+
+void testHdrTransfer() {
+    // PQ code value 0.58 is about 203 nits, which is reference white (1.0).
+    const float pq[4] = {0.5806f, 0.5806f, 0.5806f, 1.0f};
+    uint16_t out[4];
+    encodedToLinearHalf(pq, 1, Transfer::Pq, false, out);
+    CHECK(std::fabs(halfToFloat(out[0]) - 1.0f) < 0.02f);
+    const float srgb[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+    encodedToLinearHalf(srgb, 1, Transfer::Srgb, false, out);
+    CHECK(std::fabs(halfToFloat(out[0]) - 0.214f) < 0.002f && halfToFloat(out[3]) == 0.5f);
+}
+
 void testHdr() {
     Bytes file = makeHdr(33, 17);
     LoadResult r = loadImage(file.data(), file.size(), "hdr");
@@ -279,6 +424,13 @@ int main(int argc, char** argv) {
         bool ok = writeFile(dir / "gradient_2048.png", makePng(2048, 2048)) &&
                   writeFile(dir / "gradient_2048.webp", makeWebp(2048, 2048)) &&
                   writeFile(dir / "gradient_2048.qoi", makeQoi(2048, 2048)) &&
+#ifdef HTV_HAVE_JXL
+                  writeFile(dir / "gradient_2048.jxl", makeJxl(2048, 2048, false)) &&
+                  writeFile(dir / "spot_2048_float.jxl", makeJxl(2048, 2048, true)) &&
+#endif
+#ifdef HTV_HAVE_KTX
+                  writeFile(dir / "gradient_2048_uastc.ktx2", makeKtx2(2048, 2048, true)) &&
+#endif
                   writeFile(dir / "spot_2048.hdr", makeHdr(2048, 2048)) &&
                   writeFile(dir / "spot_4096_half.exr", makeExr(4096, 4096, true)) &&
                   writeFile(dir / "spot_2048_float.exr", makeExr(2048, 2048, false)) &&
@@ -291,6 +443,9 @@ int main(int argc, char** argv) {
     testPng();
     testWebp();
     testQoi();
+    testJxl();
+    testKtx();
+    testHdrTransfer();
     testHdr();
     testExr();
     testDds();
