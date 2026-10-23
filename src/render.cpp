@@ -212,8 +212,8 @@ ViewConstants makeConstants(float originX, float originY, float zoom, float tile
     c.tiles = tiles;
     c.normalMap = (app.normalZ ? 1u : 0u) | (app.flipGreen ? 2u : 0u);
     c.forcedMip = app.forcedMip;
-    c.invGamma = 1.0f / app.gamma;
-    // Range and tone mapping belong to the HDR row, which only float and 16-bit images show.
+    // Range, tone mapping and gamma belong to the HDR row, which only float and 16-bit images show.
+    c.invGamma = hdr ? 1.0f / app.gamma : 1.0f;
     c.blackPoint = hdr ? app.blackPoint : 0.0f;
     c.rangeScale = hdr ? 1.0f / std::max(app.whitePoint - app.blackPoint, 1e-6f) : 1.0f;
     c.toneMap = hdr && app.dataIsLinear ? uint32_t(app.toneMap) : 0u;

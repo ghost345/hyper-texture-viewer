@@ -750,20 +750,32 @@ void vs2(ImDrawList* dl, float& x, float cy, float gap) {
     x += line() + S(4) + gap;
 }
 
-void gammaSlider(ImDrawList* dl, float& x, float cy, float width, float gap) {
-    float g = (std::log2(app.gamma) + 2.0f) / 4.0f;
-    bool reset = false;
-    if (slider(dl, "gamma", x, cy, width, g, 0.0f, &reset, -1.0f, 0.5f)) app.gamma = std::exp2(g * 4.0f - 2.0f);
-    if (reset) app.gamma = 1.0f;
-    requestTip(ImRect(ImVec2(x, cy - S(8)), ImVec2(x + S(width), cy + S(8))), "Display gamma; double-click resets", nullptr,
-               true);
-    x += S(width) + gap;
+// Display gamma behind a small button in the HDR row: viewers for compositing (Nuke, tev, RV) offer it, but it is
+// rarely needed and does not earn a slider of its own.
+void gammaPopup(ImVec2 anchor) {
+    if (!beginMenu("gamma menu", anchor, ImVec2(0, 1))) return;
+    const Theme& t = T();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p(p0.x + S(6), p0.y + S(6));
+    const float w = S(214);
+    ImGui::Dummy(ImVec2(w + 2 * S(6), S(6) + S(16) + S(10) + S(16) + S(8) + S(10) + S(6)));
     char buf[16];
     std::snprintf(buf, sizeof buf, "%.2f", double(app.gamma));
-    drawText(dl, fontMono, 12, x, cy, T().tx, buf);
-    const float w = textSize(fontMono, 12, "0.00").x;
-    tipArea("gamma value", ImRect(ImVec2(x, cy - S(8)), ImVec2(x + w, cy + S(8))), "Display gamma");
-    x += w + gap;
+    float y = p.y + S(8);
+    drawText(dl, fontSemibold, 12, p.x, y, t.tx, "Display gamma");
+    drawText(dl, fontMono, 12, p.x + w - textSize(fontMono, 12, buf).x, y, t.tx, buf);
+    y += S(8) + S(10) + S(8);
+    float g = (std::log2(app.gamma) + 2.0f) / 4.0f;  // 0.25 .. 4 on a log scale, 1.0 in the middle
+    bool reset = false;
+    if (slider(dl, "gamma", p.x, y, 214, g, 0.5f, &reset, 0.5f, 0.5f))
+        app.gamma = g == 0.5f ? 1.0f : std::exp2(g * 4.0f - 2.0f);
+    if (reset) app.gamma = 1.0f;
+    y += S(8) + S(8) + S(5);
+    drawText(dl, fontMono, 10, p.x, y, t.tx3, "0.25");
+    drawText(dl, fontMono, 10, p.x + std::round(w * 0.5f - textSize(fontMono, 10, "1.0").x * 0.5f), y, t.tx3, "1.0");
+    drawText(dl, fontMono, 10, p.x + w - textSize(fontMono, 10, "4.0").x, y, t.tx3, "4.0");
+    endMenu();
 }
 
 // The Range control: black and white points on a log2 scale over the image's values, with the luminance
@@ -896,8 +908,8 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
                         (S(8) + line() + gap) * 4 + textSize(fontMedium, 11, "Range").x + gap + S(58) + gap + gap +
                         S(58) + gap + textSize(fontRegular, 12, "Auto").x + S(14) + gap +
                         textSize(fontMedium, 11, "Tone map").x + gap + textSize(fontRegular, 12, "Linear clip").x +
-                        S(30) + gap + textSize(fontMedium, 11, "Gamma").x + gap + S(70) + gap +
-                        textSize(fontMono, 12, "1.00").x + gap + S(16) + textSize(fontRegular, 12, "Clip").x + S(15) +
+                        S(30) + gap + textSize(fontMono, 12, "\xCE\xB3 0.00").x + S(14) + gap + S(16) +
+                        textSize(fontRegular, 12, "Clip").x + S(15) +
                         gap + S(12) + gap + nanW + S(12);
     const float rangeW = std::clamp((W - fixed) / s, 120.0f, 520.0f);
 
@@ -952,8 +964,16 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     x = r.x;
     vs2(dl, x, cy, gap);
 
-    label(dl, x, cy, "Gamma", gap, "Display gamma applied after everything else; 1.00 shows the image as is");
-    gammaSlider(dl, x, cy, 70, gap);
+    r.x = x;
+    std::snprintf(buf, sizeof buf, "\xCE\xB3 %.2f", double(app.gamma));
+    const bool gammaOpen = ImGui::IsPopupOpen("gamma menu");
+    toggleMenuOnPress(r.button("gamma", Icon::Count, buf,
+                               kBordered | kMonoLabel | (app.gamma != 1.0f ? kOn : 0) | (gammaOpen ? kOpen : 0),
+                               "Display gamma, applied after everything else; 1.00 shows the values as they are",
+                               nullptr, 16, 22),
+                      "gamma menu");
+    gammaPopup(ImVec2(x, cy - S(16)));
+    x = r.x;
     vs2(dl, x, cy, gap);
 
     r.x = x;
@@ -968,16 +988,6 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     drawText(dl, fontMono, 11, x, cy, t.tx3, buf);
     tipArea("nan", ImRect(ImVec2(nanX, cy - S(8)), ImVec2(x + textSize(fontMono, 11, buf).x, cy + S(8))),
             "Pixels that are NaN or infinite; with Clip on they show in magenta");
-}
-
-// 8-bit images: Gamma only, 30 px.
-void gammaRow(ImDrawList* dl, float y0, float W) {
-    const float h = S(30);
-    dl->AddRectFilled(ImVec2(0, y0 + h - line()), ImVec2(W, y0 + h), T().bd);
-    const float cy = y0 + (h - line()) * 0.5f;
-    float x = S(12);
-    label(dl, x, cy, "Gamma", S(8), "Display gamma; 1.00 shows the image as is");
-    gammaSlider(dl, x, cy, 160, S(8));
 }
 
 // Right side of the status row: texts separated by .vs, laid out from the right edge.
@@ -1197,10 +1207,7 @@ void statusRow(ImDrawList* dl, float y0, float W) {
 
 }  // namespace
 
-float sliderRowHeight() {
-    if (!app.hasImage) return 0.0f;
-    return isHighPrecision(app.image) ? 44.0f : 30.0f;
-}
+float sliderRowHeight() { return app.hasImage && isHighPrecision(app.image) ? 44.0f : 0.0f; }
 
 void bottomBar() {
     const Theme& t = T();
@@ -1212,8 +1219,7 @@ void bottomBar() {
     dl->AddRectFilled(ImVec2(0, y0), ImVec2(W, y0 + bottomBarH), t.bar);
     dl->AddRectFilled(ImVec2(0, y0), ImVec2(W, y0 + line()), t.bd);
     const float rowH = sliderRowHeight();
-    if (rowH == 44.0f) hdrRow(dl, y0 + line(), W);
-    else if (rowH == 30.0f) gammaRow(dl, y0 + line(), W);
+    if (rowH > 0) hdrRow(dl, y0 + line(), W);
     statusRow(dl, y0 + line() + S(rowH), W);
     ImGui::End();
 }

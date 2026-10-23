@@ -156,7 +156,7 @@ constexpr ImGuiWindowFlags kBarFlags = ImGuiWindowFlags_NoDecoration | ImGuiWind
                                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground |
                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoScrollWithMouse;
 
-float sliderRowHeight();  // 0 without an image, 30 for 8-bit, 44 for HDR and 16-bit
+float sliderRowHeight();  // 44 for HDR and 16-bit images (the HDR row), else 0
 void topBar();
 void bottomBar();
 void viewportOverlays();  // grid, tile borders, pixel outline, and the empty, error and loading states
