@@ -563,12 +563,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
 
     // Frames are drawn while something changes and for a moment after the last input, then the loop sleeps.
     MSG msg{};
+    int exitCode = 0;
     for (;;) {
         const bool active = nowMs() - lastInputMs < 1500.0 || app.dragging || app.loading;
         if (!active || IsIconic(app.hwnd)) WaitMessage();
         bool quit = false;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) quit = true;
+            if (msg.message == WM_QUIT) {
+                quit = true;
+                exitCode = int(msg.wParam);  // later messages in this batch reuse `msg`
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -582,5 +586,5 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
-    return int(msg.wParam);
+    return exitCode;
 }
