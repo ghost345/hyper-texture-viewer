@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "image.h"
+#include "stats.h"
 
 namespace htv {
 
@@ -23,6 +24,15 @@ public:
     Com() = default;
     Com(const Com&) = delete;
     Com& operator=(const Com&) = delete;
+    Com(Com&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
+    Com& operator=(Com&& o) noexcept {
+        if (this != &o) {
+            reset();
+            p_ = o.p_;
+            o.p_ = nullptr;
+        }
+        return *this;
+    }
     ~Com() { reset(); }
     void reset() {
         if (p_) p_->Release();
@@ -41,9 +51,17 @@ private:
 };
 
 enum class Channel { RGB, R, G, B, A, Luminance };
-enum class AlphaBackground { CheckerSmall, CheckerMedium, CheckerLarge, Black, Gray, White, Count };
+enum class AlphaBackground { Checker, Black, Grey, White, Custom, Count };
 enum class Tiling { Off, Seamless, Bordered };
+enum class ToneMap { LinearClip, Reinhard, Aces, Agx, Count };
 enum class ColorFormat { Html, Hex, DelphiHex, VbHex, Rgb, RgbFloat, Hsv, Hsl, Long, Count };
+
+struct RecentFile {
+    std::filesystem::path path;
+    int64_t openedAt = 0;  // Unix time
+    Com<ID3D11ShaderResourceView> thumbnail;
+    bool thumbnailTried = false;
+};
 
 struct App {
     HWND hwnd = nullptr;
@@ -53,6 +71,7 @@ struct App {
     Com<ID3D11RenderTargetView> rtv;
     Com<ID3D11VertexShader> vs;
     Com<ID3D11PixelShader> ps;
+    Com<ID3D11PixelShader> psRead;  // copies texels into a float target for the pixel readout
     Com<ID3D11Buffer> constants;
     Com<ID3D11SamplerState> trilinear;
     Com<ID3D11ShaderResourceView> srv;
@@ -63,11 +82,28 @@ struct App {
 
     // The open file and its folder.
     htv::Image image;
-    bool hasImage = false;
-    std::filesystem::path path;    // last file asked for, even if it failed to open
+    htv::ImageStats stats;
+    bool imageAlpha = false;       // some pixel is not fully opaque
+    int imageGeneration = 0;       // changes with every upload, for caches of image data
+    bool hasImage = false;         // an image is on screen (a failed file clears it)
+    std::filesystem::path path;    // last file asked for: shown, loading or failed
     std::filesystem::path shownPath;
+    bool fromClipboard = false;    // the shown image was pasted
     uint64_t fileSize = 0;
-    std::string error;
+    std::string error;             // why `path` failed to open; the viewport shows it instead of an image
+    std::string errorFormat;       // what is known about the failed file, e.g. "PSD"
+
+    // Background loading: the previous image stays on screen until the next one is ready.
+    bool loading = false;
+    double loadingSinceMs = 0;
+    uint64_t loadingSize = 0;
+    float loadingProgress = -1.0f;  // share of the file read, or -1 while decoding
+
+    // "Reloaded" notice after the file changed on disk.
+    double toastUntilMs = 0;
+    std::string toastName;
+
+    std::vector<RecentFile> recent;  // most recent first
     std::vector<std::filesystem::path> folder;  // supported files next to `path`, in Explorer order
     int folderIndex = -1;
 
@@ -85,6 +121,10 @@ struct App {
     bool fit = true;
     float exposure = 0.0f;
     float gamma = 1.0f;
+    float blackPoint = 0.0f, whitePoint = 1.0f;  // HDR range in image values
+    ToneMap toneMap = ToneMap::LinearClip;
+    bool showClipping = false;  // zebra above the white point, magenta NaN and Inf
+    float displayPeak = 0.0f;   // HDR monitor peak relative to SDR white, 0 on an SDR monitor
     Channel channel = Channel::RGB;
     bool ignoreAlpha = false;
     bool dataIsLinear = false;  // how stored values are interpreted; defaults per format on open
@@ -93,7 +133,9 @@ struct App {
     int forcedMip = -1;
     int rotation = 0;  // quarter turns clockwise
     bool flipH = false, flipV = false;
-    AlphaBackground alphaBackground = AlphaBackground::CheckerMedium;
+    AlphaBackground alphaBackground = AlphaBackground::Checker;
+    int checkerSize = 0;  // 0, 1, 2: 8, 16 or 32 px cells
+    float customBackground[3] = {0.48f, 0.25f, 0.56f};
     Tiling tiling = Tiling::Off;
     bool grid = false;
     int gridStep = 1;
@@ -124,7 +166,20 @@ extern App app;
 
 // Actions the interface triggers; implemented in main.cpp.
 void showOpenDialog();
+void openPath(const std::filesystem::path& path);  // a new file: lists its folder, fits if Fit is on
 void step(int delta);
+void stepTo(int index);  // index into `folder`; negative counts from the end
+void reloadFile();
+void cancelLoading();
+void pasteFromClipboard();
+void copyFilePath();
+void showInExplorer();
+void openRecent(int index);
+ID3D11ShaderResourceView* recentThumbnail(int index);
+void chooseCustomBackground();
+void autoRange();
+void saveSettings();
+void relayout();  // after the bars change height
 void fitToWindow();
 void zoomAt(float newZoom, float x, float y);
 void zoomCentered(float newZoom);
@@ -139,6 +194,10 @@ bool windowToPixel(float wx, float wy, int& x, int& y);
 
 bool isFloatFormat(const htv::FormatInfo& info);  // linear-light values (half/float, BC6H, sRGB-decoded excluded)
 bool isSrgbFormat(htv::GpuFormat format);         // the GPU decodes sRGB when sampling
-bool isHighPrecision(const htv::Image& image);     // float or 16-bit: shows the exposure slider
+bool isHighPrecision(const htv::Image& image);     // float or 16-bit: shows the HDR slider row
+// Reads an n x n block of mip 0 around (x, y) through the GPU, for formats the CPU cannot decode.
+// Values are as the shader samples them (sRGB formats decoded to linear). False when unavailable.
+bool readPixelsGpu(int x, int y, int n, float* rgba);
+double nowMs();
 
 }  // namespace htv

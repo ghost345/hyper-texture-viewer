@@ -13,6 +13,7 @@
 
 #include "codecs.h"
 #include "image.h"
+#include "stats.h"
 #include "stb_image_write.h"
 #include "qoi.h"
 #include "tinyexr.h"
@@ -440,6 +441,38 @@ void testGarbage() {
     for (const char* ext : {"png", "exr", "dds", "hdr", "webp", "qoi", "jxl", "ktx2", "avif"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
 }
 
+void testStats() {
+    Image img;
+    img.width = 4;
+    img.height = 1;
+    img.format = GpuFormat::RGBA32F;
+    const float px[16] = {0, 0, 0, 1, 0.5f, 0.5f, 0.5f, 1, 4, 4, 4, 1, std::nanf(""), 1, 1, 1};
+    Surface s;
+    s.width = 4;
+    s.height = 1;
+    s.rowPitch = sizeof(px);
+    s.data.assign(reinterpret_cast<const uint8_t*>(px), reinterpret_cast<const uint8_t*>(px) + sizeof(px));
+    img.mips.push_back(s);
+    const ImageStats st = computeStats(img);
+    CHECK(st.valid);
+    CHECK(st.pixels == 4 && st.nonFinite == 1 && st.darkPixels == 1);
+    CHECK(st.minValue == 0.0f && st.maxValue == 4.0f);
+    CHECK(std::fabs(st.minLuminance - 0.5f) < 1e-5f && std::fabs(st.maxLuminance - 4.0f) < 1e-4f);
+    CHECK(st.percentile(0.2) == 0.0f);  // a third of the finite pixels are black
+    CHECK(st.percentile(1.0) <= 4.0f && st.percentile(0.9) > 2.0f);
+    const std::vector<float> h = st.histogramBetween(-2, 3, 5);  // stops -2..3: 0.5 is in bin 1, 4 in bin 4
+    CHECK(h.size() == 5 && h[1] == 1.0f && h[4] == 1.0f && h[0] == 0.0f);
+
+    Image bc;
+    bc.width = bc.height = 4;
+    bc.format = GpuFormat::BC7;
+    bc.mips.resize(1);
+    CHECK(!computeStats(bc).valid);
+    CHECK(hasTranslucentPixels(bc) && !hasTranslucentPixels(img));
+    reinterpret_cast<float*>(img.mips[0].data.data())[7] = 0.5f;
+    CHECK(hasTranslucentPixels(img));
+}
+
 bool writeFile(const std::filesystem::path& path, const Bytes& data) {
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
@@ -490,6 +523,7 @@ int main(int argc, char** argv) {
     testExr();
     testDds();
     testGarbage();
+    testStats();
     std::printf(failures ? "%d check(s) failed\n" : "all checks passed\n", failures);
     return failures ? 1 : 0;
 }

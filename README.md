@@ -8,28 +8,35 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Anything else goes through the codecs installed in Windows (WIC): TIFF, JPEG XR, ICO, camera RAW, and HEIC/HEIF when the Microsoft Store HEIF extension is installed.
 - Compressed DDS goes to the GPU as is, so BC textures look exactly as in a game.
 - Pixels stay sharp when zoomed in (no filtering at 100% and above). Below 100% the mip chain averages the source pixels, so detail does not flicker or alias.
-- Exposure for any image, values above 1.0 in HDR images, NaN/Inf shown in magenta.
-- Single channels and alpha, alpha shown over a checkerboard.
-- Pixel coordinates and values under the cursor (in the title bar for now).
+- HDR: exposure, black and white points on a log scale over the image's histogram (Auto picks them from the image), tone mapping (linear clip, Reinhard, ACES, AgX), zebra stripes above the white point, NaN/Inf counted and shown in magenta.
+- Single channels, luminance, sRGB or linear interpretation, normal map Z reconstruction, forced mip level, 3x3 tiling preview.
+- Alpha over a checkerboard (three sizes), black, grey, white or a custom colour.
+- Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid and outline.
+- Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top and window opacity, borderless window that hides its bars with Tab.
+- Files load in the background with progress; the open file reloads when it changes on disk, a broken file shows what went wrong without stopping browsing. Recent files with thumbnails, paste from the clipboard.
 - One exe, static runtime, no installer. Windows 10/11 x64; Direct3D 11 on any GPU, with a software fallback (WARP).
 
 ## Controls
 
+All shortcuts are listed in the app under F1. The most used:
+
 | Input | Action |
 | --- | --- |
 | Mouse wheel | Zoom around the cursor (stops at 100%) |
-| Ctrl + wheel, `+` / `-` | Exposure in 1/4 or 1/2 stops |
-| `0` | Reset exposure |
-| Left drag | Pan |
-| Double click, `F` | Fit to window |
+| Left drag, Space + drag, middle drag | Pan |
+| `F`, double click | Fit to window |
 | `1` `2` `4` `8` | Zoom 100%, 200%, 400%, 800% |
-| `R` `G` `B` `A` | Show one channel (press again to go back) |
-| `X` | RGB without alpha |
-| `C` | All channels |
-| Left / Right, PgUp / PgDn, Space / Backspace | Previous / next image in the folder |
-| Esc | Quit |
+| Left / Right, PgUp / PgDn, Home / End | Previous / next / first / last image in the folder |
+| `R` `G` `B` `A` `Y`, `C` | One channel or luminance (press again to go back), all channels |
+| Ctrl + wheel, `-` / `=`, `0` | HDR exposure, reset |
+| Ctrl+A, `Z` | Auto range, show clipping |
+| Ctrl + click, Ctrl+C | Lock the readout to a pixel, copy its value |
+| `T`, Shift+A, Shift+L, `N` | Tiling, alpha background, sRGB/linear, normal map mode |
+| Tab, `I`, F1 | Hide bars, info panel, shortcuts |
+| Ctrl+O, Ctrl+V, F5 | Open, paste from clipboard, reload |
+| Esc | Close a panel or quit |
 
-Drop a file on the window or pass it on the command line.
+Drop a file on the window or pass it on the command line. The viewer never changes the files it shows.
 
 ## Building
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HyperTextureViewer LANGUAGES C CXX)
+project(HyperTextureViewer VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -151,7 +151,7 @@ unset(BUILD_TESTING)
 
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
 find_package(Threads REQUIRED)
-add_library(htv_image STATIC src/image.cpp)
+add_library(htv_image STATIC src/image.cpp src/stats.cpp)
 target_compile_options(htv_image PRIVATE ${htv_options})
 target_include_directories(htv_image PUBLIC src third_party)
 target_sources(htv_image PRIVATE src/codecs_modern.cpp)
@@ -187,11 +187,12 @@ if(WIN32)
 
     # Interface fonts (Inter, JetBrains Mono) are linked in as resources.
     configure_file(src/resources.rc.in ${CMAKE_BINARY_DIR}/resources.rc @ONLY)
-    add_executable(hyper-texture-viewer WIN32 src/main.cpp src/ui.cpp src/icons.cpp src/wic_loader.cpp
-        ${CMAKE_BINARY_DIR}/resources.rc)
+    add_executable(hyper-texture-viewer WIN32 src/main.cpp src/render.cpp src/files.cpp src/ui.cpp src/ui_widgets.cpp
+        src/ui_bars.cpp src/ui_views.cpp src/icons.cpp src/wic_loader.cpp ${CMAKE_BINARY_DIR}/resources.rc)
     target_compile_options(hyper-texture-viewer PRIVATE ${htv_options})
-    target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE)
-    target_link_libraries(hyper-texture-viewer PRIVATE htv_image htv_imgui d3d11 dxgi dwmapi shlwapi windowscodecs ole32)
+    target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE HTV_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(hyper-texture-viewer PRIVATE htv_image htv_imgui d3d11 dxgi dwmapi shlwapi windowscodecs ole32
+        comdlg32)
     if(MINGW)
         target_link_options(hyper-texture-viewer PRIVATE -static -s)
     endif()

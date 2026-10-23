@@ -1,0 +1,1155 @@
+// The top bar (actions and modes) and the bottom bar (slider row and status), with their menus.
+
+#include "ui_internal.h"
+
+#include <algorithm>
+#include <cfloat>
+#include <cstdio>
+#include <cstring>
+
+namespace htv::ui {
+
+double cleanHintUntil = 0;
+
+namespace {
+
+// ---- pixel readout ----
+
+struct Readout {
+    bool valid = false;       // a pixel is under the cursor (or locked)
+    bool readable = false;    // its values could be read
+    int x = 0, y = 0;
+    int tileX = -1, tileY = -1;  // which tile of the 3x3 preview
+    float raw[4] = {0, 0, 0, 1};      // stored values of the pixel
+    float display[4] = {0, 0, 0, 1};  // as an sRGB colour in 0..1, before view adjustments
+    float avgRaw[4] = {0, 0, 0, 1};   // averaged over the Avg area
+    float avgDisplay[4] = {0, 0, 0, 1};
+    bool outOfRange = false;  // values outside 0..1
+};
+
+float srgbEncode(float v) {
+    v = std::clamp(v, 0.0f, 1.0f);
+    return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+}
+
+// n x n stored values around (x, y), edge pixels repeated. Block-compressed formats go through the GPU.
+bool readBlock(int x, int y, int n, float* out) {
+    const htv::FormatInfo& info = htv::formatInfo(app.image.format);
+    const int half = n / 2;
+    if (!info.compressed) {
+        for (int dy = -half; dy <= half; ++dy)
+            for (int dx = -half; dx <= half; ++dx) {
+                const int px = std::clamp(x + dx, 0, int(app.image.width) - 1);
+                const int py = std::clamp(y + dy, 0, int(app.image.height) - 1);
+                if (!htv::readPixel(app.image, uint32_t(px), uint32_t(py), out + ((dy + half) * n + dx + half) * 4))
+                    return false;
+            }
+        return true;
+    }
+    if (!readPixelsGpu(x, y, n, out)) return false;
+    for (int i = 0; i < n * n; ++i) {
+        float* p = out + i * 4;
+        if (info.channels == 1) p[1] = p[2] = p[0];
+        if (info.channels < 4) p[3] = 1.0f;
+        if (info.channels == 2) p[2] = 0.0f;
+        if (isSrgbFormat(app.image.format))  // the GPU decoded them; the readout shows stored values
+            for (int c = 0; c < 3; ++c) p[c] = srgbEncode(p[c]);
+    }
+    return true;
+}
+
+Readout readPixelUnderCursor() {
+    Readout r;
+    if (!app.hasImage) return r;
+    if (app.pixelLocked) {
+        r.x = app.lockedX;
+        r.y = app.lockedY;
+        r.valid = true;
+    } else if (app.mouseX >= app.vpX && app.mouseY >= app.vpY && app.mouseX < app.vpX + app.vpW &&
+               app.mouseY < app.vpY + app.vpH && !ImGui::GetIO().WantCaptureMouse) {
+        r.valid = windowToPixel(float(app.mouseX), float(app.mouseY), r.x, r.y);
+        if (r.valid && app.tiling != Tiling::Off) {
+            const float w = float(app.rotation & 1 ? app.image.height : app.image.width) * app.zoom;
+            const float h = float(app.rotation & 1 ? app.image.width : app.image.height) * app.zoom;
+            r.tileX = int((app.mouseX - app.originX) / w);
+            r.tileY = int((app.mouseY - app.originY) / h);
+        }
+    }
+    if (!r.valid) return r;
+    const int n = app.averageSize;
+    float block[25 * 4];
+    if (!readBlock(r.x, r.y, n, block)) return r;
+    r.readable = true;
+    const bool encode = isFloatFormat(htv::formatInfo(app.image.format)) && app.dataIsLinear;
+    const float* center = block + (n * n / 2) * 4;
+    for (int c = 0; c < 4; ++c) {
+        float sum = 0;
+        for (int i = 0; i < n * n; ++i) sum += block[i * 4 + c];
+        r.raw[c] = center[c];
+        r.avgRaw[c] = sum / float(n * n);
+        if (r.raw[c] < 0.0f || r.raw[c] > 1.0f) r.outOfRange = true;
+        r.display[c] = (c < 3 && encode) ? srgbEncode(r.raw[c]) : std::clamp(r.raw[c], 0.0f, 1.0f);
+        r.avgDisplay[c] = (c < 3 && encode) ? srgbEncode(r.avgRaw[c]) : std::clamp(r.avgRaw[c], 0.0f, 1.0f);
+    }
+    return r;
+}
+
+const char* kColorFormatNames[int(ColorFormat::Count)] = {"HTML", "Hex", "Delphi Hex", "VB Hex", "RGB",
+                                                          "RGB Float", "HSV", "HSL", "Long"};
+
+void hsvHsl(const float c[3], float& h, float& sv, float& v, float& sl, float& l) {
+    const float mx = std::max({c[0], c[1], c[2]}), mn = std::min({c[0], c[1], c[2]}), d = mx - mn;
+    h = 0;
+    if (d > 0) {
+        if (mx == c[0]) h = std::fmod((c[1] - c[2]) / d + 6.0f, 6.0f);
+        else if (mx == c[1]) h = (c[2] - c[0]) / d + 2.0f;
+        else h = (c[0] - c[1]) / d + 4.0f;
+        h *= 60.0f;
+    }
+    v = mx;
+    sv = mx > 0 ? d / mx : 0;
+    l = (mx + mn) * 0.5f;
+    sl = (l > 0 && l < 1) ? d / (1 - std::fabs(2 * l - 1)) : 0;
+}
+
+std::string formatColor(const float display[4], const float raw[4], ColorFormat f) {
+    int c8[3];
+    for (int i = 0; i < 3; ++i) c8[i] = int(std::lround(display[i] * 255.0f));
+    const long bgr = long(c8[0]) | (long(c8[1]) << 8) | (long(c8[2]) << 16);
+    char buf[96];
+    switch (f) {
+        case ColorFormat::Html: std::snprintf(buf, sizeof buf, "#%02X%02X%02X", c8[0], c8[1], c8[2]); break;
+        case ColorFormat::Hex: std::snprintf(buf, sizeof buf, "%02X%02X%02X", c8[0], c8[1], c8[2]); break;
+        case ColorFormat::DelphiHex: std::snprintf(buf, sizeof buf, "$00%06lX", bgr); break;
+        case ColorFormat::VbHex: std::snprintf(buf, sizeof buf, "&H00%06lX&", bgr); break;
+        case ColorFormat::Rgb: std::snprintf(buf, sizeof buf, "%d, %d, %d", c8[0], c8[1], c8[2]); break;
+        case ColorFormat::RgbFloat:
+            std::snprintf(buf, sizeof buf, "%.3f, %.3f, %.3f", double(raw[0]), double(raw[1]), double(raw[2]));
+            break;
+        case ColorFormat::Hsv:
+        case ColorFormat::Hsl: {
+            float h, sv, v, sl, l;
+            hsvHsl(display, h, sv, v, sl, l);
+            if (f == ColorFormat::Hsv)
+                std::snprintf(buf, sizeof buf, "%.0f\xC2\xB0, %.0f%%, %.0f%%", double(h), double(sv * 100), double(v * 100));
+            else
+                std::snprintf(buf, sizeof buf, "%.0f\xC2\xB0, %.0f%%, %.0f%%", double(h), double(sl * 100), double(l * 100));
+            break;
+        }
+        default: std::snprintf(buf, sizeof buf, "%ld", bgr); break;
+    }
+    return buf;
+}
+
+Readout lastReadout;  // for Ctrl+C
+
+void toggleLock(const Readout& r) {
+    if (app.pixelLocked) app.pixelLocked = false;
+    else if (r.valid) {
+        app.pixelLocked = true;
+        app.lockedX = r.x;
+        app.lockedY = r.y;
+    }
+}
+
+// Formats that round or clip the value get a warning next to it.
+bool valueIsApproximate(const Readout& px) {
+    return px.readable && app.colorFormat != ColorFormat::RgbFloat && (isHighPrecision(app.image) || px.outOfRange);
+}
+
+ImU32 swatchColor(const float display[4]) {
+    return IM_COL32(int(display[0] * 255 + 0.5f), int(display[1] * 255 + 0.5f), int(display[2] * 255 + 0.5f), 255);
+}
+
+// ---- menus behind the dropdowns ----
+
+const char* kCheckerNames[3] = {"small", "medium", "large"};
+
+void zoomMenuItems() {
+    if (menuItem({"Fit to window", "F", app.fit, true, true})) {
+        app.fit = true;
+        fitToWindow();
+    }
+    menuSeparator();
+    static const float levels[] = {0.125f, 0.25f, 0.5f, 1, 2, 4, 8, 16, 32};
+    static const char* keys[] = {nullptr, nullptr, nullptr, "1", nullptr, nullptr, nullptr, nullptr, nullptr};
+    for (int i = 0; i < int(std::size(levels)); ++i) {
+        const std::string label = formatZoom(levels[i]);
+        if (menuItem({label.c_str(), keys[i], !app.fit && app.zoom == levels[i], true, true})) zoomCentered(levels[i]);
+    }
+}
+
+void textureMenuItems() {
+    menuHeading("Color data");
+    if (menuItem({"sRGB", "Shift+L", !app.dataIsLinear, true, true})) app.dataIsLinear = false;
+    if (menuItem({"Linear", "Shift+L", app.dataIsLinear, true, true})) app.dataIsLinear = true;
+    menuSeparator();
+    menuHeading("Normal map");
+    if (menuItem({"Reconstruct Z", "N", app.normalZ, true, true})) app.normalZ = !app.normalZ;
+    if (menuItem({"Flip green (DirectX / OpenGL)", nullptr, app.flipGreen, true, true})) app.flipGreen = !app.flipGreen;
+    menuSeparator();
+    menuHeading("Mip level");
+    const bool fileMips = app.hasImage && app.textureMips > 1;
+    if (menuItem({"Auto", nullptr, app.forcedMip < 0, true, true})) app.forcedMip = -1;
+    if (fileMips) {
+        for (int i = 0; i < app.textureMips; ++i) {
+            char label[64], size[32];
+            std::snprintf(label, sizeof label, "Mip %d", i);
+            std::snprintf(size, sizeof size, "%u\xC3\x97%u", std::max(1u, app.image.width >> i),
+                          std::max(1u, app.image.height >> i));
+            ImGui::PushID(i);
+            MenuItem m{label, nullptr, app.forcedMip == i, true, true};
+            m.value = size;
+            if (menuItem(m)) app.forcedMip = i;
+            ImGui::PopID();
+        }
+    }
+    menuNote("[ and ] step through the mips");
+    menuSeparator();
+    menuItem({"Cube face", "soon", false, false, true});
+    menuItem({"EXR layer", "soon", false, false, true});
+}
+
+void alphaMenuItems() {
+    const bool checker = app.alphaBackground == AlphaBackground::Checker && !app.ignoreAlpha;
+    MenuItem m{"Checkerboard", nullptr, checker, true, true};
+    m.key = kCheckerNames[app.checkerSize];
+    if (menuItem(m)) {
+        app.alphaBackground = AlphaBackground::Checker;
+        app.ignoreAlpha = false;
+    }
+    // Checker size: S, M and L pick the cell size directly.
+    {
+        const Theme& t = T();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = std::max(ImGui::GetContentRegionAvail().x, S(196) - 2 * S(4)), h = S(24);
+        ImGui::Dummy(ImVec2(w, h));
+        const float cy = p.y + h * 0.5f;
+        drawText(dl, fontRegular, 12, p.x + S(8) + S(14) + S(8), cy, t.tx, "Checker size");
+        // Drawn as the mono text "S · M · L", each letter clickable.
+        static const char* letters[3] = {"S", "M", "L"};
+        const float cw = textSize(fontMono, 11, "M").x;
+        const float x0 = p.x + w - S(8) - 9 * cw;
+        drawText(dl, fontMono, 11, x0 + 2 * cw, cy, t.tx3, "\xC2\xB7");
+        drawText(dl, fontMono, 11, x0 + 6 * cw, cy, t.tx3, "\xC2\xB7");
+        for (int i = 0; i < 3; ++i) {
+            const float x = x0 + 4 * i * cw;
+            const ImVec2 ha(x - S(3), p.y + S(3)), hb(x + cw + S(3), p.y + h - S(3));
+            ImGui::SetCursorScreenPos(ha);
+            ImGui::PushID(i);
+            if (ImGui::InvisibleButton("size", ImVec2(hb.x - ha.x, hb.y - ha.y))) {
+                app.checkerSize = i;
+                app.alphaBackground = AlphaBackground::Checker;
+                app.ignoreAlpha = false;
+            }
+            const bool hovered = ImGui::IsItemHovered();
+            ImGui::PopID();
+            const bool on = app.checkerSize == i;
+            if (hovered) dl->AddRectFilled(ha, hb, t.ctlh, S(3));
+            drawText(dl, fontMono, 11, x, cy, on ? t.act : hovered ? t.tx : t.tx3, letters[i]);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h));
+    }
+    menuSeparator();
+    static const char* solids[3] = {"Black", "Middle grey", "White"};
+    for (int i = 0; i < 3; ++i)
+        if (menuItem({solids[i], nullptr, int(app.alphaBackground) == i + 1 && !app.ignoreAlpha, true, true})) {
+            app.alphaBackground = AlphaBackground(i + 1);
+            app.ignoreAlpha = false;
+        }
+    {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        if (menuItem({"Custom color\xE2\x80\xA6", nullptr, app.alphaBackground == AlphaBackground::Custom && !app.ignoreAlpha,
+                      true, true}))
+            chooseCustomBackground();
+        const float w = ImGui::GetItemRectSize().x;
+        const float sw = S(12);
+        const ImVec2 a(p.x + w - S(8) - sw, std::round(p.y + (S(24) - sw) * 0.5f));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(a, ImVec2(a.x + sw, a.y + sw),
+                          IM_COL32(int(app.customBackground[0] * 255), int(app.customBackground[1] * 255),
+                                   int(app.customBackground[2] * 255), 255));
+        dl->AddRect(a, ImVec2(a.x + sw, a.y + sw), T().bd2, 0, 0, line());
+    }
+    menuSeparator();
+    if (menuItem({"Ignore alpha", nullptr, app.ignoreAlpha, true, true})) app.ignoreAlpha = !app.ignoreAlpha;
+}
+
+void tilingMenuItems() {
+    menuHeading("Tiling");
+    if (menuItem({"Off", "T", app.tiling == Tiling::Off, true, true})) setTiling(Tiling::Off);
+    if (menuItem({"3\xC3\x97" "3 seamless", "T", app.tiling == Tiling::Seamless, true, true})) setTiling(Tiling::Seamless);
+    if (menuItem({"3\xC3\x97" "3 with borders", "T", app.tiling == Tiling::Bordered, true, true}))
+        setTiling(Tiling::Bordered);
+    menuSeparator();
+    menuNote("T cycles through the modes");
+}
+
+void themeMenuItems() {
+    if (menuItem({"Dark", nullptr, app.darkTheme, true, true}) && !app.darkTheme) {
+        app.darkTheme = true;
+        saveSettings();
+    }
+    if (menuItem({"Light", nullptr, !app.darkTheme, true, true}) && app.darkTheme) {
+        app.darkTheme = false;
+        saveSettings();
+    }
+}
+
+// ---- top bar ----
+
+bool noImage() { return !app.hasImage; }
+
+// How the bar fits the window: everything; or the compact set with a "..." menu, a shorter file name and
+// at last no folder counter.
+struct TopLayout {
+    bool compact = false;
+    float nameMax = 240;
+    bool counter = true;
+};
+
+void fileGroup(Row& r, const TopLayout& L) {
+    const Theme& t = T();
+    if (r.button("open", Icon::Open, nullptr, 0, "Open", "Ctrl+O")) showOpenDialog();
+    const int prevNext = app.folder.size() > 1 ? 0 : kDisabled;
+    if (r.button("prev", Icon::Prev, nullptr, prevNext, "Previous file", "Left")) step(-1);
+    if (r.button("next", Icon::Next, nullptr, prevNext, "Next file", "Right")) step(+1);
+    const std::string name = fileName();
+    const bool none = name.empty();
+    const std::string shown = ellipsize(fontMedium, 13, none ? std::string("No image") : name, S(L.nameMax));
+    const float nameW = textSize(fontMedium, 13, shown.c_str()).x;
+    const bool loading = isLoadingVisible();
+    const bool failed = !app.error.empty() && !app.loading;
+    if (!r.measure) {
+        const ImVec2 a(r.x + S(6), r.cy - S(10)), b(a.x + nameW, r.cy + S(10));
+        drawText(r.dl, fontMedium, 13, a.x, r.cy, none ? t.tx3 : loading ? t.tx2 : t.tx, shown.c_str());
+        if (!none) {
+            ImGui::SetCursorScreenPos(a);
+            ImGui::InvisibleButton("filename", ImVec2(std::max(1.0f, nameW), b.y - a.y));
+            r.hole(ImRect(a, b));
+            const std::string full = app.fromClipboard && app.error.empty() ? "Pasted from the clipboard"
+                                                                             : utf8(app.path.wstring());
+            requestTip(ImRect(ImVec2(a.x, r.cy - S(12)), b), full.c_str(), "Ctrl+Alt+C");
+            if (ImGui::IsItemClicked()) copyFilePath();
+        }
+    }
+    r.x += S(6) + nameW + S(6) + r.gap;
+    if (loading || failed) {
+        if (!r.measure) {
+            const ImVec2 c(r.x + S(7), std::round(r.cy));
+            if (loading) spinner(r.dl, c, S(7) * 9.0f / 12.0f, t.ac);
+            else drawIcon(r.dl, Icon::Alert, ImVec2(r.x, std::round(r.cy - S(7))), S(14), t.err);
+        }
+        r.x += S(14) + r.gap + S(6);
+    }
+    if (app.folderIndex >= 0 && L.counter) {
+        char pos[32];
+        std::snprintf(pos, sizeof pos, "%d / %d", app.folderIndex + 1, int(app.folder.size()));
+        r.text(pos, fontMono, 12, t.tx3, 0, 2);
+    }
+}
+
+void viewGroup(Row& r, const TopLayout& L) {
+    const int off = noImage() ? kDisabled : 0;
+    r.separator(16, 5);
+    if (r.button("fit", Icon::Fit, nullptr, (app.fit && !off ? kOn : 0) | off, "Fit to window", "F")) {
+        app.fit = true;
+        fitToWindow();
+    }
+    if (r.button("actual", Icon::Count, "1:1", (!app.fit && app.zoom == 1.0f && !off ? kOn : 0) | off, "Actual size", "1"))
+        zoomCentered(1.0f);
+    const std::string zoom = off ? std::string("\xE2\x80\x94") : formatZoom(app.zoom);
+    ImRect zr;
+    toggleMenuOnPress(r.dropdown("zoom", zoom.c_str(), fontRegular, 12, 22, 7, 4, "Zoom", "Wheel", &zr, off), "zoom menu");
+    if (!r.measure && beginMenu("zoom menu", ImVec2(zr.Min.x, zr.Max.y + S(4)))) {
+        zoomMenuItems();
+        endMenu();
+    }
+    if (L.compact) return;
+    if (r.button("rotl", Icon::RotateLeft, nullptr, off, "Rotate left", "Ctrl+L")) rotate(-1);
+    if (r.button("rotr", Icon::RotateRight, nullptr, off, "Rotate right", "Ctrl+R")) rotate(+1);
+    if (r.button("fliph", Icon::FlipH, nullptr, (app.flipH ? kOn : 0) | off, "Flip horizontal", "H")) app.flipH = !app.flipH;
+    if (r.button("flipv", Icon::FlipV, nullptr, (app.flipV ? kOn : 0) | off, "Flip vertical", "V")) app.flipV = !app.flipV;
+}
+
+// The channel switch (.seg): RGB R G B A L.
+void channelSwitch(Row& row) {
+    static const char* labels[] = {"RGB", "R", "G", "B", "A", "L"};
+    static const char* tips[] = {"All channels", "Red channel", "Green channel", "Blue channel", "Alpha channel", "Luminance"};
+    static const char* keys[] = {"C", "R", "G", "B", "A", "Y"};
+    float widths[6], total = 2 * line();
+    for (int i = 0; i < 6; ++i) {
+        widths[i] = std::max(S(22), S(6) * 2 + textSize(fontMedium, 12, labels[i]).x) + (i ? line() : 0.0f);
+        total += widths[i];
+    }
+    if (row.measure) {
+        row.advance(total);
+        return;
+    }
+    const Theme& t = T();
+    const bool off = noImage();
+    const float alpha = off ? 0.38f : 1.0f;
+    const float h = S(22);
+    const ImVec2 a(row.x, std::round(row.cy - h * 0.5f)), b(a.x + total, a.y + h);
+    float x = a.x + line();
+    for (int i = 0; i < 6; ++i) {
+        const float bx = x + (i ? line() : 0.0f), bw = widths[i] - (i ? line() : 0.0f);
+        if (i) row.dl->AddRectFilled(ImVec2(x, a.y), ImVec2(x + line(), b.y), fade(t.bd2, alpha));
+        ImGui::SetCursorScreenPos(ImVec2(bx, a.y + line()));
+        ImGui::PushID(i);
+        const bool pressed = ImGui::InvisibleButton("ch", ImVec2(bw, h - 2 * line())) && !off;
+        ImGui::PopID();
+        const bool on = !off && int(app.channel) == i;
+        const bool hovered = !off && ImGui::IsItemHovered();
+        const ImVec2 ra(bx, a.y + line()), rb(bx + bw, b.y - line());
+        ImDrawFlags corners = (i == 0 ? ImDrawFlags_RoundCornersLeft : 0) | (i == 5 ? ImDrawFlags_RoundCornersRight : 0);
+        if (!corners) corners = ImDrawFlags_RoundCornersNone;
+        if (on) row.dl->AddRectFilled(ra, rb, fade(t.acf, alpha), S(2), corners);
+        else if (hovered) row.dl->AddRectFilled(ra, rb, t.ctlh, S(2), corners);
+        const float tw = textSize(fontMedium, 12, labels[i]).x;
+        drawText(row.dl, fontMedium, 12, bx + std::round((bw - tw) * 0.5f), row.cy,
+                 fade(on ? kWhite : hovered ? t.tx : t.tx2, alpha), labels[i]);
+        if (!off) requestTip(ImRect(ra, rb), tips[i], keys[i], !row.topBar);
+        if (pressed) app.channel = (on && i != 0) ? Channel::RGB : Channel(i);
+        x += widths[i];
+    }
+    row.dl->AddRect(a, b, fade(t.bd2, alpha), S(3), 0, line());
+    row.hole(ImRect(a, b));
+    row.advance(total);
+}
+
+std::string textureModeLabel() {
+    std::string mode = app.dataIsLinear ? "Linear" : "sRGB";
+    if (app.normalZ || app.flipGreen) mode += " \xC2\xB7 Normal";
+    if (app.forcedMip >= 0) mode += " \xC2\xB7 Mip " + std::to_string(app.forcedMip);
+    return mode;
+}
+
+void channelsGroup(Row& r) {
+    r.separator(16, 5);
+    channelSwitch(r);
+    ImRect tr;
+    const std::string mode = textureModeLabel();
+    toggleMenuOnPress(r.dropdown("texmode", mode.c_str(), fontRegular, 12, 22, 7, 4, "Texture mode", nullptr, &tr, noImage()),
+                      "texmode menu");
+    if (!r.measure && beginMenu("texmode menu", ImVec2(tr.Min.x, tr.Max.y + S(4)))) {
+        textureMenuItems();
+        endMenu();
+    }
+}
+
+void backgroundGroup(Row& r) {
+    const int off = noImage() ? kDisabled : 0;
+    r.separator(16, 5);
+    const float x0 = r.x;
+    const bool checker = app.alphaBackground == AlphaBackground::Checker && !app.ignoreAlpha;
+    const bool alphaOpen = ImGui::IsPopupOpen("alpha menu");
+    toggleMenuOnPress(r.button("alphabg", Icon::AlphaBackground, nullptr,
+                               kChevron | (checker && !off ? kOn : 0) | (alphaOpen ? kOpen : 0) | off,
+                               "Alpha background", "Shift+A"),
+                      "alpha menu");
+    if (!r.measure && beginMenu("alpha menu", ImVec2(x0, r.cy + S(16)), ImVec2(0, 0), S(196))) {
+        alphaMenuItems();
+        endMenu();
+    }
+    const float x1 = r.x;
+    const bool tilingOpen = ImGui::IsPopupOpen("tiling menu");
+    toggleMenuOnPress(r.button("tiling", Icon::Tiling, nullptr,
+                               kChevron | (app.tiling != Tiling::Off && !off ? kOn : 0) | (tilingOpen ? kOpen : 0) | off,
+                               "Tiling", "T"),
+                      "tiling menu");
+    if (!r.measure && beginMenu("tiling menu", ImVec2(x1, r.cy + S(16)), ImVec2(0, 0), S(236))) {
+        tilingMenuItems();
+        endMenu();
+    }
+}
+
+void overlaysGroup(Row& r) {
+    const int off = noImage() ? kDisabled : 0;
+    r.separator(16, 5);
+    if (r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", "Ctrl+G")) app.grid = !app.grid;
+    r.button("ruler", Icon::Ruler, nullptr, kDisabled, "Ruler (coming soon)", "Ctrl+U");
+    if (r.button("outline", Icon::PixelOutline, nullptr, (app.pixelOutline && !off ? kOn : 0) | off, "Pixel outline", "P"))
+        app.pixelOutline = !app.pixelOutline;
+}
+
+void analysisGroup(Row& r) {
+    r.separator(16, 5);
+    r.button("match", Icon::ColorMatch, nullptr, kDisabled, "Color match (coming soon)", "M");
+    r.button("histogram", Icon::Histogram, nullptr, kDisabled, "Histogram (coming soon)", "Ctrl+H");
+    const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
+    if (r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", "I"))
+        app.showInfo = !app.showInfo;
+    r.button("layers", Icon::Layers, nullptr, kDisabled, "Layers (coming soon)", "L");
+}
+
+void moreMenuItems() {
+    const bool off = noImage();
+    if (menuItem({"Rotate left", "Ctrl+L", false, !off, false, Icon::RotateLeft})) rotate(-1);
+    if (menuItem({"Rotate right", "Ctrl+R", false, !off, false, Icon::RotateRight})) rotate(+1);
+    if (menuItem({"Flip horizontal", "H", false, !off, false, Icon::FlipH})) app.flipH = !app.flipH;
+    if (menuItem({"Flip vertical", "V", false, !off, false, Icon::FlipV})) app.flipV = !app.flipV;
+    menuSeparator();
+    if (submenu("more alpha", "Alpha background", Icon::AlphaBackground)) {
+        alphaMenuItems();
+        endSubmenu();
+    }
+    if (submenu("more tiling", "Tiling", Icon::Tiling)) {
+        tilingMenuItems();
+        endSubmenu();
+    }
+    menuSeparator();
+    if (menuItem({"Grid", "Ctrl+G", false, !off, false, Icon::Grid})) app.grid = !app.grid;
+    menuItem({"Ruler", "Ctrl+U", false, false, false, Icon::Ruler});
+    if (menuItem({"Pixel outline", "P", false, !off, false, Icon::PixelOutline})) app.pixelOutline = !app.pixelOutline;
+    menuSeparator();
+    if (submenu("more theme", "Theme", app.darkTheme ? Icon::Theme : Icon::Sun)) {
+        themeMenuItems();
+        endSubmenu();
+    }
+    menuItem({"Settings", "Ctrl+,", false, false, false, Icon::Settings});
+    if (menuItem({"Keyboard shortcuts", "F1", false, true, false, Icon::Help})) app.showHelp = !app.showHelp;
+}
+
+void compareGroup(Row& r, const TopLayout& L) {
+    r.separator(16, 5);
+    r.button("compare", Icon::Compare, L.compact ? nullptr : "Compare", kDisabled, "Compare (coming soon)", "Ctrl+K");
+    if (!L.compact) return;
+    const float x0 = r.x;
+    const bool open = ImGui::IsPopupOpen("more menu");
+    toggleMenuOnPress(r.button("more", Icon::More, nullptr, open ? kOpen : 0, "More tools", nullptr), "more menu");
+    if (!r.measure && beginMenu("more menu", ImVec2(x0, r.cy + S(16)), ImVec2(0, 0), S(250))) {
+        moreMenuItems();
+        endMenu();
+    }
+}
+
+void rightGroup(Row& r, const TopLayout& L) {
+    if (r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", "Ctrl+T")) setTopmost(!app.topmost);
+    char pct[16];
+    std::snprintf(pct, sizeof pct, "%d%%", int(std::lround(app.opacity * 100)));
+    const bool open = ImGui::IsPopupOpen("opacity menu");
+    toggleMenuOnPress(r.button("opacity", Icon::Opacity, pct, kMonoLabel | (app.opacity < 1.0f ? kOn : 0) | (open ? kOpen : 0),
+                               "Window opacity", "Alt+Wheel"),
+                      "opacity menu");
+    if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
+    if (!L.compact) {
+        if (r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
+                     app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
+            app.darkTheme = !app.darkTheme;
+            saveSettings();
+        }
+        r.button("settings", Icon::Settings, nullptr, kDisabled, "Settings (coming soon)", "Ctrl+,");
+        if (r.button("help", Icon::Help, nullptr, app.showHelp ? kOn : 0, "Keyboard shortcuts", "F1"))
+            app.showHelp = !app.showHelp;
+    }
+    r.separator(16, 5);
+    r.x -= S(5) + r.gap;  // the last separator has no right margin
+}
+
+// Minimise, maximise and close (.wc): 40 wide, the bar's height, no gap between them.
+float windowButtons(Row& r) {
+    const float w = S(40), h = topBarH - line();
+    if (r.measure) return 3 * w;
+    const Theme& t = T();
+    const Icon icons[3] = {Icon::Minimize, IsZoomed(app.hwnd) ? Icon::Restore : Icon::Maximize, Icon::Close};
+    const char* ids[3] = {"min", "max", "close"};
+    for (int i = 0; i < 3; ++i) {
+        const ImVec2 a(r.x + i * w, 0), b(a.x + w, h);
+        ImGui::SetCursorScreenPos(a);
+        const bool pressed = ImGui::InvisibleButton(ids[i], ImVec2(w, h));
+        const bool hovered = ImGui::IsItemHovered();
+        ImU32 fg = t.tx2;
+        if (hovered) {
+            r.dl->AddRectFilled(a, b, i == 2 ? kCloseHover : t.ctlh);
+            fg = i == 2 ? kWhite : t.tx;
+        }
+        drawIcon(r.dl, icons[i], ImVec2(a.x + std::round((w - S(14)) * 0.5f), std::round((h - S(14)) * 0.5f)), S(14), fg, 1.2f);
+        r.hole(ImRect(a, b));
+        if (pressed) {
+            if (i == 0) ShowWindow(app.hwnd, SW_MINIMIZE);
+            else if (i == 1) toggleMaximize();
+            else PostMessageW(app.hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+    return 3 * w;
+}
+
+void leftGroups(Row& r, const TopLayout& L) {
+    fileGroup(r, L);
+    viewGroup(r, L);
+    channelsGroup(r);
+    if (!L.compact) {
+        backgroundGroup(r);
+        overlaysGroup(r);
+    }
+    analysisGroup(r);
+    compareGroup(r, L);
+}
+
+}  // namespace
+
+void cycleAlphaBackground() {
+    app.ignoreAlpha = false;
+    app.alphaBackground = AlphaBackground((int(app.alphaBackground) + 1) % int(AlphaBackground::Count));
+}
+
+void setTiling(Tiling t) {
+    app.tiling = t;
+    if (app.fit) fitToWindow();
+}
+
+void copyColorValue() {
+    if (!lastReadout.readable) return;
+    ImGui::SetClipboardText(formatColor(lastReadout.display, lastReadout.raw, app.colorFormat).c_str());
+    flashCopied(ImGui::GetID("##colorvalue"));
+}
+
+void copyAllColorFormats() {
+    if (!lastReadout.readable) return;
+    std::string all;
+    for (int i = 0; i < int(ColorFormat::Count); ++i)
+        all += std::string(kColorFormatNames[i]) + ": " + formatColor(lastReadout.display, lastReadout.raw, ColorFormat(i)) + "\r\n";
+    ImGui::SetClipboardText(all.c_str());
+    flashCopied(ImGui::GetID("##colorvalue"));
+}
+
+void opacityPopup(ImVec2 anchor) {
+    if (!beginMenu("opacity menu", anchor, ImVec2(1, 0))) return;
+    const Theme& t = T();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p(p0.x + S(6), p0.y + S(6));  // 10 px padding: 4 from the menu plus 6
+    const float w = S(214);
+    ImGui::Dummy(ImVec2(w + 2 * S(6), S(6) + S(16) + S(10) + S(16) + S(8) + S(10) + S(8) + S(18) + S(6)));
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%d%%", int(std::lround(app.opacity * 100)));
+    float y = p.y + S(8);
+    drawText(dl, fontSemibold, 12, p.x, y, t.tx, "Window opacity");
+    drawText(dl, fontMono, 12, p.x + w - textSize(fontMono, 12, buf).x, y, t.tx, buf);
+    y += S(8) + S(10) + S(8);
+    float v = (app.opacity - 0.1f) / 0.9f;
+    bool reset = false;
+    if (slider(dl, "opacity slider", p.x, y, 214, v, 0.0f, &reset)) setOpacity(0.1f + v * 0.9f);
+    if (reset) setOpacity(1.0f);
+    y += S(8) + S(8) + S(5);
+    drawText(dl, fontMono, 10, p.x, y, t.tx3, "10%");
+    drawText(dl, fontMono, 10, p.x + w - textSize(fontMono, 10, "100%").x, y, t.tx3, "100%");
+    y += S(5) + S(8) + S(9);
+    const float kw = kbdChip(dl, p.x, y, "Alt");
+    drawText(dl, fontRegular, 11, p.x + kw + S(6), y, t.tx3, "+ wheel anywhere");
+    endMenu();
+}
+
+void topBar() {
+    const Theme& t = T();
+    const float W = float(app.winW);
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(W, topBarH));
+    ImGui::Begin("##top", nullptr, kBarFlags);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, topBarH), t.bar);
+    dl->AddRectFilled(ImVec2(0, topBarH - line()), ImVec2(W, topBarH), t.bd);
+
+    Row r;
+    r.dl = dl;
+    r.cy = (topBarH - line()) * 0.5f;
+    r.gap = S(2);
+    r.topBar = true;
+
+    // Find the widest layout that fits, measuring without drawing.
+    auto width = [&](const TopLayout& L) {
+        r.measure = true;
+        r.x = 0;
+        leftGroups(r, L);
+        float w = S(6) + r.x + S(8);
+        r.x = 0;
+        rightGroup(r, L);
+        w += r.x + windowButtons(r);
+        return w;
+    };
+    TopLayout L;
+    if (width(L) > W) {
+        L.compact = true;
+        for (float name : {240.0f, 200.0f, 160.0f, 120.0f, 90.0f, 60.0f}) {
+            L.nameMax = name;
+            if (width(L) <= W) break;
+        }
+        if (width(L) > W) L.counter = false;
+    }
+    TopLayout right = L;
+    r.measure = true;
+    r.x = 0;
+    rightGroup(r, right);
+    const float rightW = r.x + windowButtons(r);
+
+    r.measure = false;
+    r.x = S(6);
+    leftGroups(r, L);
+    r.x = W - rightW;
+    rightGroup(r, L);
+    windowButtons(r);
+    ImGui::End();
+}
+
+// ---- bottom bar ----
+
+namespace {
+
+// 4 significant digits as in the design: 0.0625, 4.000, 48236.
+std::string formatValue(float v) {
+    char buf[32];
+    const float a = std::fabs(v);
+    if (v == 0) return "0";
+    if (a >= 1000) std::snprintf(buf, sizeof buf, "%.0f", double(v));
+    else if (a >= 100) std::snprintf(buf, sizeof buf, "%.1f", double(v));
+    else if (a >= 10) std::snprintf(buf, sizeof buf, "%.2f", double(v));
+    else if (a >= 1) std::snprintf(buf, sizeof buf, "%.3f", double(v));
+    else if (a >= 0.001f) std::snprintf(buf, sizeof buf, "%.4f", double(v));
+    else std::snprintf(buf, sizeof buf, "%.2e", double(v));
+    return buf;
+}
+
+void label(ImDrawList* dl, float& x, float cy, const char* text, float gap) {
+    drawText(dl, fontMedium, 11, x, cy, T().tx3, text);
+    x += textSize(fontMedium, 11, text).x + gap;
+}
+
+void vs2(ImDrawList* dl, float& x, float cy, float gap) {
+    x += S(4);
+    dl->AddRectFilled(ImVec2(x, std::round(cy - S(14))), ImVec2(x + line(), std::round(cy - S(14)) + S(28)), T().bd);
+    x += line() + S(4) + gap;
+}
+
+void gammaSlider(ImDrawList* dl, float& x, float cy, float width, float gap) {
+    float g = (std::log2(app.gamma) + 2.0f) / 4.0f;
+    bool reset = false;
+    if (slider(dl, "gamma", x, cy, width, g, 0.0f, &reset)) {
+        app.gamma = std::exp2(g * 4.0f - 2.0f);
+        if (std::fabs(app.gamma - 1.0f) < 0.03f) app.gamma = 1.0f;  // snaps to 1.00 at the centre
+    }
+    if (reset) app.gamma = 1.0f;
+    requestTip(ImRect(ImVec2(x, cy - S(8)), ImVec2(x + S(width), cy + S(8))), "Display gamma; double-click resets", nullptr,
+               true);
+    x += S(width) + gap;
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%.2f", double(app.gamma));
+    drawText(dl, fontMono, 12, x, cy, T().tx, buf);
+    x += textSize(fontMono, 12, buf).x + gap;
+}
+
+// The Range control: black and white points on a log2 scale over the image's values, with the luminance
+// histogram above and marks for the image minimum, SDR white (1.0), the display peak and the maximum.
+void rangeSlider(ImDrawList* dl, float x, float cy, float width) {
+    const Theme& t = T();
+    const htv::ImageStats& st = app.stats;
+    const float w = S(width), top = std::round(cy - S(20));
+    const float minStop = st.valid && st.minLuminance > 0 ? std::log2(st.minLuminance) : -8.0f;
+    const float maxStop = st.valid && st.maxValue > 0 ? std::log2(st.maxValue) : 4.0f;
+    float lo = std::min({minStop, std::log2(std::max(app.whitePoint, 1e-6f)) - 1.0f, 0.0f});
+    if (app.blackPoint > 0) lo = std::min(lo, std::log2(app.blackPoint));
+    float hi = std::max({maxStop, std::log2(std::max(app.whitePoint, 1e-6f)), 1.0f});
+    if (app.displayPeak > 0) hi = std::max(hi, std::log2(app.displayPeak));
+    const float span = std::max(hi - lo, 2.0f);
+    lo -= span * 0.055f;
+    hi += span * 0.02f;
+    auto pos = [&](float v) { return v <= 0 ? 0.0f : std::clamp((std::log2(v) - lo) / (hi - lo), 0.0f, 1.0f); };
+    auto valueAt = [&](float p) { return p <= 0.005f ? 0.0f : std::exp2(lo + p * (hi - lo)); };
+
+    // Mini histogram, 18 px high.
+    if (st.valid) {
+        const int bins = std::max(8, int(w / S(3)));
+        const std::vector<float> h = st.histogramBetween(lo, hi, bins);
+        const float peak = *std::max_element(h.begin(), h.end());
+        if (peak > 0) {
+            const ImU32 c = hex(0x8a8a8a, 0.55f);
+            for (int i = 0; i < bins; ++i) {
+                const float bh = std::round(h[size_t(i)] / peak * S(18));
+                if (bh <= 0) continue;
+                const float x0 = std::round(x + w * i / bins), x1 = std::round(x + w * (i + 1) / bins);
+                dl->AddRectFilled(ImVec2(x0, top + S(2) + S(18) - bh), ImVec2(x1, top + S(2) + S(18)), c);
+            }
+        }
+    }
+    // Track and the fill between the points.
+    const float ty = top + S(21);
+    dl->AddRectFilled(ImVec2(x, ty), ImVec2(x + w, ty + S(4)), t.bd2, S(2));
+    const float bx = std::round(x + pos(app.blackPoint) * w), wx = std::round(x + pos(app.whitePoint) * w);
+    if (wx > bx) dl->AddRectFilled(ImVec2(bx, ty), ImVec2(wx, ty + S(4)), t.ac, S(2));
+
+    // Marks and their labels; a label that would overlap one already drawn is left out.
+    std::vector<std::pair<float, float>> taken;
+    auto mark = [&](float v, ImU32 col, const char* text, int align, bool dashed) {
+        if (v <= 0) return;
+        const float mx = std::round(x + pos(v) * w);
+        if (dashed) {
+            for (float y = top + S(2); y < top + S(28); y += S(4))
+                dl->AddRectFilled(ImVec2(mx, y), ImVec2(mx + line(), std::min(y + S(2), top + S(28))), col);
+        } else {
+            dl->AddRectFilled(ImVec2(mx, top + S(2)), ImVec2(mx + line(), top + S(28)), col);
+        }
+        const float lw = textSize(fontMono, 10, text).x;
+        float lx = align < 0 ? mx - lw : align == 0 ? mx - std::round(lw * 0.5f) : mx + S(7);
+        lx = std::clamp(lx, x - S(4), x + w - lw + S(4));
+        for (auto [a, b] : taken)
+            if (lx < b + S(4) && lx + lw > a - S(4)) return;
+        taken.push_back({lx, lx + lw});
+        drawText(dl, fontMono, 10, lx, top + S(35), col, text);
+    };
+    char buf[48];
+    mark(1.0f, t.tx2, "1.0", 0, false);
+    if (app.displayPeak > 0) {
+        std::snprintf(buf, sizeof buf, "peak %.3g", double(app.displayPeak));
+        mark(app.displayPeak, t.warn, buf, 1, true);
+    }
+    if (st.valid) {
+        mark(st.minLuminance, t.tx3, "min", 0, false);
+        std::snprintf(buf, sizeof buf, "max %s", formatValue(st.maxValue).c_str());
+        mark(st.maxValue, t.tx3, buf, -1, false);
+    }
+
+    // Knobs: black point dark, white point light.
+    auto knob = [&](float kx, ImU32 fill, ImU32 border) {
+        const ImVec2 a(kx - S(4), top + S(15)), b(a.x + S(8), a.y + S(16));
+        dl->AddRectFilled(a, b, fill, S(2));
+        dl->AddRect(a, b, border, S(2), 0, line());
+    };
+    knob(bx, hex(0x111111), hex(0x9a9a9a));
+    knob(wx, hex(0xf2f2f2), t.knb);
+
+    // Dragging moves the nearer point; a double click resets to 0 .. 1.
+    static int dragging = -1;
+    ImGui::SetCursorScreenPos(ImVec2(x - S(4), top + S(8)));
+    ImGui::InvisibleButton("range", ImVec2(w + S(8), S(28)));
+    const float mp = std::clamp((ImGui::GetIO().MousePos.x - x) / w, 0.0f, 1.0f);
+    if (ImGui::IsItemActivated()) dragging = std::fabs(mp * w - (bx - x)) <= std::fabs(mp * w - (wx - x)) ? 0 : 1;
+    if (ImGui::IsItemActive() && dragging >= 0) {
+        if (dragging == 0) app.blackPoint = std::min(valueAt(mp), app.whitePoint * 0.99f);
+        else app.whitePoint = std::max(valueAt(std::max(mp, 0.006f)), app.blackPoint * 1.01f + 1e-6f);
+    }
+    if (ImGui::IsItemDeactivated()) dragging = -1;
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        app.blackPoint = 0.0f;
+        app.whitePoint = 1.0f;
+    }
+    requestTip(ImRect(ImVec2(x, top), ImVec2(x + w, top + S(30))), "Black and white points, in stops; double-click resets",
+               nullptr, true);
+}
+
+const char* kToneMapNames[int(ToneMap::Count)] = {"Linear clip", "Reinhard", "ACES", "AgX"};
+
+// HDR and 16-bit images (Hdr artboard): Exposure | Range | Tone map | Gamma | Clip, NaN.
+void hdrRow(ImDrawList* dl, float y0, float W) {
+    const Theme& t = T();
+    const float h = S(44);
+    dl->AddRectFilled(ImVec2(0, y0 + h - line()), ImVec2(W, y0 + h), t.bd);
+    const float cy = y0 + (h - line()) * 0.5f;
+    const float gap = S(8);
+    float x = S(12);
+    char buf[32];
+
+    // Everything but the range track has a fixed width; the track takes what is left, up to 520 px.
+    const float nanW = textSize(fontMono, 11, "NaN 000000").x;
+    const float fixed = S(12) + textSize(fontMedium, 11, "Exposure").x + gap + S(180) + gap + S(70) + gap +
+                        (S(8) + line() + gap) * 4 + textSize(fontMedium, 11, "Range").x + gap + S(58) + gap + gap +
+                        S(58) + gap + textSize(fontRegular, 12, "Auto").x + S(14) + gap +
+                        textSize(fontMedium, 11, "Tone map").x + gap + textSize(fontRegular, 12, "Linear clip").x +
+                        S(30) + gap + textSize(fontMedium, 11, "Gamma").x + gap + S(70) + gap +
+                        textSize(fontMono, 12, "1.00").x + gap + S(16) + textSize(fontRegular, 12, "Clip").x + S(15) +
+                        gap + S(12) + gap + nanW + S(12);
+    const float rangeW = std::clamp((W - fixed) / s, 120.0f, 520.0f);
+
+    label(dl, x, cy, "Exposure", gap);
+    float e = (app.exposure + 10.0f) / 20.0f;
+    bool reset = false;
+    if (slider(dl, "exposure", x, cy, 180, e, 0.5f, &reset, 0.5f))
+        app.exposure = std::round((e * 20.0f - 10.0f) * 20.0f) / 20.0f;
+    if (reset) app.exposure = 0.0f;
+    requestTip(ImRect(ImVec2(x, cy - S(8)), ImVec2(x + S(180), cy + S(8))), "Exposure in stops; double-click resets",
+               "Ctrl+Wheel", true);
+    x += S(180) + gap;
+    std::snprintf(buf, sizeof buf, "%+.2f EV", double(app.exposure));
+    float ev = app.exposure;
+    if (numberField(dl, "exposure value", x, cy, 70, buf, ev, "Click to type a value")) app.exposure = std::clamp(ev, -10.0f, 10.0f);
+    x += S(70) + gap;
+    vs2(dl, x, cy, gap);
+
+    label(dl, x, cy, "Range", gap);
+    float black = app.blackPoint, white = app.whitePoint;
+    if (numberField(dl, "black point", x, cy, 58, formatValue(app.blackPoint).c_str(), black, "Black point"))
+        app.blackPoint = std::clamp(black, 0.0f, app.whitePoint * 0.99f);
+    x += S(58) + gap;
+    rangeSlider(dl, x, cy, rangeW);
+    x += S(rangeW) + gap;
+    if (numberField(dl, "white point", x, cy, 58, formatValue(app.whitePoint).c_str(), white, "White point"))
+        app.whitePoint = std::max(white, app.blackPoint * 1.01f + 1e-6f);
+    x += S(58) + gap;
+    Row r;
+    r.dl = dl;
+    r.cy = cy;
+    r.gap = gap;
+    r.x = x;
+    if (r.button("auto", Icon::Count, "Auto", kBordered | (app.stats.valid ? 0 : kDisabled), "Auto range from percentiles",
+                 "Ctrl+A", 16, 22))
+        autoRange();
+    x = r.x;
+    vs2(dl, x, cy, gap);
+
+    label(dl, x, cy, "Tone map", gap);
+    r.x = x;
+    ImRect tr;
+    toggleMenuOnPress(r.dropdown("tonemap", kToneMapNames[int(app.toneMap)], fontRegular, 12, 22, 7, 4,
+                                 app.dataIsLinear ? "Tone mapping" : "Tone mapping applies to linear data", nullptr, &tr),
+                      "tonemap menu");
+    if (beginMenu("tonemap menu", ImVec2(tr.Min.x, tr.Min.y - S(4)), ImVec2(0, 1))) {
+        for (int i = 0; i < int(ToneMap::Count); ++i)
+            if (menuItem({kToneMapNames[i], nullptr, int(app.toneMap) == i, true, true})) app.toneMap = ToneMap(i);
+        endMenu();
+    }
+    x = r.x;
+    vs2(dl, x, cy, gap);
+
+    label(dl, x, cy, "Gamma", gap);
+    gammaSlider(dl, x, cy, 70, gap);
+    vs2(dl, x, cy, gap);
+
+    r.x = x;
+    if (r.button("clip", Icon::Clip, "Clip", app.showClipping ? kOn : 0, "Show clipping and NaN", "Z")) app.showClipping = !app.showClipping;
+    x = r.x;
+    const float sw = S(12);
+    dl->AddRectFilled(ImVec2(x, std::round(cy - sw * 0.5f)), ImVec2(x + sw, std::round(cy - sw * 0.5f) + sw), kNan);
+    x += sw + gap;
+    if (app.stats.valid) std::snprintf(buf, sizeof buf, "NaN %llu", static_cast<unsigned long long>(app.stats.nonFinite));
+    else std::snprintf(buf, sizeof buf, "NaN \xE2\x80\x93");
+    drawText(dl, fontMono, 11, x, cy, t.tx3, buf);
+}
+
+// 8-bit images: Gamma only, 30 px.
+void gammaRow(ImDrawList* dl, float y0, float W) {
+    const float h = S(30);
+    dl->AddRectFilled(ImVec2(0, y0 + h - line()), ImVec2(W, y0 + h), T().bd);
+    const float cy = y0 + (h - line()) * 0.5f;
+    float x = S(12);
+    label(dl, x, cy, "Gamma", S(8));
+    gammaSlider(dl, x, cy, 160, S(8));
+}
+
+// Right side of the status row: texts separated by .vs, laid out from the right edge.
+void statusRight(ImDrawList* dl, float cy, float W, float leftEnd, const std::vector<std::pair<std::string, ImU32>>& items) {
+    const float vsW = S(6) * 2 + line(), gap = S(6);
+    float x = W - S(4);
+    for (size_t i = items.size(); i-- > 0;) {
+        const auto& [text, col] = items[i];
+        const float room = x - leftEnd - S(12);
+        if (room < S(40)) return;
+        const std::string shown = i == 0 ? ellipsize(fontMono, 12, text, room) : text;
+        const float tw = textSize(fontMono, 12, shown.c_str()).x;
+        x -= tw;
+        drawText(dl, fontMono, 12, x, cy, col, shown.c_str());
+        if (i > 0) {
+            x -= gap + vsW;
+            dl->AddRectFilled(ImVec2(x + S(6), std::round(cy - S(7))), ImVec2(x + S(6) + line(), std::round(cy - S(7)) + S(14)),
+                              T().bd2);
+            x -= gap;
+        }
+    }
+}
+
+std::string imageDescription() {
+    std::string desc = std::to_string(app.image.width) + "\xC3\x97" + std::to_string(app.image.height);
+    std::string d = app.image.description;
+    // "PNG, 8 bit RGBA" reads as "PNG RGBA · 8-bit", as in the design.
+    const size_t comma = d.find(", "), bit = d.find(" bit ");
+    if (comma != std::string::npos && bit != std::string::npos && bit > comma &&
+        d.find(", ", comma + 2) == std::string::npos)
+        d = d.substr(0, comma) + " " + d.substr(bit + 5) + ", " + d.substr(comma + 2, bit - comma - 2) + "-bit";
+    // "EXR, half A,B,G,R, ZIP" reads as "EXR half RGBA · ZIP": EXR lists its channels alphabetically.
+    if (d.rfind("EXR, ", 0) == 0) {
+        d.replace(3, 2, " ");
+        d = rgbaOrder(d);
+    }
+    for (size_t p; (p = d.find(", ")) != std::string::npos;) d.replace(p, 2, " \xC2\xB7 ");
+    return desc + " \xC2\xB7 " + d;
+}
+
+void statusRow(ImDrawList* dl, float y0, float W) {
+    const Theme& t = T();
+    const float h = S(24);
+    Row r;
+    r.dl = dl;
+    r.cy = y0 + h * 0.5f;
+    r.gap = S(6);
+    r.x = S(12);
+
+    // Empty window and read errors have their own short status.
+    if (!app.hasImage) {
+        if (app.loading) {
+            r.text(isLoadingVisible() ? "Loading" : "", fontMono, 12, t.tx3);
+        } else if (!app.error.empty()) {
+            r.text("Read error", fontMono, 12, t.err);
+            r.text(fileName().c_str(), fontMono, 12, t.tx3);
+            statusRight(dl, r.cy, W, r.x, {{app.errorFormat.empty() ? std::string("?") : app.errorFormat, t.tx2},
+                                           {formatBytes(app.loadingSize), t.tx2}});
+        } else {
+            r.text("Ready", fontMono, 12, t.tx2);
+            statusRight(dl, r.cy, W, r.x, {{"v" HTV_VERSION, t.tx2}});
+        }
+        return;
+    }
+    if (isLoadingVisible()) {
+        const std::string prev = "Showing previous: " + (app.fromClipboard ? std::string("Clipboard")
+                                                                           : utf8(app.shownPath.filename().wstring()));
+        r.text(prev.c_str(), fontMono, 12, t.tx3);
+        statusRight(dl, r.cy, W, r.x,
+                    {{imageDescription(), t.tx2}, {formatZoom(app.zoom), t.tx}, {formatBytes(app.fileSize), t.tx2}});
+        return;
+    }
+
+    const Readout px = readPixelUnderCursor();
+    lastReadout = px;
+    const bool hdr = isHighPrecision(app.image);
+
+    // Coordinates, padded to the image's digit count so the rest of the row stays put.
+    const int digits = int(std::to_string(std::max(app.image.width, app.image.height)).size());
+    char buf[96];
+    r.text("X", fontMono, 12, t.tx3);
+    std::snprintf(buf, sizeof buf, "%*s", digits, px.valid ? std::to_string(px.x).c_str() : "-");
+    r.text(buf, fontMono, 12, t.tx);
+    r.text("Y", fontMono, 12, t.tx3);
+    std::snprintf(buf, sizeof buf, "%*s", digits, px.valid ? std::to_string(px.y).c_str() : "-");
+    r.text(buf, fontMono, 12, t.tx);
+    if (px.tileX >= 0) {
+        std::snprintf(buf, sizeof buf, "tile %d,%d", px.tileX, px.tileY);
+        r.text(buf, fontMono, 12, t.tx3);
+    }
+    r.separator(14, 6);
+
+    // Swatch and value; a click on the value copies it.
+    const float sw = S(12);
+    auto swatch = [&](const float display[4], bool show) {
+        const ImVec2 sa(r.x, std::round(r.cy - sw * 0.5f));
+        if (show) dl->AddRectFilled(sa, ImVec2(sa.x + sw, sa.y + sw), swatchColor(display));
+        dl->AddRect(sa, ImVec2(sa.x + sw, sa.y + sw), t.bd2, 0, 0, line());
+        r.advance(sw);
+    };
+    swatch(px.display, px.readable);
+    const ImGuiID copyId = ImGui::GetID("##colorvalue");
+    if (px.readable) {
+        const std::string value = formatColor(px.display, px.raw, app.colorFormat);
+        const float vw = textSize(fontMono, 12, value.c_str()).x;
+        const ImVec2 va(r.x, r.cy - S(10));
+        ImGui::SetCursorScreenPos(va);
+        if (ImGui::InvisibleButton("value", ImVec2(vw, S(20)))) copyColorValue();
+        const bool hovered = ImGui::IsItemHovered();
+        requestTip(ImRect(va, ImVec2(r.x + vw, r.cy + S(10))), "Click to copy", "Ctrl+C", true);
+        if (copiedRecently(copyId)) {
+            r.text("Copied", fontMono, 12, t.ok);
+            r.x += std::max(0.0f, vw - textSize(fontMono, 12, "Copied").x);
+        } else {
+            drawText(dl, fontMono, 12, r.x, r.cy, t.tx, value.c_str());
+            if (hovered) dl->AddRectFilled(ImVec2(r.x, r.cy + S(7)), ImVec2(r.x + vw, r.cy + S(7) + line()), t.tx3);
+            r.advance(vw);
+        }
+        if (app.imageAlpha && !hdr) {
+            std::snprintf(buf, sizeof buf, "\xCE\xB1 %d", int(std::lround(std::clamp(px.raw[3], 0.0f, 1.0f) * 255)));
+            r.text(buf, fontMono, 12, t.tx3);
+        }
+    } else {
+        r.text("-", fontMono, 12, t.tx3);
+    }
+    if (valueIsApproximate(px)) {
+        const ImVec2 wa(r.x, std::round(r.cy - S(7)));
+        drawIcon(dl, Icon::Warning, wa, S(14), t.warn);
+        ImGui::SetCursorScreenPos(wa);
+        ImGui::InvisibleButton("warn", ImVec2(S(14), S(14)));
+        std::snprintf(buf, sizeof buf, "%s %s", kColorFormatNames[int(app.colorFormat)],
+                      px.outOfRange ? "clips the value to 0-1 and rounds it to 8 bits" : "rounds the value to 8 bits");
+        requestTip(ImRect(wa, ImVec2(wa.x + S(14), wa.y + S(14))), buf, nullptr, true);
+        r.advance(S(14));
+    }
+
+    ImRect fr;
+    toggleMenuOnPress(r.dropdown("colorfmt", kColorFormatNames[int(app.colorFormat)], fontRegular, 11, 18, 6, 3,
+                                 "Color value format", nullptr, &fr),
+                      "colorfmt menu");
+    if (beginMenu("colorfmt menu", ImVec2(fr.Min.x, fr.Min.y - S(4)), ImVec2(0, 1), S(300))) {
+        menuHeading("Color format");
+        for (int i = 0; i < int(ColorFormat::Count); ++i) {
+            const std::string example = px.readable ? formatColor(px.display, px.raw, ColorFormat(i)) : std::string();
+            MenuItem m{kColorFormatNames[i], nullptr, int(app.colorFormat) == i, true, true};
+            if (px.readable) m.value = example.c_str();
+            if (menuItem(m)) app.colorFormat = ColorFormat(i);
+        }
+        menuSeparator();
+        menuNote("Click a value to copy", "Ctrl+Shift+C", "all");
+        endMenu();
+    }
+
+    if (hdr) {
+        // Exact values: float RGB in channel colours and luminance.
+        r.separator(14, 6);
+        r.text("float", fontMono, 12, t.tx3);
+        const ImU32 channel[3] = {app.darkTheme ? hex(0xff8a80) : hex(0xc0322b), app.darkTheme ? hex(0x8fe39a) : hex(0x1e7f3e),
+                                  app.darkTheme ? hex(0x8ab6ff) : hex(0x1f62d0)};
+        for (int c = 0; c < 3; ++c) {
+            std::snprintf(buf, sizeof buf, "%.4f", px.readable ? double(px.raw[c]) : 0.0);
+            r.text(px.readable ? buf : "-", fontMono, 12, channel[c]);
+        }
+        r.text("L", fontMono, 12, t.tx3);
+        std::snprintf(buf, sizeof buf, "%.4f", double(0.2126f * px.raw[0] + 0.7152f * px.raw[1] + 0.0722f * px.raw[2]));
+        r.text(px.readable ? buf : "-", fontMono, 12, t.tx);
+        if (app.imageAlpha) {
+            std::snprintf(buf, sizeof buf, "\xCE\xB1 %.3g", double(px.raw[3]));
+            r.text(buf, fontMono, 12, t.tx3);
+        }
+    }
+    if (r.button("copy", Icon::Copy, nullptr, px.readable ? 0 : kDisabled, "Copy value", "Ctrl+C", 14, 20)) copyColorValue();
+    if (r.button("lock", Icon::Pin, nullptr, app.pixelLocked ? kOn : (px.valid ? 0 : kDisabled),
+                 app.pixelLocked ? "Unlock pixel" : "Lock pixel", "Ctrl+Click", 14, 20))
+        toggleLock(px);
+    r.separator(14, 6);
+    r.text("Avg", fontMono, 12, t.tx3);
+    std::snprintf(buf, sizeof buf, "%d\xC3\x97%d", app.averageSize, app.averageSize);
+    ImRect ar;
+    toggleMenuOnPress(r.dropdown("avg", buf, fontRegular, 11, 18, 6, 3, "Average over an area", nullptr, &ar), "avg menu");
+    if (beginMenu("avg menu", ImVec2(ar.Min.x, ar.Min.y - S(4)), ImVec2(0, 1))) {
+        for (int n : {1, 3, 5}) {
+            char item[16];
+            std::snprintf(item, sizeof item, "%d\xC3\x97%d", n, n);
+            if (menuItem({item, nullptr, app.averageSize == n, true, true})) app.averageSize = n;
+        }
+        endMenu();
+    }
+    if (app.averageSize > 1 && px.readable) {
+        swatch(px.avgDisplay, true);
+        r.text(formatColor(px.avgDisplay, px.avgRaw, ColorFormat::Html).c_str(), fontMono, 12, t.tx2);
+    }
+
+    statusRight(dl, r.cy, W, r.x, {{imageDescription(), t.tx2}, {formatZoom(app.zoom), t.tx}, {formatBytes(app.fileSize), t.tx2}});
+}
+
+}  // namespace
+
+float sliderRowHeight() {
+    if (!app.hasImage) return 0.0f;
+    return isHighPrecision(app.image) ? 44.0f : 30.0f;
+}
+
+void bottomBar() {
+    const Theme& t = T();
+    const float W = float(app.winW), y0 = float(app.winH) - bottomBarH;
+    ImGui::SetNextWindowPos(ImVec2(0, y0));
+    ImGui::SetNextWindowSize(ImVec2(W, bottomBarH));
+    ImGui::Begin("##bottom", nullptr, kBarFlags);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(0, y0), ImVec2(W, y0 + bottomBarH), t.bar);
+    dl->AddRectFilled(ImVec2(0, y0), ImVec2(W, y0 + line()), t.bd);
+    const float rowH = sliderRowHeight();
+    if (rowH == 44.0f) hdrRow(dl, y0 + line(), W);
+    else if (rowH == 30.0f) gammaRow(dl, y0 + line(), W);
+    statusRow(dl, y0 + line() + S(rowH), W);
+    ImGui::End();
+}
+
+}  // namespace htv::ui

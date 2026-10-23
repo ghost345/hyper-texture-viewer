@@ -1,20 +1,16 @@
-// Hyper Texture Viewer: one borderless Win32 window, Direct3D 11, all view math in one pixel shader,
-// the interface drawn with Dear ImGui on top (ui.cpp).
+// Hyper Texture Viewer: one borderless Win32 window, Direct3D 11 (render.cpp), files loaded in the background
+// (files.cpp), the interface drawn with Dear ImGui on top (ui*.cpp).
 
-#include "app.h"
+#include "viewer.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
-#include <shlwapi.h>
 #include <shobjidl.h>
-#include <d3dcompiler.h>
 #include <dwmapi.h>
-#include <dxgi1_2.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cctype>
 #include <iterator>
 
 #include "imgui.h"
@@ -31,11 +27,7 @@ namespace htv {
 
 App app;
 
-namespace {
-
-// ---- timing ----
-
-double qpcMs() {
+double nowMs() {
     static LARGE_INTEGER freq = [] {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
@@ -71,529 +63,10 @@ std::string narrow(const std::wstring& w) {
     return s;
 }
 
-bool readFile(const fs::path& path, std::vector<uint8_t>& out, std::string& error) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        error = "cannot open file";
-        return false;
-    }
-    LARGE_INTEGER size;
-    GetFileSizeEx(f, &size);
-    if (size.QuadPart > 0x7fffffff) {
-        CloseHandle(f);
-        error = "files over 2 GB are not supported yet";
-        return false;
-    }
-    out.resize(size_t(size.QuadPart));
-    DWORD read = 0;
-    BOOL ok = out.empty() || ReadFile(f, out.data(), DWORD(out.size()), &read, nullptr);
-    CloseHandle(f);
-    if (!ok || read != out.size()) {
-        error = "cannot read file";
-        return false;
-    }
-    return true;
-}
-
-std::string lowerExtension(const fs::path& p) {
-    std::string e = narrow(p.extension().wstring());
-    if (!e.empty() && e[0] == '.') e.erase(0, 1);
-    for (char& c : e) c = char(tolower(static_cast<unsigned char>(c)));
-    return e;
-}
-
-bool hasBuiltInDecoder(const std::string& ext) {
-    const auto& list = htv::supportedExtensions();
-    return std::find(list.begin(), list.end(), ext) != list.end();
-}
-
-bool isSupported(const fs::path& p) {
-    const std::string ext = lowerExtension(p);
-    const auto& wic = htv::wicExtensions();
-    return hasBuiltInDecoder(ext) || std::find(wic.begin(), wic.end(), ext) != wic.end();
-}
-
-// ---- shaders ----
-
-const char kShader[] = R"(
-cbuffer View : register(b0) {
-    float2 imageSize;      // source image in pixels
-    float2 imageOrigin;    // top-left corner of the shown (rotated, tiled) image in window pixels
-    float zoom;
-    float exposureScale;   // 2^EV
-    uint channelMode;      // 0 RGBA, 1 R, 2 G, 3 B, 4 A, 5 RGB without alpha, 6 luminance
-    uint channels;         // channels the texture format stores
-    uint transfer;         // sRGB encodes before display: 0, 1 or 2
-    uint signedValues;     // snorm data in [-1, 1]
-    uint rotation;         // quarter turns clockwise
-    uint flips;            // 1 horizontal, 2 vertical
-    float tiles;           // 1, or 3 for the 3x3 tiling preview
-    uint normalMap;        // 1 rebuild Z from X and Y, 2 flip green
-    int forcedMip;         // -1: pick the mip from the zoom
-    float invGamma;
-    float checkerSize;     // window pixels per checker cell
-    float3 pad;
-    float4 checker1;       // alpha background: checker colours (equal for a solid colour)
-    float4 checker2;
-    float4 background;     // viewport outside the image
-};
-Texture2D<float4> tex : register(t0);
-SamplerState trilinear : register(s0);
-
-float4 vsMain(uint id : SV_VertexID) : SV_Position {
-    float2 uv = float2((id << 1) & 2, id & 2);
-    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-}
-
-float3 srgbEncode(float3 c) {
-    c = saturate(c);
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-    return float3(c.r <= 0.0031308 ? lo.r : hi.r, c.g <= 0.0031308 ? lo.g : hi.g, c.b <= 0.0031308 ? lo.b : hi.b);
-}
-
-float4 psMain(float4 pos : SV_Position) : SV_Target {
-    float2 shownSize = (rotation & 1) ? imageSize.yx : imageSize;
-    float2 d = (pos.xy - imageOrigin) / zoom;
-    if (d.x < 0 || d.y < 0 || d.x >= shownSize.x * tiles || d.y >= shownSize.y * tiles) return background;
-    d = fmod(d, shownSize);
-    if (flips & 1) d.x = shownSize.x - d.x;
-    if (flips & 2) d.y = shownSize.y - d.y;
-    float2 ip = d;
-    if (rotation == 1) ip = float2(d.y, shownSize.x - d.x);
-    else if (rotation == 2) ip = imageSize - d;
-    else if (rotation == 3) ip = float2(shownSize.y - d.y, d.x);
-    int2 texel = int2(clamp(floor(ip), 0, imageSize - 1));
-
-    float4 c;
-    if (forcedMip >= 0) {
-        c = tex.Load(int3(texel >> forcedMip, forcedMip));
-    } else if (zoom >= 1.0) {
-        // Magnified or 1:1: exact texels, no filtering.
-        c = tex.Load(int3(texel, 0));
-    } else {
-        // Minified: the mip chain averages all source pixels under each screen pixel.
-        c = tex.SampleLevel(trilinear, ip / imageSize, log2(1.0 / zoom));
-    }
-    if (signedValues) c.rgb = c.rgb * 0.5 + 0.5;
-    if (channels == 1) c = float4(c.rrr, 1);
-    else if (channels == 2) c = float4(c.rg, 0, 1);
-    if (normalMap & 2) c.g = 1 - c.g;
-    if (normalMap & 1) {
-        float2 n = c.rg * 2 - 1;
-        c.b = sqrt(saturate(1 - dot(n, n))) * 0.5 + 0.5;
-    }
-
-    // NaN and Inf show as magenta. Written without isnan/isinf so every HLSL compiler accepts it.
-    if (any(c != c) || any(abs(c) > 3.402823e38)) return float4(1, 0, 1, 1);
-
-    float3 rgb = c.rgb;
-    float a = c.a;
-    if (channelMode == 1) rgb = c.rrr;
-    else if (channelMode == 2) rgb = c.ggg;
-    else if (channelMode == 3) rgb = c.bbb;
-    else if (channelMode == 4) rgb = c.aaa;
-    else if (channelMode == 6) rgb = dot(c.rgb, float3(0.2126, 0.7152, 0.0722)).xxx;
-    if (channelMode != 0) a = 1;
-
-    if (channelMode != 4) rgb *= exposureScale;
-    if (transfer >= 1) rgb = srgbEncode(rgb);
-    if (transfer >= 2) rgb = srgbEncode(rgb);
-    rgb = pow(saturate(rgb), invGamma);
-
-    float2 cell = floor((pos.xy - imageOrigin) / checkerSize);
-    float3 under = fmod(cell.x + cell.y, 2) < 1 ? checker1.rgb : checker2.rgb;
-    return float4(lerp(under, rgb, saturate(a)), 1);
-}
-)";
-
-struct ViewConstants {
-    float imageSize[2];
-    float imageOrigin[2];
-    float zoom;
-    float exposureScale;
-    uint32_t channelMode;
-    uint32_t channels;
-    uint32_t transfer;
-    uint32_t signedValues;
-    uint32_t rotation;
-    uint32_t flips;
-    float tiles;
-    uint32_t normalMap;
-    int32_t forcedMip;
-    float invGamma;
-    float checkerSize;
-    float pad[3];
-    float checker1[4];
-    float checker2[4];
-    float background[4];
-};
-static_assert(sizeof(ViewConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
-
-// d3dcompiler_47.dll ships with Windows 8.1 and later; loading it lazily keeps it off the import table.
-using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
-                                      UINT, UINT, ID3DBlob**, ID3DBlob**);
-
-D3DCompileFn loadCompiler() {
-    static D3DCompileFn fn = [] {
-        HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
-        return compiler ? reinterpret_cast<D3DCompileFn>(reinterpret_cast<void (*)()>(GetProcAddress(compiler, "D3DCompile")))
-                        : nullptr;
-    }();
-    return fn;
-}
-
-}  // namespace
-}  // namespace htv
-
-// The ImGui Direct3D 11 backend is compiled with D3DCompile renamed to this, so it shares the lazily loaded compiler.
-extern "C" HRESULT WINAPI htvD3DCompile(LPCVOID src, SIZE_T size, LPCSTR name, const D3D_SHADER_MACRO* defines,
-                                        ID3DInclude* include, LPCSTR entry, LPCSTR target, UINT flags1, UINT flags2,
-                                        ID3DBlob** code, ID3DBlob** errors) {
-    auto compile = htv::loadCompiler();
-    if (!compile) return E_NOTIMPL;
-    return compile(src, size, name, defines, include, entry, target, flags1, flags2, code, errors);
-}
-
-namespace htv {
-namespace {
-
-// ---- device ----
-
-bool createDevice() {
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-    for (D3D_DRIVER_TYPE type : {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP}) {
-        HRESULT hr = D3D11CreateDevice(nullptr, type, nullptr, 0, levels, UINT(std::size(levels)), D3D11_SDK_VERSION,
-                                       app.device.put(), &app.featureLevel, app.context.put());
-        if (SUCCEEDED(hr)) {
-            app.warp = type == D3D_DRIVER_TYPE_WARP;
-            return true;
-        }
-    }
-    return false;
-}
-
-// Flip model where available (Windows 10, then 8), the classic blt model on Windows 7. A translucent
-// (layered) window needs the blt model, so changing the window opacity recreates the swap chain.
-bool createSwapChain(bool allowFlip) {
-    Com<IDXGIDevice> dxgiDevice;
-    Com<IDXGIAdapter> adapter;
-    Com<IDXGIFactory> factory;
-    if (FAILED(app.device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(dxgiDevice.put()))) ||
-        FAILED(dxgiDevice->GetAdapter(adapter.put())) ||
-        FAILED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(factory.put()))))
-        return false;
-
-    Com<IDXGIFactory2> factory2;
-    if (allowFlip &&
-        SUCCEEDED(factory->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(factory2.put())))) {
-        const std::pair<DXGI_SWAP_EFFECT, const char*> effects[] = {{DXGI_SWAP_EFFECT(4), "flip-discard"},
-                                                                    {DXGI_SWAP_EFFECT(3), "flip-sequential"}};
-        for (auto [effect, name] : effects) {
-            DXGI_SWAP_CHAIN_DESC1 d{};
-            d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            d.SampleDesc.Count = 1;
-            d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-            d.BufferCount = 2;
-            d.SwapEffect = effect;
-            Com<IDXGISwapChain1> sc1;
-            if (SUCCEEDED(factory2->CreateSwapChainForHwnd(app.device.get(), app.hwnd, &d, nullptr, nullptr, sc1.put()))) {
-                sc1->QueryInterface(__uuidof(IDXGISwapChain), reinterpret_cast<void**>(app.swapChain.put()));
-                app.swapEffect = name;
-                break;
-            }
-        }
-    }
-    if (!app.swapChain) {
-        DXGI_SWAP_CHAIN_DESC d{};
-        d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        d.SampleDesc.Count = 1;
-        d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        d.BufferCount = 1;
-        d.OutputWindow = app.hwnd;
-        d.Windowed = TRUE;
-        d.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        if (FAILED(factory->CreateSwapChain(app.device.get(), &d, app.swapChain.put()))) return false;
-        app.swapEffect = "discard";
-    }
-    factory->MakeWindowAssociation(app.hwnd, DXGI_MWA_NO_ALT_ENTER);
-    return true;
-}
-
-bool createRenderTarget() {
-    app.rtv.reset();
-    Com<ID3D11Texture2D> back;
-    if (FAILED(app.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(back.put()))))
-        return false;
-    return SUCCEEDED(app.device->CreateRenderTargetView(back.get(), nullptr, app.rtv.put()));
-}
-
-bool createPipeline(std::string& error) {
-    auto compile = loadCompiler();
-    if (!compile) {
-        error = "d3dcompiler_47.dll not found";
-        return false;
-    }
-    Com<ID3DBlob> vsBlob, psBlob, log;
-    const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS;
-    if (FAILED(compile(kShader, sizeof(kShader) - 1, "view.hlsl", nullptr, nullptr, "vsMain", "vs_4_0", flags, 0,
-                       vsBlob.put(), log.put())) ||
-        FAILED(compile(kShader, sizeof(kShader) - 1, "view.hlsl", nullptr, nullptr, "psMain", "ps_4_0", flags, 0,
-                       psBlob.put(), log.put()))) {
-        error = log ? std::string(static_cast<const char*>(log->GetBufferPointer()), log->GetBufferSize())
-                    : "shader compilation failed";
-        return false;
-    }
-    if (FAILED(app.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr,
-                                              app.vs.put())) ||
-        FAILED(app.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr,
-                                             app.ps.put()))) {
-        error = "cannot create shaders";
-        return false;
-    }
-
-    D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = sizeof(ViewConstants);
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    D3D11_SAMPLER_DESC sd{};
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(app.device->CreateBuffer(&bd, nullptr, app.constants.put())) ||
-        FAILED(app.device->CreateSamplerState(&sd, app.trilinear.put()))) {
-        error = "cannot create pipeline state";
-        return false;
-    }
-    return true;
-}
-
-bool uploadImage(const htv::Image& img, std::string& error) {
-    const DXGI_FORMAT format = DXGI_FORMAT(img.format);
-    const htv::FormatInfo& info = htv::formatInfo(img.format);
-    UINT support = 0;
-    app.device->CheckFormatSupport(format, &support);
-    if (!(support & D3D11_FORMAT_SUPPORT_TEXTURE2D)) {
-        error = std::string(info.name) + " needs a Direct3D 11 class GPU";
-        return false;
-    }
-    const UINT maxSize = app.featureLevel >= D3D_FEATURE_LEVEL_11_0 ? 16384 : 8192;
-    if (img.width > maxSize || img.height > maxSize) {
-        error = "images over " + std::to_string(maxSize) + " px are not supported yet (tiling is planned)";
-        return false;
-    }
-    if (info.compressed && (img.width % 4 || img.height % 4)) {
-        error = "compressed textures must be a multiple of 4 px for now";
-        return false;
-    }
-
-    D3D11_TEXTURE2D_DESC d{};
-    d.Width = img.width;
-    d.Height = img.height;
-    d.ArraySize = 1;
-    d.Format = format;
-    d.SampleDesc.Count = 1;
-    d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-    const bool autoMips = img.mips.size() == 1 && (img.width > 1 || img.height > 1) &&
-                          (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN) && (support & D3D11_FORMAT_SUPPORT_RENDER_TARGET);
-    Com<ID3D11Texture2D> texture;
-    if (autoMips) {
-        d.MipLevels = 0;
-        d.BindFlags |= D3D11_BIND_RENDER_TARGET;
-        d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-        if (FAILED(app.device->CreateTexture2D(&d, nullptr, texture.put()))) {
-            error = "cannot create texture";
-            return false;
-        }
-        app.context->UpdateSubresource(texture.get(), 0, nullptr, img.mips[0].data.data(), img.mips[0].rowPitch, 0);
-    } else {
-        d.MipLevels = UINT(img.mips.size());
-        std::vector<D3D11_SUBRESOURCE_DATA> init(img.mips.size());
-        for (size_t i = 0; i < img.mips.size(); ++i) {
-            init[i].pSysMem = img.mips[i].data.data();
-            init[i].SysMemPitch = img.mips[i].rowPitch;
-        }
-        if (FAILED(app.device->CreateTexture2D(&d, init.data(), texture.put()))) {
-            error = "cannot create texture";
-            return false;
-        }
-    }
-    texture->GetDesc(&d);
-    app.textureMips = int(d.MipLevels);
-    app.srv.reset();
-    if (FAILED(app.device->CreateShaderResourceView(texture.get(), nullptr, app.srv.put()))) {
-        error = "cannot create texture view";
-        return false;
-    }
-    if (autoMips) app.context->GenerateMips(app.srv.get());
-    return true;
-}
-
-// ---- folder ----
-
-void listFolder(const fs::path& file) {
-    app.folder.clear();
-    app.folderIndex = -1;
-    std::error_code ec;
-    for (const auto& e : fs::directory_iterator(file.parent_path(), ec))
-        if (e.is_regular_file(ec) && isSupported(e.path())) app.folder.push_back(e.path());
-    std::sort(app.folder.begin(), app.folder.end(), [](const fs::path& a, const fs::path& b) {
-        return StrCmpLogicalW(a.filename().c_str(), b.filename().c_str()) < 0;
-    });
-    auto it = std::find(app.folder.begin(), app.folder.end(), file);
-    if (it != app.folder.end()) app.folderIndex = int(it - app.folder.begin());
-}
-
-void writeBench(bool ok);
-
-bool openFile(const fs::path& path, bool relist) {
-    std::string error;
-    const double t0 = qpcMs();
-    app.path = path;
-    if (relist || app.folder.empty()) listFolder(path);
-    else {
-        auto it = std::find(app.folder.begin(), app.folder.end(), path);
-        app.folderIndex = it == app.folder.end() ? -1 : int(it - app.folder.begin());
-    }
-    const std::string ext = lowerExtension(path);
-    htv::LoadResult r;
-    if (hasBuiltInDecoder(ext)) {
-        std::vector<uint8_t> bytes;
-        if (!readFile(path, bytes, error)) {
-            app.error = error;
-            return false;
-        }
-        r = htv::loadImage(bytes.data(), bytes.size(), ext);
-    }
-    // Anything the built-in decoders don't cover goes to the codecs installed in Windows.
-    if (!r.ok) {
-        htv::LoadResult wic = htv::loadWithWic(path);
-        if (wic.ok || r.error.empty()) r = std::move(wic);
-    }
-    const double t1 = qpcMs();
-    if (!r.ok || !uploadImage(r.image, error)) {
-        app.error = r.ok ? error : r.error;
-        return false;
-    }
-    app.context->Flush();
-    const double t2 = qpcMs();
-    app.tLoad = t1 - t0;
-    app.tUpload = t2 - t1;
-    app.image = std::move(r.image);
-    app.hasImage = true;
-    app.shownPath = path;
-    std::error_code ec;
-    app.fileSize = fs::file_size(path, ec);
-    app.error.clear();
-    app.dataIsLinear = isFloatFormat(htv::formatInfo(app.image.format));
-    if (app.forcedMip >= app.textureMips) app.forcedMip = -1;
-    if (app.pixelLocked) {
-        app.lockedX = std::min(app.lockedX, int(app.image.width) - 1);
-        app.lockedY = std::min(app.lockedY, int(app.image.height) - 1);
-    }
-    if (app.fit) fitToWindow();
-    SetWindowTextW(app.hwnd, (path.filename().wstring() + L" - Hyper Texture Viewer").c_str());  // taskbar name
-    return true;
-}
-
-// ---- drawing ----
-
-const float kAlphaBackgrounds[int(AlphaBackground::Count)][3] = {
-    {4, 0, 0}, {8, 0, 0}, {16, 0, 0}, {0, 0, 0}, {0.5f, 0, 0}, {1, 0, 0}};
-
-void render() {
-    if (!app.rtv) return;
-    static bool inRender = false;  // WM_PAINT can arrive while a frame is being built
-    if (inRender) return;
-    inRender = true;
-
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-    uiFrame();
-    ImGui::Render();
-
-    const UiColors colors = uiColors();
-    float clear[4] = {colors.viewport[0], colors.viewport[1], colors.viewport[2], 1.0f};
-    app.context->ClearRenderTargetView(app.rtv.get(), clear);
-    if (app.hasImage && app.srv) {
-        const htv::FormatInfo& info = htv::formatInfo(app.image.format);
-        D3D11_MAPPED_SUBRESOURCE m;
-        if (SUCCEEDED(app.context->Map(app.constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            ViewConstants c{};
-            c.imageSize[0] = float(app.image.width);
-            c.imageSize[1] = float(app.image.height);
-            c.imageOrigin[0] = app.originX;
-            c.imageOrigin[1] = app.originY;
-            c.zoom = app.zoom;
-            c.exposureScale = std::exp2(app.exposure);
-            const uint32_t modes[] = {0, 1, 2, 3, 4, 6};
-            c.channelMode = modes[int(app.channel)];
-            if (c.channelMode == 0 && app.ignoreAlpha) c.channelMode = 5;
-            c.channels = uint32_t(info.channels);
-            c.transfer = (app.dataIsLinear ? 1u : 0u) + (isSrgbFormat(app.image.format) ? 1u : 0u);
-            c.signedValues = info.snorm ? 1u : 0u;
-            c.rotation = uint32_t(app.rotation);
-            c.flips = (app.flipH ? 1u : 0u) | (app.flipV ? 2u : 0u);
-            c.tiles = app.tiling == Tiling::Off ? 1.0f : 3.0f;
-            c.normalMap = (app.normalZ ? 1u : 0u) | (app.flipGreen ? 2u : 0u);
-            c.forcedMip = app.forcedMip;
-            c.invGamma = 1.0f / app.gamma;
-            const float* bg = kAlphaBackgrounds[int(app.alphaBackground)];
-            if (app.alphaBackground <= AlphaBackground::CheckerLarge) {
-                c.checkerSize = std::round(bg[0] * app.scale);
-                for (int i = 0; i < 3; ++i) {
-                    c.checker1[i] = colors.checker1[i];
-                    c.checker2[i] = colors.checker2[i];
-                }
-            } else {
-                c.checkerSize = 1.0f;
-                for (int i = 0; i < 3; ++i) c.checker1[i] = c.checker2[i] = bg[0];
-            }
-            for (int i = 0; i < 3; ++i) c.background[i] = colors.viewport[i];
-            c.checker1[3] = c.checker2[3] = c.background[3] = 1.0f;
-            *static_cast<ViewConstants*>(m.pData) = c;
-            app.context->Unmap(app.constants.get(), 0);
-        }
-        D3D11_VIEWPORT vp{app.vpX, app.vpY, app.vpW, app.vpH, 0, 1};
-        ID3D11RenderTargetView* rtv = app.rtv.get();
-        ID3D11Buffer* cb = app.constants.get();
-        ID3D11ShaderResourceView* srv = app.srv.get();
-        ID3D11SamplerState* sampler = app.trilinear.get();
-        app.context->OMSetRenderTargets(1, &rtv, nullptr);
-        app.context->RSSetViewports(1, &vp);
-        app.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        app.context->IASetInputLayout(nullptr);
-        app.context->VSSetShader(app.vs.get(), nullptr, 0);
-        app.context->PSSetShader(app.ps.get(), nullptr, 0);
-        app.context->PSSetConstantBuffers(0, 1, &cb);
-        app.context->PSSetShaderResources(0, 1, &srv);
-        app.context->PSSetSamplers(0, 1, &sampler);
-        app.context->Draw(3, 0);
-    }
-    ID3D11RenderTargetView* rtv = app.rtv.get();
-    app.context->OMSetRenderTargets(1, &rtv, nullptr);
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    app.swapChain->Present(1, 0);
-    inRender = false;
-
-    if (!app.firstFrameDone) {
-        app.firstFrameDone = true;
-        if (!app.benchPath.empty()) {
-            writeBench(app.hasImage);
-            PostQuitMessage(app.hasImage ? 0 : 1);
-        }
-    }
-}
-
 void writeBench(bool ok) {
     FILE* f = _wfopen(app.benchPath.c_str(), L"a");
     if (!f) return;
-    const double now = qpcMs();
+    const double now = nowMs();
     std::fprintf(f,
                  "%s\n  result: %s\n  gpu: %s, feature level %x, swap %s\n"
                  "  process start -> first frame: %.1f ms (coarse clock)\n"
@@ -606,9 +79,11 @@ void writeBench(bool ok) {
     std::fclose(f);
 }
 
-// ---- window ----
+namespace {
 
 double lastInputMs = 0;  // frames keep coming for a moment after input, for hover states and tooltips
+bool redraw = false;     // something changed outside of input, e.g. a load finished
+bool spaceDown = false;  // Space + drag pans, like the left button alone
 
 void layout() {
     const float top = app.showBars ? uiTopBarHeight() : 0.0f;
@@ -617,14 +92,6 @@ void layout() {
     app.vpY = top;
     app.vpW = float(app.winW);
     app.vpH = std::max(1.0f, float(app.winH) - top - bottom);
-}
-
-void resizeBuffers() {
-    if (!app.swapChain) return;
-    app.rtv.reset();
-    app.context->OMSetRenderTargets(0, nullptr, nullptr);
-    app.swapChain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
-    createRenderTarget();
 }
 
 bool inViewport(int x, int y) {
@@ -639,11 +106,19 @@ void applyDpi(float scale) {
 
 int resizeBorder() { return int(std::round(5 * app.scale)); }
 
+void startDrag(LPARAM lp) {
+    app.dragging = true;
+    app.dragStart = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    app.dragOriginX = app.originX;
+    app.dragOriginY = app.originY;
+    SetCapture(app.hwnd);
+}
+
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
     if ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
         msg == WM_NCMOUSEMOVE || msg == WM_MOUSELEAVE || msg == WM_SIZE || msg == WM_ACTIVATE)
-        lastInputMs = qpcMs();
+        lastInputMs = nowMs();
     const bool uiMouse = ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
 
     switch (msg) {
@@ -703,11 +178,31 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                          SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         }
+        case WM_EXITSIZEMOVE:
+        case WM_DISPLAYCHANGE:
+            queryDisplayPeak();  // the window may now be on another monitor
+            break;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
             render();
             ValidateRect(hwnd, nullptr);
+            return 0;
+        case WM_TIMER:
+            if (wp == kWatchTimer) {
+                if (app.toastUntilMs > 0 && nowMs() > app.toastUntilMs) {
+                    app.toastUntilMs = 0;
+                    redraw = true;
+                }
+                checkFileChanged();
+            } else if (wp == kLoadingTimer) {
+                checkFileChanged();  // updates the progress
+                redraw = true;
+            }
+            return 0;
+        case WM_APP_LOADED:
+            finishLoad(reinterpret_cast<LoadedFile*>(lp));
+            redraw = true;
             return 0;
         case WM_MOUSEWHEEL: {
             POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -719,7 +214,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (uiMouse || !inViewport(p.x, p.y)) return 0;
             if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) {
-                app.exposure = std::clamp(app.exposure + 0.25f * notches, -10.0f, 10.0f);  // quarter stops
+                if (app.hasImage && isHighPrecision(app.image))
+                    app.exposure = std::clamp(app.exposure + 0.25f * notches, -10.0f, 10.0f);  // quarter stops
             } else if (notches) {
                 float z = app.zoom;
                 for (int i = 0; i < std::abs(notches); ++i) {
@@ -731,13 +227,23 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_LBUTTONDOWN:
+            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+            if (wp & MK_CONTROL) {
+                // Ctrl+click locks the readout to this pixel, or releases it.
+                int x, y;
+                if (app.pixelLocked) app.pixelLocked = false;
+                else if (windowToPixel(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), x, y)) {
+                    app.pixelLocked = true;
+                    app.lockedX = x;
+                    app.lockedY = y;
+                }
+                return 0;
+            }
+            startDrag(lp);
+            return 0;
         case WM_MBUTTONDOWN:
             if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-            app.dragging = true;
-            app.dragStart = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            app.dragOriginX = app.originX;
-            app.dragOriginY = app.originY;
-            SetCapture(hwnd);
+            startDrag(lp);
             return 0;
         case WM_LBUTTONUP:
         case WM_MBUTTONUP:
@@ -747,7 +253,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_LBUTTONDBLCLK:
-            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || (wp & MK_CONTROL)) return 0;
             app.fit = true;
             fitToWindow();
             return 0;
@@ -763,9 +269,22 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSELEAVE:
             app.mouseX = app.mouseY = -1;
             return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT && (app.dragging || spaceDown) && app.hasImage && !uiMouse) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                return TRUE;
+            }
+            break;
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
+            if (wp == VK_SPACE && !(ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput)) {
+                spaceDown = true;
+                return 0;
+            }
             if (uiKeyDown(int(wp))) return 0;
+            break;
+        case WM_KEYUP:
+            if (wp == VK_SPACE) spaceDown = false;
             break;
         case WM_SYSCOMMAND:
             if ((wp & 0xfff0) == SC_KEYMENU) return 0;  // no menu bar: Alt alone must not take the keyboard
@@ -773,12 +292,13 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DROPFILES: {
             HDROP drop = reinterpret_cast<HDROP>(wp);
             wchar_t file[MAX_PATH * 4];
-            if (DragQueryFileW(drop, 0, file, UINT(std::size(file)))) openFile(file, true);
+            if (DragQueryFileW(drop, 0, file, UINT(std::size(file)))) openPath(file);
             DragFinish(drop);
             SetForegroundWindow(hwnd);
             return 0;
         }
         case WM_DESTROY:
+            saveOnExit();
             PostQuitMessage(0);
             return 0;
     }
@@ -795,6 +315,13 @@ void enableDpiAwareness() {
 }
 
 }  // namespace
+
+void requestRedraw() { redraw = true; }
+
+void relayout() {
+    layout();
+    if (app.fit) fitToWindow();
+}
 
 // ---- actions ----
 
@@ -836,19 +363,8 @@ void showOpenDialog() {
     Com<IShellItem> item;
     wchar_t* name = nullptr;
     if (SUCCEEDED(dialog->GetResult(item.put())) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &name))) {
-        openFile(name, true);
+        openPath(name);
         CoTaskMemFree(name);
-    }
-}
-
-void step(int delta) {
-    if (app.folder.empty()) return;
-    const int n = int(app.folder.size());
-    int i = app.folderIndex < 0 ? 0 : app.folderIndex;
-    // Skip files that fail to open, but stop after one full round.
-    for (int tries = 0; tries < n; ++tries) {
-        i = ((i + delta) % n + n) % n;
-        if (openFile(app.folder[size_t(i)], false)) return;
     }
 }
 
@@ -865,7 +381,7 @@ void fitToWindow() {
     if (!app.hasImage) return;
     float w, h;
     imageSizeOnScreen(w, h);
-    // The design leaves a 16 px margin around a fitted image.
+    // The design leaves a 16 px margin around a fitted image; the clean view fills the window.
     const float margin = app.showBars ? std::round(16 * app.scale) : 0.0f;
     float z = std::min((app.vpW - 2 * margin) / w, (app.vpH - 2 * margin) / h);
     if (z > 1.0f) z = std::floor(z);  // small textures grow in whole steps so pixels stay square
@@ -875,6 +391,7 @@ void fitToWindow() {
 }
 
 void zoomAt(float newZoom, float x, float y) {
+    if (!app.hasImage) return;
     newZoom = std::clamp(newZoom, 1.0f / 256.0f, 256.0f);
     app.originX = std::round(x - (x - app.originX) * newZoom / app.zoom);
     app.originY = std::round(y - (y - app.originY) * newZoom / app.zoom);
@@ -925,7 +442,7 @@ void setTopmost(bool on) {
 }
 
 void setOpacity(float opacity) {
-    opacity = std::clamp(std::round(opacity * 20.0f) / 20.0f, 0.2f, 1.0f);
+    opacity = std::clamp(std::round(opacity * 20.0f) / 20.0f, 0.1f, 1.0f);
     const bool wasLayered = app.opacity < 1.0f;
     const bool layered = opacity < 1.0f;
     app.opacity = opacity;
@@ -958,7 +475,7 @@ void toggleBars() {
 using namespace htv;
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
-    app.tStart = qpcMs();
+    app.tStart = nowMs();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);  // for Windows codecs and dialogs
     enableDpiAwareness();
 
@@ -973,6 +490,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     }
     LocalFree(argv);
     app.path = file;
+    if (app.benchPath.empty()) loadSettings();
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1017,7 +535,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     DwmExtendFrameIntoClientArea(app.hwnd, &shadow);
 
     std::string error;
-    const double tDevice0 = qpcMs();
+    const double tDevice0 = nowMs();
     if (!createDevice()) return failStartup("no Direct3D 11 device, not even WARP");
     if (!createSwapChain(true)) return failStartup("cannot create the swap chain");
     if (!createRenderTarget()) return failStartup("cannot create the render target");
@@ -1028,22 +546,26 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     ImGui_ImplWin32_Init(app.hwnd);
     if (!ImGui_ImplDX11_Init(app.device.get(), app.context.get())) return failStartup("cannot start the interface");
     uiInit();
-    app.tDevice = qpcMs() - tDevice0;
+    app.tDevice = nowMs() - tDevice0;
 
     RECT rc;
     GetClientRect(app.hwnd, &rc);
     app.winW = std::max(1, int(rc.right));
     app.winH = std::max(1, int(rc.bottom));
     applyDpi(app.scale);
-    if (!file.empty()) openFile(fs::absolute(file), true);
+    if (!file.empty()) openStartupFile(fs::absolute(file));
     ShowWindow(app.hwnd, show);
     UpdateWindow(app.hwnd);
+    if (app.benchPath.empty()) {
+        queryDisplayPeak();
+        SetTimer(app.hwnd, kWatchTimer, 500, nullptr);
+    }
 
     // Frames are drawn while something changes and for a moment after the last input, then the loop sleeps.
     MSG msg{};
     for (;;) {
-        const bool idle = qpcMs() - lastInputMs > 1500.0 && !app.dragging;
-        if (idle || IsIconic(app.hwnd)) WaitMessage();
+        const bool active = nowMs() - lastInputMs < 1500.0 || app.dragging || app.loading;
+        if (!active || IsIconic(app.hwnd)) WaitMessage();
         bool quit = false;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) quit = true;
@@ -1051,7 +573,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
             DispatchMessageW(&msg);
         }
         if (quit) break;
-        if (!IsIconic(app.hwnd)) render();
+        // A timer tick that changed nothing does not cost a frame.
+        const bool input = nowMs() - lastInputMs < 1500.0;
+        if (!IsIconic(app.hwnd) && (input || app.dragging || app.loading || redraw)) render();
+        redraw = false;
     }
 
     ImGui_ImplDX11_Shutdown();

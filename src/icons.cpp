@@ -52,6 +52,12 @@ const IconDef kIcons[int(Icon::Count)] = {
     /* More */ {{{"M4 12a1.6 1.6 0 1 0 3.2 0 1.6 1.6 0 1 0-3.2 0z", true}, {"M10.4 12a1.6 1.6 0 1 0 3.2 0 1.6 1.6 0 1 0-3.2 0z", true}, {"M16.8 12a1.6 1.6 0 1 0 3.2 0 1.6 1.6 0 1 0-3.2 0z", true}}},
     /* Warning */ {{{"M12 3.5L2.5 20h19z", false}, {"M12 10v4.5M12 17.3v.01", false}}},
     /* Check */ {{{"M5 12.5l4.5 4.5L19 7.5", false}}},
+    /* Sun */ {{{"M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z", false}, {"M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4", false}}},
+    /* Image */ {{{"M3 5h18v14H3z", false}, {"M3 16l5-5 4 4 3-3 6 6", false}, {"M15.5 8.5v.01", false}}},
+    /* Alert */ {{{"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", false}, {"M12 7.5v5.5M12 16.2v.01", false}}},
+    /* Search */ {{{"M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM15.5 15.5L20 20", false}}},
+    /* Clip */ {{{"M4 4h16v16H4z", false}, {"M4 12l8-8M4 20L20 4M12 20l8-8", false}}},
+    /* Dismiss */ {{{"M6 6l12 12M18 6L6 18", false}}},
 };
 
 // Minimal SVG path interpreter: M L H V A C Z and their relative forms, which is all the icon set uses.
