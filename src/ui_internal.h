@@ -135,7 +135,7 @@ void tipArea(const char* id, ImRect r, const char* text, const char* key = nullp
 // window to a layered one, which can drop ImGui's mouse state): these read the mouse from Windows.
 float mouseClientX();
 bool leftButtonHeld();
-// Snapping while dragging: `p` (0..1 along a control `widthPx` wide) moves to a target closer than 6 px.
+// Snapping while dragging: `p` (0..1 along a control `widthPx` wide) moves to a target closer than 3 px.
 // Alt drags freely.
 float snapPosition(float p, std::initializer_list<float> targets, float widthPx);
 
@@ -145,9 +145,32 @@ float snapPosition(float p, std::initializer_list<float> targets, float widthPx)
 bool slider(ImDrawList* dl, const char* id, float x, float cy, float width, float& t, float fillFrom, bool* reset,
             float mark = -1.0f, float snap = -1.0f);
 
+// Segmented control (.seg); `small` is the 20 px panel variant. Returns true when the selection changed.
+float segmentedWidth(const char* const* labels, int n, bool small);
+bool segmented(ImDrawList* dl, const char* id, float x, float cy, const char* const* labels, int n, int& value,
+               bool small, const char* const* tips = nullptr, bool disabled = false);
+// Checkbox with its label on the right. Returns true when clicked.
+bool checkbox(ImDrawList* dl, const char* id, float x, float cy, const char* label, bool& value,
+              const char* tip = nullptr);
+
 // Read-only number box (.num) that turns into a text field when clicked. Returns true when a value was entered.
 bool numberField(ImDrawList* dl, const char* id, float x, float cy, float width, const char* text, float& value,
                  const char* tip);
+
+// ---- floating panels (ui_views.cpp) ----
+
+// 1 px dashed line, black on white, horizontal or vertical; and a rectangle of them.
+void dashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b);
+void dashedRect(ImDrawList* dl, ImVec2 a, ImVec2 b);
+void dashedBox(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col);  // in a theme colour, rounded
+// A small square button with an icon, inside a chip or panel header.
+bool smallButton(ImDrawList* dl, const char* id, Icon icon, ImVec2 a, float size, float iconSize, const char* tip,
+                 const char* key);
+// Panel window: translucent, 1 px border, radius 4, kept inside the image area. Call ImGui::End() afterwards
+// whatever it returns. `height` 0 sizes the panel to its content.
+bool beginPanel(const char* id, ImVec2 defaultPos, float width, float height = 0);
+// Panel header (.ph): title and the line under it.
+void panelHeader(ImDrawList* dl, ImVec2 p, float w, float h, const char* title, float titleSize, float padL);
 
 // ---- parts of the window (ui_bars.cpp, ui_views.cpp) ----
 
@@ -162,6 +185,7 @@ void bottomBar();
 void viewportOverlays();  // grid, tile borders, pixel outline, and the empty, error and loading states
 void notices();           // "Reloaded", the clean-mode hint
 void infoPanel();
+void histogramPanel();  // ui_panels.cpp
 void helpPanel();
 void opacityPopup(ImVec2 anchorRightBottom);
 bool isLoadingVisible();  // a load has run long enough to show its progress

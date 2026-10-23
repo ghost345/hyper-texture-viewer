@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <iterator>
 
 #include "imgui.h"
@@ -267,12 +268,15 @@ void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const V
 struct Readback {
     Com<ID3D11Texture2D> target, staging;
     Com<ID3D11RenderTargetView> rtv;
-    int size = 0;
+    int width = 0, height = 0;
 
-    bool create(int n, DXGI_FORMAT format) {
-        if (size == n && rtv) return true;
+    bool create(int n, DXGI_FORMAT format) { return create(n, n, format); }
+    bool create(int w, int h, DXGI_FORMAT format) {
+        if (width == w && height == h && rtv) return true;
+        width = height = 0;
         D3D11_TEXTURE2D_DESC d{};
-        d.Width = d.Height = UINT(n);
+        d.Width = UINT(w);
+        d.Height = UINT(h);
         d.MipLevels = d.ArraySize = 1;
         d.Format = format;
         d.SampleDesc.Count = 1;
@@ -285,7 +289,8 @@ struct Readback {
         d.BindFlags = 0;
         d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(app.device->CreateTexture2D(&d, nullptr, staging.put()))) return false;
-        size = n;
+        width = w;
+        height = h;
         return true;
     }
 
@@ -295,7 +300,7 @@ struct Readback {
         app.context->CopyResource(staging.get(), target.get());
         D3D11_MAPPED_SUBRESOURCE m;
         if (FAILED(app.context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &m))) return false;
-        for (int y = 0; y < size; ++y) row(y, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch);
+        for (int y = 0; y < height; ++y) row(y, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch);
         app.context->Unmap(staging.get(), 0);
         return true;
     }
@@ -601,6 +606,29 @@ bool readPixelsGpu(int x, int y, int n, float* rgba) {
         cachedGeneration = app.imageGeneration;
     }
     std::memcpy(rgba, cached, size_t(n) * n * 16);
+    return true;
+}
+
+bool scanImageGpu(const std::function<void(const float* rgba, int width)>& row) {
+    if (!app.hasImage || !app.srv || !app.psRead) return false;
+    // Strips of whole rows, about 16 MB each, so even an 8K image needs no big buffer.
+    const int w = int(app.image.width), h = int(app.image.height);
+    const int strip = std::clamp((1 << 20) / std::max(w, 1), 1, h);
+    Readback rb;
+    if (!rb.create(w, strip, DXGI_FORMAT_R32G32B32A32_FLOAT)) return false;
+    for (int y0 = 0; y0 < h; y0 += strip) {
+        ViewConstants c{};
+        c.imageSize[0] = float(w);
+        c.imageSize[1] = float(h);
+        c.imageOrigin[1] = float(y0);
+        D3D11_VIEWPORT vp{0, 0, float(w), float(strip), 0, 1};
+        drawImage(rb.rtv.get(), vp, c, app.psRead.get());
+        const int rows = std::min(strip, h - y0);
+        if (!rb.read([&](int y, const uint8_t* p) {
+                if (y < rows) row(reinterpret_cast<const float*>(p), w);
+            }))
+            return false;
+    }
     return true;
 }
 

@@ -9,47 +9,80 @@ namespace {
 
 constexpr int kBins = (ImageStats::kHighStop - ImageStats::kLowStop) * ImageStats::kStopBins;
 
-struct Accumulator {
-    ImageStats& s;
-    float minValue = INFINITY, maxValue = -INFINITY, minLum = INFINITY, maxLum = -INFINITY;
-
-    void add(float r, float g, float b) {
-        ++s.pixels;
-        if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) {
-            ++s.nonFinite;
-            return;
-        }
-        minValue = std::min({minValue, r, g, b});
-        maxValue = std::max({maxValue, r, g, b});
-        const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-        maxLum = std::max(maxLum, lum);
-        if (lum <= 0.0f) {
-            ++s.darkPixels;
-            return;
-        }
-        minLum = std::min(minLum, lum);
-        const int bin = int(std::floor((std::log2(lum) - ImageStats::kLowStop) * ImageStats::kStopBins));
-        ++s.histogram[size_t(std::clamp(bin, 0, kBins - 1))];
-    }
-
-    void finish() {
-        const bool any = s.pixels > s.nonFinite;
-        s.minValue = any ? minValue : 0.0f;
-        s.maxValue = any ? maxValue : 0.0f;
-        s.minLuminance = std::isfinite(minLum) ? minLum : 0.0f;
-        s.maxLuminance = any ? maxLum : 0.0f;
-        s.valid = true;
-    }
-};
+// Log2 bin from the float's bits: the exponent picks the stop, the top mantissa bits split it into
+// kStopBins steps. Much cheaper than log2 for every value of an 8K image, and close enough for a histogram.
+int logBin(float v) {
+    static_assert(ImageStats::kStopBins == 16, "four mantissa bits make the bins of a stop");
+    uint32_t bits;
+    std::memcpy(&bits, &v, 4);
+    const int exponent = int((bits >> 23) & 255) - 127;
+    const int bin = (exponent - ImageStats::kLowStop) * ImageStats::kStopBins + int((bits >> 19) & 15);
+    return std::clamp(bin, 0, kBins - 1);
+}
 
 }  // namespace
 
-ImageStats computeStats(const Image& image) {
-    ImageStats s;
+StatsBuilder::StatsBuilder(bool channels) : channels_(channels) {
+    s_.histogram.assign(kBins, 0);
+    if (channels)
+        for (ImageStats::Channel& c : s_.channel) {
+            c.linear.assign(ImageStats::kLinearBins, 0);
+            c.log.assign(kBins, 0);
+        }
+}
+
+void StatsBuilder::add(float r, float g, float b) {
+    ++s_.pixels;
+    if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) {
+        ++s_.nonFinite;
+        return;
+    }
+    minValue_ = std::min({minValue_, r, g, b});
+    maxValue_ = std::max({maxValue_, r, g, b});
+    const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    maxLum_ = std::max(maxLum_, lum);
+    if (channels_) {
+        const float v[4] = {r, g, b, lum};
+        for (int i = 0; i < 4; ++i) {
+            ImageStats::Channel& c = s_.channel[i];
+            sum_[i] += v[i];
+            min_[i] = std::min(min_[i], v[i]);
+            max_[i] = std::max(max_[i], v[i]);
+            const int lin = int(std::clamp(v[i], 0.0f, 1.0f) * (ImageStats::kLinearBins - 1) + 0.5f);
+            ++c.linear[size_t(lin)];
+            if (v[i] > 0.0f) ++c.log[size_t(logBin(v[i]))];
+        }
+    }
+    if (lum <= 0.0f) {
+        ++s_.darkPixels;
+        return;
+    }
+    minLum_ = std::min(minLum_, lum);
+    ++s_.histogram[size_t(logBin(lum))];
+}
+
+ImageStats StatsBuilder::finish() {
+    const uint64_t finite = s_.pixels - s_.nonFinite;
+    s_.minValue = finite ? minValue_ : 0.0f;
+    s_.maxValue = finite ? maxValue_ : 0.0f;
+    s_.minLuminance = std::isfinite(minLum_) ? minLum_ : 0.0f;
+    s_.maxLuminance = finite ? maxLum_ : 0.0f;
+    s_.valid = true;
+    if (channels_) {
+        for (int i = 0; i < 4; ++i) {
+            s_.channel[i].mean = finite ? sum_[i] / double(finite) : 0.0;
+            s_.channel[i].min = finite ? min_[i] : 0.0f;
+            s_.channel[i].max = finite ? max_[i] : 0.0f;
+        }
+        s_.channelsValid = true;
+    }
+    return std::move(s_);
+}
+
+ImageStats computeStats(const Image& image, bool channels) {
     const FormatInfo& info = formatInfo(image.format);
-    if (image.mips.empty() || info.compressed) return s;
-    s.histogram.assign(kBins, 0);
-    Accumulator acc{s};
+    if (image.mips.empty() || info.compressed) return {};
+    StatsBuilder acc(channels);
     const Surface& surface = image.mips[0];
 
     if (image.format == GpuFormat::RGBA16F || image.format == GpuFormat::RG16F || image.format == GpuFormat::R16F) {
@@ -79,8 +112,7 @@ ImageStats computeStats(const Image& image) {
                 acc.add(px[0], px[1], px[2]);
             }
     }
-    acc.finish();
-    return s;
+    return acc.finish();
 }
 
 bool hasTranslucentPixels(const Image& image) {

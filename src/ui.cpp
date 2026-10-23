@@ -107,6 +107,7 @@ void uiFrame() {
         bottomBar();
     }
     infoPanel();
+    histogramPanel();
     helpPanel();
     notices();
     drawTooltip();
@@ -151,7 +152,10 @@ bool uiKeyDown(int vk) {
             else return false;
             break;
         case 'R': if (ctrl) rotate(+1); else channel(Channel::R); break;
-        case 'H': if (!ctrl) app.flipH = !app.flipH; else return false; break;
+        case 'H':
+            if (ctrl) app.showHistogram = !app.showHistogram;
+            else app.flipH = !app.flipH;
+            break;
         case 'V':
             if (ctrl) pasteFromClipboard();
             else app.flipV = !app.flipV;
@@ -211,6 +215,7 @@ bool uiKeyDown(int vk) {
             if (app.loading) cancelLoading();
             else if (app.showHelp) app.showHelp = false;
             else if (app.showInfo) app.showInfo = false;
+            else if (app.showHistogram) app.showHistogram = false;
             else DestroyWindow(app.hwnd);
             break;
         default: return false;

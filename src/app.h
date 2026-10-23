@@ -151,6 +151,9 @@ struct App {
 
     bool showInfo = false;
     bool showHelp = false;
+    bool showHistogram = false;
+    int histogramMode = 0;       // RGB, R, G, B, luminance, parade
+    bool histogramLog = false;   // pixel counts on a log scale
 
     // Panning.
     bool dragging = false;
@@ -179,6 +182,8 @@ void openRecent(int index);
 ID3D11ShaderResourceView* recentThumbnail(int index);
 void chooseCustomBackground();
 void autoRange();
+// Per-channel statistics of the shown image for the Histogram panel, computed once when first needed.
+void ensureChannelStats();
 void saveSettings();
 void relayout();  // after the bars change height
 void fitToWindow();

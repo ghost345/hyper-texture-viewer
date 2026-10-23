@@ -487,9 +487,11 @@ void overlaysGroup(Row& r) {
 }
 
 void analysisGroup(Row& r) {
+    const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     r.button("match", Icon::ColorMatch, nullptr, kDisabled, "Color match (coming soon)", "M");
-    r.button("histogram", Icon::Histogram, nullptr, kDisabled, "Histogram (coming soon)", "Ctrl+H");
+    if (r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", "Ctrl+H"))
+        app.showHistogram = !app.showHistogram;
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
     if (r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", "I"))
         app.showInfo = !app.showInfo;

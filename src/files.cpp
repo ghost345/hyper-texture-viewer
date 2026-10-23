@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -44,6 +45,7 @@ struct LoadedFile {
     std::string format;  // extension in capitals, for the error card
     htv::Image image;
     htv::ImageStats stats;
+    bool channelStats = false;  // the Histogram panel is open: per-channel statistics too
     bool alpha = false;
     uint64_t fileSize = 0;
     FileStamp stamp;
@@ -154,7 +156,7 @@ void decode(LoadedFile& r) {
         return;
     }
     r.image = std::move(result.image);
-    if (isHighPrecision(r.image)) r.stats = htv::computeStats(r.image);
+    if (isHighPrecision(r.image) || r.channelStats) r.stats = htv::computeStats(r.image, r.channelStats);
     r.alpha = htv::hasTranslucentPixels(r.image);
     r.ok = true;
     r.decodeMs = nowMs() - t0;
@@ -206,6 +208,7 @@ void requestOpen(const fs::path& path, OpenMode mode) {
     job->path = path;
     job->mode = mode;
     job->generation = ++latestGeneration;
+    job->channelStats = app.showHistogram;
     reloadPending = false;
     app.loading = true;
     app.loadingSinceMs = nowMs();
@@ -528,6 +531,34 @@ void autoRange() {
     if (!app.stats.valid) return;
     app.blackPoint = app.stats.percentile(0.001);
     app.whitePoint = std::max(app.stats.percentile(0.995), app.blackPoint * 1.01f + 1e-6f);
+}
+
+void ensureChannelStats() {
+    if (!app.hasImage || app.stats.channelsValid) return;
+    static int triedGeneration = -1;  // a failed GPU read is not retried every frame
+    if (triedGeneration == app.imageGeneration) return;
+    triedGeneration = app.imageGeneration;
+    const htv::FormatInfo& info = htv::formatInfo(app.image.format);
+    if (!info.compressed) {
+        app.stats = htv::computeStats(app.image, true);
+        return;
+    }
+    // The GPU decodes sRGB formats to linear; the histogram shows stored values like for every other format.
+    const bool srgb = isSrgbFormat(app.image.format);
+    auto stored = [srgb](float v) {
+        if (!srgb) return v;
+        v = std::clamp(v, 0.0f, 1.0f);
+        return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    };
+    htv::StatsBuilder builder(true);
+    const bool ok = scanImageGpu([&](const float* p, int width) {
+        for (int x = 0; x < width; ++x, p += 4) {
+            const float r = stored(p[0]);
+            if (info.channels == 1) builder.add(r, r, r);
+            else builder.add(r, stored(p[1]), info.channels == 2 ? 0.0f : stored(p[2]));
+        }
+    });
+    if (ok) app.stats = builder.finish();
 }
 
 void saveOnExit() {

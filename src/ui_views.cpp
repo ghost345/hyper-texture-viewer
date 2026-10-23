@@ -11,7 +11,8 @@
 namespace fs = std::filesystem;
 
 namespace htv::ui {
-namespace {
+
+// ---- shared with the other panels (ui_panels.cpp) ----
 
 // 1 px dashed line, black dashes on white (4 on, 4 off) so it shows on any colour. Horizontal or vertical only.
 void dashedLine(ImDrawList* dl, ImVec2 a, ImVec2 b) {
@@ -57,6 +58,59 @@ void dashedBox(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
     dl->PathStroke(col, 0, t);
 }
 
+// A small square button with a 12 px icon, inside a chip or panel header.
+bool smallButton(ImDrawList* dl, const char* id, Icon icon, ImVec2 a, float size, float iconSize, const char* tip,
+                 const char* key) {
+    const Theme& t = T();
+    ImGui::SetCursorScreenPos(a);
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(S(size), S(size)));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) dl->AddRectFilled(a, ImVec2(a.x + S(size), a.y + S(size)), t.ctlh, S(3));
+    const float o = std::round((S(size) - S(iconSize)) * 0.5f);
+    drawIcon(dl, icon, ImVec2(a.x + o, a.y + o), S(iconSize), hovered ? t.tx : t.tx2);
+    requestTip(ImRect(a, ImVec2(a.x + S(size), a.y + S(size))), tip, key);
+    return pressed;
+}
+
+// Panel window: translucent, 1 px border, radius 4, dragged anywhere, kept inside the image area and left where
+// the user put it.
+bool beginPanel(const char* id, ImVec2 defaultPos, float width, float height) {
+    const Theme& t = T();
+    ImGui::SetNextWindowPos(defaultPos, ImGuiCond_FirstUseEver);
+    if (height > 0) ImGui::SetNextWindowSize(ImVec2(width, height));
+    else ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, FLT_MAX));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(4));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, line());
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, t.pnl);
+    ImGui::PushStyleColor(ImGuiCol_Border, t.bd2);
+    const bool visible = ImGui::Begin(id, nullptr,
+                                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                                          (height > 0 ? 0 : ImGuiWindowFlags_AlwaysAutoResize) |
+                                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
+                                          ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+    if (!visible) return false;
+    // Stay inside the image area.
+    const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+    const ImVec2 c(std::clamp(p.x, app.vpX, std::max(app.vpX, app.vpX + app.vpW - sz.x)),
+                   std::clamp(p.y, app.vpY, std::max(app.vpY, app.vpY + app.vpH - sz.y)));
+    if (c.x != p.x || c.y != p.y) ImGui::SetWindowPos(c);
+    return true;
+}
+
+// Panel header (.ph): title, extra buttons, close.
+void panelHeader(ImDrawList* dl, ImVec2 p, float w, float h, const char* title, float titleSize, float padL) {
+    drawText(dl, fontSemibold, titleSize, p.x + S(padL), p.y + (h - line()) * 0.5f, T().tx, title);
+    dl->AddRectFilled(ImVec2(p.x, p.y + h - line()), ImVec2(p.x + w, p.y + h), T().bd);
+}
+
+namespace {
+
+
+
+
 // Splits text into lines no wider than `width`, breaking at spaces (or at `separator` when given).
 std::vector<std::string> wrapLines(ImFont* f, float size, const std::string& text, float width,
                                    const std::string& separator = " ") {
@@ -87,19 +141,6 @@ void chipFrame(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     dl->AddRect(a, b, t.bd2, S(4), 0, line());
 }
 
-// A small square button with a 12 px icon, inside a chip or panel header.
-bool smallButton(ImDrawList* dl, const char* id, Icon icon, ImVec2 a, float size, float iconSize, const char* tip,
-                 const char* key) {
-    const Theme& t = T();
-    ImGui::SetCursorScreenPos(a);
-    const bool pressed = ImGui::InvisibleButton(id, ImVec2(S(size), S(size)));
-    const bool hovered = ImGui::IsItemHovered();
-    if (hovered) dl->AddRectFilled(a, ImVec2(a.x + S(size), a.y + S(size)), t.ctlh, S(3));
-    const float o = std::round((S(size) - S(iconSize)) * 0.5f);
-    drawIcon(dl, icon, ImVec2(a.x + o, a.y + o), S(iconSize), hovered ? t.tx : t.tx2);
-    requestTip(ImRect(a, ImVec2(a.x + S(size), a.y + S(size))), tip, key);
-    return pressed;
-}
 
 // Clickable areas over the viewport go into a small window of their own, so the rest of the image
 // keeps receiving the mouse.
@@ -422,33 +463,6 @@ void notices() {
 
 namespace {
 
-// Panel window: translucent, 1 px border, radius 4, dragged anywhere, kept inside the image area and left where
-// the user put it.
-bool beginPanel(const char* id, ImVec2 defaultPos, float width, float height = 0) {
-    const Theme& t = T();
-    ImGui::SetNextWindowPos(defaultPos, ImGuiCond_FirstUseEver);
-    if (height > 0) ImGui::SetNextWindowSize(ImVec2(width, height));
-    else ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, FLT_MAX));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(4));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, line());
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, t.pnl);
-    ImGui::PushStyleColor(ImGuiCol_Border, t.bd2);
-    const bool visible = ImGui::Begin(id, nullptr,
-                                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
-                                          (height > 0 ? 0 : ImGuiWindowFlags_AlwaysAutoResize) |
-                                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
-                                          ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(3);
-    if (!visible) return false;
-    // Stay inside the image area.
-    const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
-    const ImVec2 c(std::clamp(p.x, app.vpX, std::max(app.vpX, app.vpX + app.vpW - sz.x)),
-                   std::clamp(p.y, app.vpY, std::max(app.vpY, app.vpY + app.vpH - sz.y)));
-    if (c.x != p.x || c.y != p.y) ImGui::SetWindowPos(c);
-    return true;
-}
 
 // ---- Info ----
 
@@ -560,11 +574,6 @@ std::string infoText(const std::vector<InfoSection>& sections) {
     return text;
 }
 
-// Panel header (.ph): title, extra buttons, close.
-void panelHeader(ImDrawList* dl, ImVec2 p, float w, float h, const char* title, float titleSize, float padL) {
-    drawText(dl, fontSemibold, titleSize, p.x + S(padL), p.y + (h - line()) * 0.5f, T().tx, title);
-    dl->AddRectFilled(ImVec2(p.x, p.y + h - line()), ImVec2(p.x + w, p.y + h), T().bd);
-}
 
 }  // namespace
 

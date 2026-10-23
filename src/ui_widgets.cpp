@@ -561,6 +561,76 @@ bool slider(ImDrawList* dl, const char* id, float x, float cy, float width, floa
     return changed;
 }
 
+float segmentedWidth(const char* const* labels, int n, bool small) {
+    const float fs = small ? 11 : 12, pad = S(small ? 5 : 6), minW = S(small ? 20 : 22);
+    float total = 2 * line();
+    for (int i = 0; i < n; ++i) total += std::max(minW, 2 * pad + textSize(fontMedium, fs, labels[i]).x) + (i ? line() : 0.0f);
+    return total;
+}
+
+bool segmented(ImDrawList* dl, const char* id, float x, float cy, const char* const* labels, int n, int& value,
+               bool small, const char* const* tips, bool disabled) {
+    const Theme& t = T();
+    const float fs = small ? 11 : 12, pad = S(small ? 5 : 6), minW = S(small ? 20 : 22), h = S(small ? 20 : 22);
+    const float alpha = disabled ? 0.38f : 1.0f;
+    const ImVec2 a(x, std::round(cy - h * 0.5f)), b(a.x + segmentedWidth(labels, n, small), a.y + h);
+    bool changed = false;
+    float bx = a.x + line();
+    ImGui::PushID(id);
+    for (int i = 0; i < n; ++i) {
+        if (i) {
+            dl->AddRectFilled(ImVec2(bx, a.y), ImVec2(bx + line(), b.y), fade(t.bd2, alpha));
+            bx += line();
+        }
+        const float bw = std::max(minW, 2 * pad + textSize(fontMedium, fs, labels[i]).x);
+        const ImVec2 ra(bx, a.y + line()), rb(bx + bw, b.y - line());
+        ImGui::SetCursorScreenPos(ra);
+        ImGui::PushID(i);
+        const bool pressed = ImGui::InvisibleButton("seg", ImVec2(rb.x - ra.x, rb.y - ra.y)) && !disabled;
+        ImGui::PopID();
+        const bool hovered = !disabled && ImGui::IsItemHovered(), on = value == i;
+        ImDrawFlags corners = (i == 0 ? ImDrawFlags_RoundCornersLeft : 0) | (i == n - 1 ? ImDrawFlags_RoundCornersRight : 0);
+        if (!corners) corners = ImDrawFlags_RoundCornersNone;
+        if (on) dl->AddRectFilled(ra, rb, fade(t.acf, alpha), S(2), corners);
+        else if (hovered) dl->AddRectFilled(ra, rb, t.ctlh, S(2), corners);
+        const float tw = textSize(fontMedium, fs, labels[i]).x;
+        drawText(dl, fontMedium, fs, bx + std::round((bw - tw) * 0.5f), cy,
+                 fade(on ? kWhite : hovered ? t.tx : t.tx2, alpha), labels[i]);
+        if (tips && tips[i] && !disabled) requestTip(ImRect(ra, rb), tips[i], nullptr);
+        if (pressed && value != i) {
+            value = i;
+            changed = true;
+        }
+        bx += bw;
+    }
+    ImGui::PopID();
+    dl->AddRect(a, b, fade(t.bd2, alpha), S(3), 0, line());
+    return changed;
+}
+
+bool checkbox(ImDrawList* dl, const char* id, float x, float cy, const char* label, bool& value, const char* tip) {
+    const Theme& t = T();
+    const float box = S(14), tw = label ? textSize(fontRegular, 13, label).x : 0.0f;
+    const ImVec2 a(x, std::round(cy - box * 0.5f)), b(a.x + box, a.y + box);
+    ImGui::SetCursorScreenPos(ImVec2(x, std::round(cy - S(10))));
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(box + (label ? S(8) + tw : 0.0f), S(20)));
+    const bool hovered = ImGui::IsItemHovered();
+    if (pressed) value = !value;
+    if (value) {
+        dl->AddRectFilled(a, b, t.acf, S(2));
+        const float u = box / 14.0f;
+        const ImVec2 p[3] = {ImVec2(a.x + 3.5f * u, a.y + 7.2f * u), ImVec2(a.x + 6 * u, a.y + 9.8f * u),
+                             ImVec2(a.x + 10.6f * u, a.y + 4.4f * u)};
+        dl->AddPolyline(p, 3, kWhite, ImDrawFlags_None, std::max(1.0f, 1.6f * s));
+    } else {
+        dl->AddRectFilled(a, b, t.bar2, S(2));
+        dl->AddRect(a, b, hovered ? t.tx3 : t.bd2, S(2), 0, line());
+    }
+    if (label) drawText(dl, fontRegular, 13, b.x + S(8), cy, t.tx, label);
+    if (tip) requestTip(ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()), tip, nullptr, true);
+    return pressed;
+}
+
 bool numberField(ImDrawList* dl, const char* id, float x, float cy, float width, const char* text, float& value,
                  const char* tip) {
     const Theme& t = T();

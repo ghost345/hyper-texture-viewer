@@ -1,6 +1,8 @@
 // Internals shared by the window (main.cpp), drawing (render.cpp) and file handling (files.cpp).
 #pragma once
 
+#include <functional>
+
 #include "app.h"
 
 namespace htv {
@@ -27,6 +29,8 @@ void render();
 void queryDisplayPeak();
 // The shown image fitted into a size x size square, as RGBA8 rows, for the recent files list.
 std::vector<uint8_t> renderThumbnail(int size);
+// Hands mip 0 to `row` one row at a time as RGBA floats, as the shader samples it: for formats the CPU cannot decode.
+bool scanImageGpu(const std::function<void(const float* rgba, int width)>& row);
 Com<ID3D11ShaderResourceView> createTexture(const uint8_t* rgba, int width, int height);
 
 // files.cpp

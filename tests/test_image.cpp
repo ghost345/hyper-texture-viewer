@@ -462,6 +462,15 @@ void testStats() {
     CHECK(st.percentile(1.0) <= 4.0f && st.percentile(0.9) > 2.0f);
     const std::vector<float> h = st.histogramBetween(-2, 3, 5);  // stops -2..3: 0.5 is in bin 1, 4 in bin 4
     CHECK(h.size() == 5 && h[1] == 1.0f && h[4] == 1.0f && h[0] == 0.0f);
+    CHECK(!st.channelsValid);
+
+    const ImageStats ch = computeStats(img, true);
+    CHECK(ch.channelsValid && ch.percentile(0.2) == st.percentile(0.2));
+    CHECK(std::fabs(ch.channel[0].mean - 1.5) < 1e-9 && ch.channel[0].min == 0.0f && ch.channel[0].max == 4.0f);
+    CHECK(ch.channel[0].linear[0] == 1 && ch.channel[0].linear[128] == 1 && ch.channel[0].linear[255] == 1);
+    uint64_t logged = 0;  // zero is left out of the log bins, NaN out of everything
+    for (uint32_t n : ch.channel[1].log) logged += n;
+    CHECK(logged == 2);
 
     Image bc;
     bc.width = bc.height = 4;
