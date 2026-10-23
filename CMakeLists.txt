@@ -174,10 +174,24 @@ if(MSVC)
 endif()
 
 if(WIN32)
-    add_executable(hyper-texture-viewer WIN32 src/main.cpp src/wic_loader.cpp)
+    # Dear ImGui with its Win32 and Direct3D 11 backends. The backend's D3DCompile calls are renamed so they go
+    # through the viewer's lazily loaded d3dcompiler_47.dll instead of adding it to the import table.
+    add_library(htv_imgui STATIC
+        third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
+        third_party/imgui/backends/imgui_impl_dx11.cpp)
+    target_include_directories(htv_imgui PUBLIC third_party/imgui)
+    target_compile_definitions(htv_imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_DEBUG_TOOLS
+        PRIVATE IMGUI_IMPL_WIN32_DISABLE_GAMEPAD D3DCompile=htvD3DCompile UNICODE _UNICODE)
+    target_link_libraries(htv_imgui PUBLIC d3d11 dwmapi imm32)
+
+    # Interface fonts (Inter, JetBrains Mono) are linked in as resources.
+    configure_file(src/resources.rc.in ${CMAKE_BINARY_DIR}/resources.rc @ONLY)
+    add_executable(hyper-texture-viewer WIN32 src/main.cpp src/ui.cpp src/icons.cpp src/wic_loader.cpp
+        ${CMAKE_BINARY_DIR}/resources.rc)
     target_compile_options(hyper-texture-viewer PRIVATE ${htv_options})
     target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE)
-    target_link_libraries(hyper-texture-viewer PRIVATE htv_image d3d11 dxgi shlwapi windowscodecs ole32)
+    target_link_libraries(hyper-texture-viewer PRIVATE htv_image htv_imgui d3d11 dxgi dwmapi shlwapi windowscodecs ole32)
     if(MINGW)
         target_link_options(hyper-texture-viewer PRIVATE -static -s)
     endif()
