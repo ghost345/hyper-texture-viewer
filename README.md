@@ -4,7 +4,8 @@ Fast image viewer for texture artists on Windows. Early prototype.
 
 ## What works
 
-- Formats: EXR (half and float, scanline, ZIP/PIZ/RLE), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains), Radiance HDR, PNG (8 and 16 bit), JPEG, TGA, BMP, PSD (flattened image), GIF (first frame).
+- Formats: EXR (half and float, scanline, ZIP/PIZ/RLE), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains), Radiance HDR, PNG (8 and 16 bit), JPEG, WebP (first frame of animations), QOI, TGA, BMP, PSD (flattened image), GIF (first frame).
+- Anything else goes through the codecs installed in Windows (WIC): TIFF, JPEG XR, ICO, camera RAW, and HEIC/AVIF when the Microsoft Store extensions are installed.
 - Compressed DDS goes to the GPU as is, so BC textures look exactly as in a game.
 - Pixels stay sharp when zoomed in (no filtering at 100% and above). Below 100% the mip chain averages the source pixels, so detail does not flicker or alias.
 - Exposure for any image, values above 1.0 in HDR images, NaN/Inf shown in magenta.
@@ -47,6 +48,8 @@ MinGW-w64 works too and produces a static exe. GitHub Actions builds every push,
 | Library | Use | License |
 | --- | --- | --- |
 | [stb_image, stb_image_write](https://github.com/nothings/stb) | PNG, JPEG, TGA, BMP, PSD, GIF, HDR; zlib for EXR | Public domain / MIT |
+| [libwebp 1.5.0](https://github.com/webmproject/libwebp) | WebP, fetched by CMake | BSD-3-Clause |
+| [qoi](https://github.com/phoboslab/qoi) | QOI | MIT |
 | [tinyexr 1.0.9](https://github.com/syoyo/tinyexr) | EXR in the prototype; to be replaced by OpenEXR for DWAA/DWAB, layers and multipart | BSD-3-Clause |
 
-Licenses are in the header files under `third_party/`.
+Licenses are in the header files under `third_party/`; libwebp's is in its source tree.

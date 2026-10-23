@@ -12,7 +12,10 @@
 
 #include "image.h"
 #include "stb_image_write.h"
+#include "qoi.h"
 #include "tinyexr.h"
+
+#include <webp/encode.h>
 
 using namespace htv;
 
@@ -52,7 +55,7 @@ std::vector<float> hdrPixels(int w, int h) {
     return px;
 }
 
-Bytes makePng(int w, int h) {
+std::vector<uint8_t> testPixels(int w, int h) {
     std::vector<uint8_t> px(size_t(w) * h * 4);
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {
@@ -62,9 +65,33 @@ Bytes makePng(int w, int h) {
             p[2] = ((x / 8 + y / 8) & 1) ? 255 : 0;
             p[3] = uint8_t(255 - x * 255 / (w - 1));
         }
+    return px;
+}
+
+Bytes makePng(int w, int h) {
+    std::vector<uint8_t> px = testPixels(w, h);
     Bytes out;
     stbi_write_png_to_func(appendBytes, &out, w, h, 4, px.data(), w * 4);
     return out;
+}
+
+Bytes makeWebp(int w, int h) {
+    std::vector<uint8_t> px = testPixels(w, h);
+    uint8_t* out = nullptr;
+    const size_t size = WebPEncodeLosslessRGBA(px.data(), w, h, w * 4, &out);
+    Bytes file(out, out + size);
+    WebPFree(out);
+    return file;
+}
+
+Bytes makeQoi(int w, int h) {
+    std::vector<uint8_t> px = testPixels(w, h);
+    qoi_desc desc{uint32_t(w), uint32_t(h), 4, QOI_SRGB};
+    int size = 0;
+    void* out = qoi_encode(px.data(), &desc, &size);
+    Bytes file(static_cast<uint8_t*>(out), static_cast<uint8_t*>(out) + size);
+    free(out);
+    return file;
 }
 
 Bytes makeHdr(int w, int h) {
@@ -89,8 +116,8 @@ Bytes makeExr(int w, int h, bool half) {
     return out;
 }
 
-// DDS with a full mip chain of BC1 blocks (legacy header) or BC7 blocks (DX10 header).
-Bytes makeDds(uint32_t w, uint32_t h, bool bc7) {
+// DDS with a full mip chain of BC1 blocks (legacy header) or 16-byte blocks of `dx10` (DX10 header).
+Bytes makeDds(uint32_t w, uint32_t h, bool bc7, GpuFormat dx10 = GpuFormat::BC7Srgb) {
     uint32_t levels = 1;
     while ((w >> levels) || (h >> levels)) ++levels;
     const uint32_t blockBytes = bc7 ? 16 : 8;
@@ -110,7 +137,7 @@ Bytes makeDds(uint32_t w, uint32_t h, bool bc7) {
     std::memcpy(b.data() + 84, bc7 ? "DX10" : "DXT1", 4);
     put32(b, 108, 0x1000 | 0x400000 | 0x8);
     if (bc7) {
-        put32(b, 128, uint32_t(GpuFormat::BC7Srgb));
+        put32(b, 128, uint32_t(dx10));
         put32(b, 132, 3);  // TEXTURE2D
         put32(b, 140, 1);  // array size
     }
@@ -149,6 +176,32 @@ void testPng() {
     float px[4];
     CHECK(readPixel(r.image, 63, 0, px));
     CHECK(std::fabs(px[0] - 1.0f) < 1e-6f && std::fabs(px[3]) < 1e-6f);
+}
+
+void testWebp() {
+    Bytes file = makeWebp(48, 24);
+    CHECK(!file.empty());
+    LoadResult r = loadImage(file.data(), file.size(), "webp");
+    CHECK(r.ok);
+    CHECK(r.image.width == 48 && r.image.height == 24);
+    CHECK(r.image.format == GpuFormat::RGBA8Srgb);
+    CHECK(r.image.description == "WebP, lossless RGBA");
+    // Lossless: every visible pixel comes back exactly (the encoder may rewrite RGB where alpha is 0).
+    std::vector<uint8_t> expected = testPixels(48, 24);
+    const std::vector<uint8_t>& got = r.image.mips[0].data;
+    CHECK(got.size() == expected.size());
+    size_t mismatches = 0;
+    for (size_t i = 0; i + 3 < expected.size() && got.size() == expected.size(); i += 4)
+        if (expected[i + 3] != 0 && std::memcmp(&got[i], &expected[i], 4) != 0) ++mismatches;
+    CHECK(mismatches == 0);
+}
+
+void testQoi() {
+    Bytes file = makeQoi(40, 30);
+    LoadResult r = loadImage(file.data(), file.size(), "qoi");
+    CHECK(r.ok);
+    CHECK(r.image.format == GpuFormat::RGBA8Srgb);
+    CHECK(r.image.mips[0].data == testPixels(40, 30));
 }
 
 void testHdr() {
@@ -195,6 +248,12 @@ void testDds() {
     CHECK(r.image.format == GpuFormat::BC7Srgb);
     CHECK(r.image.mips.size() == 7);
 
+    Bytes bc6 = makeDds(64, 32, true, GpuFormat::BC6HUf16);
+    r = loadImage(bc6.data(), bc6.size(), "dds");
+    CHECK(r.ok);
+    CHECK(r.image.format == GpuFormat::BC6HUf16);
+    CHECK(formatInfo(r.image.format).linear);
+
     bc7.resize(150);
     r = loadImage(bc7.data(), bc7.size(), "dds");
     CHECK(!r.ok);
@@ -202,7 +261,7 @@ void testDds() {
 
 void testGarbage() {
     const uint8_t junk[64] = {1, 2, 3};
-    for (const char* ext : {"png", "exr", "dds", "hdr"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
+    for (const char* ext : {"png", "exr", "dds", "hdr", "webp", "qoi"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
 }
 
 bool writeFile(const std::filesystem::path& path, const Bytes& data) {
@@ -218,6 +277,8 @@ int main(int argc, char** argv) {
         std::filesystem::path dir = argv[2];
         std::filesystem::create_directories(dir);
         bool ok = writeFile(dir / "gradient_2048.png", makePng(2048, 2048)) &&
+                  writeFile(dir / "gradient_2048.webp", makeWebp(2048, 2048)) &&
+                  writeFile(dir / "gradient_2048.qoi", makeQoi(2048, 2048)) &&
                   writeFile(dir / "spot_2048.hdr", makeHdr(2048, 2048)) &&
                   writeFile(dir / "spot_4096_half.exr", makeExr(4096, 4096, true)) &&
                   writeFile(dir / "spot_2048_float.exr", makeExr(2048, 2048, false)) &&
@@ -228,6 +289,8 @@ int main(int argc, char** argv) {
     }
     testHalf();
     testPng();
+    testWebp();
+    testQoi();
     testHdr();
     testExr();
     testDds();

@@ -1,7 +1,9 @@
 // Hyper Texture Viewer prototype: one Win32 window, Direct3D 11, all view math in one pixel shader.
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -20,6 +22,7 @@
 #include <vector>
 
 #include "image.h"
+#include "wic_loader.h"
 
 namespace fs = std::filesystem;
 
@@ -118,9 +121,15 @@ std::string lowerExtension(const fs::path& p) {
     return e;
 }
 
-bool isSupported(const fs::path& p) {
+bool hasBuiltInDecoder(const std::string& ext) {
     const auto& list = htv::supportedExtensions();
-    return std::find(list.begin(), list.end(), lowerExtension(p)) != list.end();
+    return std::find(list.begin(), list.end(), ext) != list.end();
+}
+
+bool isSupported(const fs::path& p) {
+    const std::string ext = lowerExtension(p);
+    const auto& wic = htv::wicExtensions();
+    return hasBuiltInDecoder(ext) || std::find(wic.begin(), wic.end(), ext) != wic.end();
 }
 
 // ---- shaders ----
@@ -465,17 +474,25 @@ void updateTitle() {
 void writeBench(bool ok);
 
 bool openFile(const fs::path& path) {
-    std::vector<uint8_t> bytes;
     std::string error;
     const double t0 = qpcMs();
     app.path = path;
-    if (!readFile(path, bytes, error)) {
-        app.error = error;
-        updateTitle();
-        return false;
+    const std::string ext = lowerExtension(path);
+    htv::LoadResult r;
+    if (hasBuiltInDecoder(ext)) {
+        std::vector<uint8_t> bytes;
+        if (!readFile(path, bytes, error)) {
+            app.error = error;
+            updateTitle();
+            return false;
+        }
+        r = htv::loadImage(bytes.data(), bytes.size(), ext);
     }
-    htv::LoadResult r = htv::loadImage(bytes.data(), bytes.size(), lowerExtension(path));
-    bytes = {};
+    // Anything the built-in decoders don't cover goes to the codecs installed in Windows.
+    if (!r.ok) {
+        htv::LoadResult wic = htv::loadWithWic(path);
+        if (wic.ok || r.error.empty()) r = std::move(wic);
+    }
     const double t1 = qpcMs();
     if (!r.ok || !uploadImage(r.image, error)) {
         app.error = r.ok ? error : r.error;
@@ -710,6 +727,7 @@ void enableDpiAwareness() {
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     app.tStart = qpcMs();
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);  // for Windows codecs
     enableDpiAwareness();
 
     int argc = 0;

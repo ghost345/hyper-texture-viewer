@@ -21,6 +21,13 @@
 #define TINYEXR_USE_THREAD 1
 #include "tinyexr.h"
 
+#define QOI_IMPLEMENTATION
+#define QOI_NO_STDIO
+#include "qoi.h"
+
+#include <webp/decode.h>
+#include <webp/demux.h>
+
 namespace htv {
 
 namespace {
@@ -297,6 +304,81 @@ LoadResult loadExr(const uint8_t* data, size_t size) {
     return r;
 }
 
+// ---- WebP via libwebp; animations show their first frame ----
+
+LoadResult loadWebp(const uint8_t* data, size_t size) {
+    LoadResult r;
+    WebPBitstreamFeatures features;
+    if (WebPGetFeatures(data, size, &features) != VP8_STATUS_OK) {
+        r.error = "not a valid WebP file";
+        return r;
+    }
+    Image& img = r.image;
+    img.format = GpuFormat::RGBA8Srgb;
+    const FormatInfo& info = formatInfo(img.format);
+
+    if (features.has_animation) {
+        WebPData webpData{data, size};
+        WebPAnimDecoderOptions options;
+        WebPAnimDecoderOptionsInit(&options);
+        options.color_mode = MODE_RGBA;
+        WebPAnimDecoder* decoder = WebPAnimDecoderNew(&webpData, &options);
+        WebPAnimInfo anim;
+        uint8_t* frame = nullptr;
+        int timestamp = 0;
+        if (!decoder || !WebPAnimDecoderGetInfo(decoder, &anim) || !WebPAnimDecoderGetNext(decoder, &frame, &timestamp)) {
+            WebPAnimDecoderDelete(decoder);
+            r.error = "cannot decode animated WebP";
+            return r;
+        }
+        img.width = anim.canvas_width;
+        img.height = anim.canvas_height;
+        Surface s = makeSurface(info, img.width, img.height);
+        std::memcpy(s.data.data(), frame, s.data.size());
+        WebPAnimDecoderDelete(decoder);
+        img.mips.push_back(std::move(s));
+        if (anim.frame_count > 1) img.note = "animation: frame 1 of " + std::to_string(anim.frame_count) + " shown";
+    } else {
+        img.width = uint32_t(features.width);
+        img.height = uint32_t(features.height);
+        Surface s = makeSurface(info, img.width, img.height);
+        if (!WebPDecodeRGBAInto(data, size, s.data.data(), s.data.size(), int(s.rowPitch))) {
+            r.error = "cannot decode WebP";
+            return r;
+        }
+        img.mips.push_back(std::move(s));
+    }
+    const char* kind = features.format == 2 ? "lossless" : features.format == 1 ? "lossy" : "mixed";
+    img.description = std::string("WebP, ") + kind + (features.has_alpha ? " RGBA" : " RGB");
+    r.ok = true;
+    return r;
+}
+
+// ---- QOI ----
+
+LoadResult loadQoi(const uint8_t* data, size_t size) {
+    LoadResult r;
+    qoi_desc desc;
+    void* px = qoi_decode(data, int(size), &desc, 4);
+    if (!px) {
+        r.error = "not a valid QOI file";
+        return r;
+    }
+    Image& img = r.image;
+    img.width = desc.width;
+    img.height = desc.height;
+    // QOI flags linear data explicitly; everything else is sRGB.
+    img.format = desc.colorspace == QOI_LINEAR ? GpuFormat::RGBA8 : GpuFormat::RGBA8Srgb;
+    Surface s = makeSurface(formatInfo(img.format), img.width, img.height);
+    std::memcpy(s.data.data(), px, s.data.size());
+    free(px);
+    img.mips.push_back(std::move(s));
+    img.description = std::string("QOI, ") + (desc.channels == 4 ? "RGBA" : "RGB") +
+                      (desc.colorspace == QOI_LINEAR ? ", linear" : "");
+    r.ok = true;
+    return r;
+}
+
 // ---- DDS: compressed data goes to the GPU untouched ----
 
 uint32_t readU32(const uint8_t* p) {
@@ -471,7 +553,7 @@ const FormatInfo& formatInfo(GpuFormat format) {
 }
 
 const std::vector<std::string>& supportedExtensions() {
-    static const std::vector<std::string> list = {"exr", "dds", "hdr", "png", "jpg", "jpeg", "tga",
+    static const std::vector<std::string> list = {"exr", "dds", "hdr", "png", "jpg", "jpeg", "webp", "qoi", "tga",
                                                   "bmp", "psd", "gif", "pic", "pnm", "ppm", "pgm"};
     return list;
 }
@@ -488,6 +570,8 @@ LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extens
     }
     if (extension == "exr") return loadExr(data, size);
     if (extension == "dds") return loadDds(data, size);
+    if (extension == "webp") return loadWebp(data, size);
+    if (extension == "qoi") return loadQoi(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
     return r;
 }
