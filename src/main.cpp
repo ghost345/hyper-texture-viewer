@@ -240,6 +240,9 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_PREFETCHED:
             prefetchDone(reinterpret_cast<LoadedFile*>(lp));
             return 0;
+        case WM_APP_COMPARE_LOADED:
+            compareSlotLoaded(reinterpret_cast<LoadedFile*>(lp));
+            return 0;
         case WM_MOUSEWHEEL: {
             POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &p);
@@ -416,10 +419,10 @@ bool isHighPrecision(const htv::Image& image) {
            f == G::RGB10A2;
 }
 
-void showOpenDialog() {
+bool pickImageFile(std::filesystem::path& out) {
     Com<IFileOpenDialog> dialog;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dialog.put()))))
-        return;
+        return false;
     std::wstring pattern;
     auto add = [&](const std::vector<std::string>& exts) {
         for (const std::string& e : exts) pattern += (pattern.empty() ? L"*." : L";*.") + widen(e);
@@ -435,13 +438,18 @@ void showOpenDialog() {
                                                   IID_PPV_ARGS(folder.put()))))
             dialog->SetFolder(folder.get());
     }
-    if (FAILED(dialog->Show(app.hwnd))) return;
+    if (FAILED(dialog->Show(app.hwnd))) return false;
     Com<IShellItem> item;
     wchar_t* name = nullptr;
-    if (SUCCEEDED(dialog->GetResult(item.put())) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &name))) {
-        openPath(name);
-        CoTaskMemFree(name);
-    }
+    if (FAILED(dialog->GetResult(item.put())) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &name))) return false;
+    out = name;
+    CoTaskMemFree(name);
+    return true;
+}
+
+void showOpenDialog() {
+    std::filesystem::path path;
+    if (pickImageFile(path)) openPath(path);
 }
 
 void imageSizeOnScreen(float& w, float& h) {

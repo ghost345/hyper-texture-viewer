@@ -188,7 +188,7 @@ if(WIN32)
     # Interface fonts (Inter, JetBrains Mono) are linked in as resources.
     configure_file(src/resources.rc.in ${CMAKE_BINARY_DIR}/resources.rc @ONLY)
     add_executable(hyper-texture-viewer WIN32 src/main.cpp src/render.cpp src/files.cpp src/ui.cpp src/ui_widgets.cpp
-        src/ui_bars.cpp src/ui_views.cpp src/ui_panels.cpp src/ui_settings.cpp src/keys.cpp src/icons.cpp src/wic_loader.cpp ${CMAKE_BINARY_DIR}/resources.rc)
+        src/ui_bars.cpp src/ui_views.cpp src/ui_panels.cpp src/ui_settings.cpp src/ui_compare.cpp src/keys.cpp src/icons.cpp src/wic_loader.cpp ${CMAKE_BINARY_DIR}/resources.rc)
     target_compile_options(hyper-texture-viewer PRIVATE ${htv_options})
     target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE HTV_VERSION="${PROJECT_VERSION}")
     target_link_libraries(hyper-texture-viewer PRIVATE htv_image htv_imgui d3d11 dxgi dwmapi shlwapi windowscodecs ole32

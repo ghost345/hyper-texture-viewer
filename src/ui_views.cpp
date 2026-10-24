@@ -407,6 +407,7 @@ void viewportOverlays() {
         }
     }
     dl->PopClipRect();
+    compareOverlay();
 
     // The image area's own states. While a file loads, the previous image (or nothing) stays.
     if (!app.hasImage && !app.loading) {

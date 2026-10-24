@@ -54,6 +54,7 @@ struct LoadedFile {
     uint64_t fileSize = 0;
     FileStamp stamp;
     double decodeMs = 0;
+    int compareSlot = -1;  // a Compare slot's file (0 B, 1 C) instead of the shown image
 };
 
 namespace {
@@ -143,6 +144,7 @@ fs::path prefetchInFlight;
 std::atomic<int> promotedGeneration{0};                  // the user asked for the file in flight
 OpenMode promotedMode = OpenMode::Browse;
 bool prefetchStarted = false;
+std::atomic<int> compareGeneration[2];  // a new file for a Compare slot cancels the slot's load in progress
 
 // `foreground`: the user's request, which shows progress; otherwise a prefetch.
 void decode(LoadedFile& r, bool foreground) {
@@ -158,6 +160,7 @@ void decode(LoadedFile& r, bool foreground) {
     }
     const int generation = r.generation;
     const std::function<bool()> cancelled = [&] {
+        if (r.compareSlot >= 0) return generation != compareGeneration[r.compareSlot];
         return foreground ? generation != latestGeneration
                           : generation != prefetchGeneration && promotedGeneration == 0;
     };
@@ -543,6 +546,7 @@ void finishLoad(LoadedFile* raw) {
 
     const bool sameSize = app.hasImage && app.image.width == f->image.width && app.image.height == f->image.height;
     // The image on screen goes to the cache for going back to it, unless this is a new version of it.
+    if (app.hasImage && !app.fromClipboard && app.shownPath != f->path) app.previousPath = app.shownPath;
     if (app.hasImage && !app.fromClipboard && app.shownPath != f->path && app.cacheMB > 0) {
         auto old = std::make_unique<LoadedFile>();
         old->path = app.shownPath;
@@ -593,6 +597,62 @@ void finishLoad(LoadedFile* raw) {
         }
     }
     if (!f->clipboard) schedulePrefetch();
+    requestRedraw();
+}
+
+void loadCompareSlot(int slot, const fs::path& path) {
+    CompareSlot& s = app.compareSlots[slot];
+    const int generation = ++compareGeneration[slot];
+    s = CompareSlot();
+    s.generation = generation;
+    if (path.empty()) return;
+    s.path = path;
+    s.loading = true;
+    // A decoded copy in the cache goes straight to the GPU, and back to the cache.
+    if (std::unique_ptr<LoadedFile> f = cacheTake(path)) {
+        f->compareSlot = slot;
+        f->generation = generation;
+        compareSlotLoaded(f.release());
+        return;
+    }
+    std::thread([slot, generation, path] {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        auto job = std::make_unique<LoadedFile>();
+        job->path = path;
+        job->generation = generation;
+        job->compareSlot = slot;
+        decode(*job, false);
+        PostMessageW(app.hwnd, WM_APP_COMPARE_LOADED, 0, reinterpret_cast<LPARAM>(job.release()));
+        CoUninitialize();
+    }).detach();
+}
+
+void compareSlotLoaded(LoadedFile* raw) {
+    std::unique_ptr<LoadedFile> f(raw);
+    const int slot = f->compareSlot;
+    CompareSlot& s = app.compareSlots[slot];
+    if (f->generation != compareGeneration[slot]) {  // the slot got another file meanwhile
+        if (f->ok) cacheInsert(std::move(f));
+        return;
+    }
+    s.loading = false;
+    if (!f->ok) {
+        s.error = f->error;
+        return;
+    }
+    std::string error;
+    if (!createImageTexture(f->image, s.srv, s.mips, error)) {
+        s.error = error;
+        return;
+    }
+    s.fileSize = f->fileSize;
+    s.image.width = f->image.width;
+    s.image.height = f->image.height;
+    s.image.format = f->image.format;
+    s.image.description = f->image.description;
+    s.generation = ++compareGeneration[slot];
+    if (f->path != app.shownPath) cacheInsert(std::move(f));
     requestRedraw();
 }
 

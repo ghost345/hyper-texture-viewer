@@ -191,6 +191,9 @@ void colorMatchPanel();
 // M: opens Color match on the locked pixel or the one under the cursor (else waits for a click), or closes it.
 void toggleColorMatch();
 void stepMatchRegion(int delta);
+void comparePanel();  // ui_compare.cpp
+void compareOverlay();
+void toggleCompare();
 void settingsPanel();   // ui_settings.cpp
 // While Settings waits for a new key, takes the key press. False when it is not waiting.
 bool settingsKeyDown(KeyBinding k);

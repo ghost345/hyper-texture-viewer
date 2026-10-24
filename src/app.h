@@ -54,6 +54,28 @@ enum class Channel { RGB, R, G, B, A, Luminance };
 enum class AlphaBackground { Checker, Black, Grey, White, Custom, Count };
 enum class Tiling { Off, Seamless, Bordered };
 enum class ToneMap { LinearClip, Reinhard, Aces, Agx, Count };
+enum class CompareMode { Split, Blend, Difference };
+
+// Compare: an image besides the shown one (A), kept on the GPU.
+struct CompareSlot {
+    std::filesystem::path path;
+    htv::Image image;  // size, format and description only: the pixels live in `srv`
+    Com<ID3D11ShaderResourceView> srv;
+    Com<ID3D11ShaderResourceView> thumbnail;
+    int mips = 1;
+    uint64_t fileSize = 0;
+    bool loading = false;
+    std::string error;
+    int generation = 0;  // changes with every upload
+};
+
+// Difference statistics of a pair, in the values the files store.
+struct CompareStats {
+    bool valid = false;
+    double maxDelta = 0, meanDelta = 0, mse = 0;
+    uint64_t pixels = 0, pixelsOver = 0;  // compared, and differing by more than 2 (8-bit steps)
+};
+
 enum class ColorFormat { Html, Hex, DelphiHex, VbHex, Rgb, RgbFloat, Hsv, Hsl, Long, Count };
 
 struct RecentFile {
@@ -73,6 +95,9 @@ struct App {
     Com<ID3D11PixelShader> ps;
     Com<ID3D11PixelShader> psRead;  // copies texels into a float target for the pixel readout
     Com<ID3D11PixelShader> psMatch;  // Color match mask
+    Com<ID3D11PixelShader> psDiff;   // Compare: difference of two images through a heat ramp
+    Com<ID3D11PixelShader> psDiffRead;  // Compare: per-channel difference for the statistics
+    Com<ID3D11BlendState> blendFactor;  // Compare: Blend mode draws the second image at the blend factor
     Com<ID3D11Buffer> constants;
     Com<ID3D11SamplerState> trilinear;
     Com<ID3D11ShaderResourceView> srv;
@@ -162,6 +187,18 @@ struct App {
     htv::MaskRegions matchRegions;
     int matchRegion = -1;         // the region the view went to last
 
+    // Compare (Ctrl+K): A is the shown image, B and C are other files.
+    bool compare = false;
+    CompareMode compareMode = CompareMode::Split;
+    CompareSlot compareSlots[2];      // B and C
+    int comparePair = 0;              // Blend and Difference: A and B, A and C, B and C
+    float compareBlend = 0.5f;        // how much of the pair's second image shows
+    float compareGain = 8.0f;         // Difference: amplification
+    bool compareSameSize = true;      // B and C stretched over A when their sizes differ
+    float compareShutters[2] = {0.5f, 0.75f};  // Split: where B and C begin, across A's width
+    CompareStats compareStats;
+    std::filesystem::path previousPath;  // the image shown before this one: the first guess for B
+
     bool showInfo = false;
     bool showHelp = false;
     bool showHistogram = false;
@@ -250,6 +287,14 @@ bool readPixelsGpu(int x, int y, int n, float* rgba);
 bool setMatchTarget(int x, int y);
 void updateColorMatch();  // rebuilds the mask when the image, target, mode or tolerance changed
 void showMatchRegion(int index);  // centres the view on a region, zooming out when it does not fit
+// Compare: slot 0 is B, 1 is C. Loads in the background; an empty path clears the slot.
+void loadCompareSlot(int slot, const std::filesystem::path& path);
+bool pickImageFile(std::filesystem::path& out);  // the Open dialog; false when cancelled
+void updateCompareStats();  // recomputes the pair's difference statistics when the images or the pair changed
+// The images Split shows, left to right: 0 for A, 1 for B, 2 for C. Returns how many.
+int compareLayers(int* out);
+// A thumbnail of A (slot -1), B (0) or C (1), as the view shows it.
+ID3D11ShaderResourceView* compareThumbnail(int slot);
 double nowMs();
 
 }  // namespace htv

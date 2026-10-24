@@ -51,9 +51,16 @@ cbuffer View : register(b0) {
     float matchTolerance;
     uint matchSrgb;        // compare sRGB-encoded values: the GPU decoded the texture to linear
     uint matchOutline;     // outline the pixels set in `mask`
+    float2 image2Size;     // Compare: the second image of a pair, in tex2
+    float2 scale2;         // its pixels per pixel of the first
+    uint channels2;
+    uint srgb1;            // compare sRGB-encoded values: the GPU decoded the texture to linear
+    uint srgb2;
+    float diffGain;
 };
 Texture2D<float4> tex : register(t0);
 Texture2D<float> mask : register(t1);
+Texture2D<float4> tex2 : register(t2);
 SamplerState trilinear : register(s0);
 
 float4 vsMain(uint id : SV_VertexID) : SV_Position {
@@ -214,6 +221,51 @@ float4 psMatch(float4 pos : SV_Position) : SV_Target {
     return d <= matchTolerance ? 1 : 0;
 }
 
+// Compare: one and two-channel data as RGBA, sRGB re-encoded, so differences read as the files store them.
+float4 storedValue(float4 c, uint ch, uint srgb) {
+    if (srgb) c.rgb = srgbEncode(c.rgb);
+    if (ch == 1) c = float4(c.rrr, 1);
+    else if (ch == 2) c = float4(c.rg, 0, 1);
+    return c;
+}
+
+// Black, red, yellow, white.
+float3 heat(float t) { return saturate(float3(t * 3, t * 3 - 1, t * 3 - 2)); }
+
+// Compare, Difference: |first - second| times the gain, through the heat ramp.
+float4 psDiff(float4 pos : SV_Position) : SV_Target {
+    float2 ip;
+    if (!imagePos(pos.xy, ip)) return background;
+    float2 ip2 = ip * scale2;
+    if (ip2.x >= image2Size.x || ip2.y >= image2Size.y) return background;
+    float4 a, b;
+    if (zoom >= 1.0) {
+        a = tex.Load(int3(clamp(floor(ip), 0, imageSize - 1), 0));
+        b = tex2.Load(int3(clamp(floor(ip2), 0, image2Size - 1), 0));
+    } else {
+        a = tex.SampleLevel(trilinear, ip / imageSize, log2(1.0 / zoom));
+        b = tex2.SampleLevel(trilinear, ip2 / image2Size, log2(scale2.x / zoom));
+    }
+    float4 d = abs(storedValue(a, channels, srgb1) - storedValue(b, channels2, srgb2));
+    float v = max(max(d.r, d.g), d.b);
+    if (channelMode >= 1 && channelMode <= 4)
+        v = dot(d, float4(channelMode == 1, channelMode == 2, channelMode == 3, channelMode == 4));
+    else if (channelMode == 6) v = abs(dot(storedValue(a, channels, srgb1).rgb - storedValue(b, channels2, srgb2).rgb,
+                                           float3(0.2126, 0.7152, 0.0722)));
+    if (v != v) return float4(1, 0, 1, 1);
+    return float4(heat(v * diffGain), 1);
+}
+
+// Compare statistics: per-channel differences of mip 0 from imageOrigin on; -1 where the second image ends.
+float4 psDiffRead(float4 pos : SV_Position) : SV_Target {
+    int2 p = clamp(int2(imageOrigin) + int2(pos.xy), 0, int2(imageSize) - 1);
+    float2 p2 = floor((float2(p) + 0.5) * scale2);
+    if (p2.x >= image2Size.x || p2.y >= image2Size.y) return float4(-1, -1, -1, -1);
+    float4 a = storedValue(tex.Load(int3(p, 0)), channels, srgb1);
+    float4 b = storedValue(tex2.Load(int3(int2(p2), 0)), channels2, srgb2);
+    return abs(a - b);
+}
+
 // Pixel readout for formats the CPU cannot decode: texels from imageOrigin on, as sampled.
 float4 psRead(float4 pos : SV_Position) : SV_Target {
     int2 p = clamp(int2(imageOrigin) + int2(pos.xy), 0, int2(imageSize) - 1);
@@ -252,6 +304,12 @@ struct ViewConstants {
     float matchTolerance;
     uint32_t matchSrgb;
     uint32_t matchOutline;
+    float image2Size[2];
+    float scale2[2];
+    uint32_t channels2;
+    uint32_t srgb1;
+    uint32_t srgb2;
+    float diffGain;
 };
 static_assert(sizeof(ViewConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
@@ -262,22 +320,22 @@ using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_
 const float kCheckerSizes[3] = {8, 16, 32};
 const float kSolidBackgrounds[3] = {0.0f, 0.5f, 1.0f};  // black, middle grey, white
 
-ViewConstants makeConstants(float originX, float originY, float zoom, float tiles, float checkerSize,
-                            const UiColors& colors) {
-    const htv::FormatInfo& info = htv::formatInfo(app.image.format);
+ViewConstants makeConstants(const htv::Image& image, float originX, float originY, float zoom, float tiles,
+                            float checkerSize, const UiColors& colors) {
+    const htv::FormatInfo& info = htv::formatInfo(image.format);
     ViewConstants c{};
-    c.imageSize[0] = float(app.image.width);
-    c.imageSize[1] = float(app.image.height);
+    c.imageSize[0] = float(image.width);
+    c.imageSize[1] = float(image.height);
     c.imageOrigin[0] = originX;
     c.imageOrigin[1] = originY;
     c.zoom = zoom;
-    const bool hdr = isHighPrecision(app.image);
+    const bool hdr = isHighPrecision(image);
     c.exposureScale = hdr ? std::exp2(app.exposure) : 1.0f;
     const uint32_t modes[] = {0, 1, 2, 3, 4, 6};
     c.channelMode = modes[int(app.channel)];
     if (c.channelMode == 0 && app.ignoreAlpha) c.channelMode = 5;
     c.channels = uint32_t(info.channels);
-    c.transfer = (app.dataIsLinear ? 1u : 0u) + (isSrgbFormat(app.image.format) ? 1u : 0u);
+    c.transfer = (app.dataIsLinear ? 1u : 0u) + (isSrgbFormat(image.format) ? 1u : 0u);
     c.signedValues = info.snorm ? 1u : 0u;
     c.rotation = uint32_t(app.rotation);
     c.flips = (app.flipH ? 1u : 0u) | (app.flipV ? 2u : 0u);
@@ -312,15 +370,17 @@ ViewConstants makeConstants(float originX, float originY, float zoom, float tile
     return c;
 }
 
-// `mask` is the Color match mask the outline reads, or none.
+// `mask` is the Color match mask the outline reads, or none; `image` replaces the shown image, `second` is
+// Compare's second image.
 void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const ViewConstants& c, ID3D11PixelShader* ps,
-               ID3D11ShaderResourceView* mask = nullptr) {
+               ID3D11ShaderResourceView* mask = nullptr, ID3D11ShaderResourceView* image = nullptr,
+               ID3D11ShaderResourceView* second = nullptr) {
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(app.context->Map(app.constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
     *static_cast<ViewConstants*>(m.pData) = c;
     app.context->Unmap(app.constants.get(), 0);
     ID3D11Buffer* cb = app.constants.get();
-    ID3D11ShaderResourceView* srvs[2] = {app.srv.get(), mask};
+    ID3D11ShaderResourceView* srvs[3] = {image ? image : app.srv.get(), mask, second};
     ID3D11SamplerState* sampler = app.trilinear.get();
     // Unbind the mask first: it may be the target of this draw.
     ID3D11ShaderResourceView* none = nullptr;
@@ -332,7 +392,7 @@ void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const V
     app.context->VSSetShader(app.vs.get(), nullptr, 0);
     app.context->PSSetShader(ps, nullptr, 0);
     app.context->PSSetConstantBuffers(0, 1, &cb);
-    app.context->PSSetShaderResources(0, 2, srvs);
+    app.context->PSSetShaderResources(0, 3, srvs);
     app.context->PSSetSamplers(0, 1, &sampler);
     app.context->Draw(3, 0);
 }
@@ -485,14 +545,15 @@ bool createPipeline(std::string& error) {
         error = "d3dcompiler_47.dll not found";
         return false;
     }
-    Com<ID3DBlob> vsBlob, psBlob, readBlob, matchBlob, log;
+    Com<ID3DBlob> vsBlob, psBlob, readBlob, matchBlob, diffBlob, diffReadBlob, log;
     const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS;
     auto build = [&](const char* entry, const char* target, Com<ID3DBlob>& out) {
         return SUCCEEDED(compile(kShader, sizeof(kShader) - 1, "view.hlsl", nullptr, nullptr, entry, target, flags, 0,
                                  out.put(), log.put()));
     };
     if (!build("vsMain", "vs_4_0", vsBlob) || !build("psMain", "ps_4_0", psBlob) || !build("psRead", "ps_4_0", readBlob) ||
-        !build("psMatch", "ps_4_0", matchBlob)) {
+        !build("psMatch", "ps_4_0", matchBlob) || !build("psDiff", "ps_4_0", diffBlob) ||
+        !build("psDiffRead", "ps_4_0", diffReadBlob)) {
         error = log ? std::string(static_cast<const char*>(log->GetBufferPointer()), log->GetBufferSize())
                     : "shader compilation failed";
         return false;
@@ -504,7 +565,11 @@ bool createPipeline(std::string& error) {
         FAILED(app.device->CreatePixelShader(readBlob->GetBufferPointer(), readBlob->GetBufferSize(), nullptr,
                                              app.psRead.put())) ||
         FAILED(app.device->CreatePixelShader(matchBlob->GetBufferPointer(), matchBlob->GetBufferSize(), nullptr,
-                                             app.psMatch.put()))) {
+                                             app.psMatch.put())) ||
+        FAILED(app.device->CreatePixelShader(diffBlob->GetBufferPointer(), diffBlob->GetBufferSize(), nullptr,
+                                             app.psDiff.put())) ||
+        FAILED(app.device->CreatePixelShader(diffReadBlob->GetBufferPointer(), diffReadBlob->GetBufferSize(), nullptr,
+                                             app.psDiffRead.put()))) {
         error = "cannot create shaders";
         return false;
     }
@@ -518,15 +583,22 @@ bool createPipeline(std::string& error) {
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
+    D3D11_BLEND_DESC blend{};
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_BLEND_FACTOR;
+    blend.RenderTarget[0].DestBlend = blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_BLEND_FACTOR;
+    blend.RenderTarget[0].BlendOp = blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     if (FAILED(app.device->CreateBuffer(&bd, nullptr, app.constants.put())) ||
-        FAILED(app.device->CreateSamplerState(&sd, app.trilinear.put()))) {
+        FAILED(app.device->CreateSamplerState(&sd, app.trilinear.put())) ||
+        FAILED(app.device->CreateBlendState(&blend, app.blendFactor.put()))) {
         error = "cannot create pipeline state";
         return false;
     }
     return true;
 }
 
-bool uploadImage(const htv::Image& img, std::string& error) {
+bool createImageTexture(const htv::Image& img, Com<ID3D11ShaderResourceView>& out, int& mips, std::string& error) {
     const DXGI_FORMAT format = DXGI_FORMAT(img.format);
     const htv::FormatInfo& info = htv::formatInfo(img.format);
     UINT support = 0;
@@ -585,8 +657,17 @@ bool uploadImage(const htv::Image& img, std::string& error) {
         return false;
     }
     if (autoMips) app.context->GenerateMips(srv.get());
+    out = std::move(srv);
+    mips = int(d.MipLevels);
+    return true;
+}
+
+bool uploadImage(const htv::Image& img, std::string& error) {
+    Com<ID3D11ShaderResourceView> srv;
+    int mips = 1;
+    if (!createImageTexture(img, srv, mips, error)) return false;
     app.srv = std::move(srv);
-    app.textureMips = int(d.MipLevels);
+    app.textureMips = mips;
     ++app.imageGeneration;
     return true;
 }
@@ -600,6 +681,183 @@ void releaseImage() {
     ++app.imageGeneration;
 }
 
+// ---- Compare ----
+
+namespace {
+
+// An image Compare draws: A (0, the shown one), B (1) or C (2).
+struct Layer {
+    const htv::Image* image = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    int generation = 0;
+};
+
+Layer layer(int i) {
+    if (i == 0) return {&app.image, app.hasImage ? app.srv.get() : nullptr, app.imageGeneration};
+    const CompareSlot& s = app.compareSlots[i - 1];
+    return {&s.image, s.srv.get(), s.generation};
+}
+
+// Zoom and the top-left corner of a layer's shown area. B and C cover A's area when sizes are matched, and
+// otherwise start at A's corner at A's zoom.
+void layerView(const Layer& l, float& zoom, float& x0, float& y0) {
+    const float w = float(app.rotation & 1 ? l.image->height : l.image->width);
+    const float h = float(app.rotation & 1 ? l.image->width : l.image->height);
+    float aw, ah;
+    imageSizeOnScreen(aw, ah);
+    zoom = app.zoom;
+    if (l.image != &app.image && app.compareSameSize && w > 0) zoom = app.zoom * aw / w;
+    const float around = app.tiling != Tiling::Off ? 1.0f : 0.0f;
+    x0 = app.originX - around * w * zoom;
+    y0 = app.originY - around * h * zoom;
+}
+
+// Constants for drawing layer i into the viewport.
+ViewConstants layerConstants(int i, const UiColors& colors) {
+    const Layer l = layer(i);
+    float zoom, x0, y0;
+    layerView(l, zoom, x0, y0);
+    ViewConstants c = makeConstants(*l.image, x0, y0, zoom, app.tiling == Tiling::Off ? 1.0f : 3.0f,
+                                    std::round(kCheckerSizes[app.checkerSize] * app.scale), colors);
+    if (i != 0) {
+        c.matchOutline = 0;  // the mask is A's
+        c.forcedMip = -1;
+    }
+    return c;
+}
+
+const int kPairs[3][2] = {{0, 1}, {0, 2}, {1, 2}};
+
+// The second image of a pair, as psDiff and psDiffRead read it.
+void setSecond(ViewConstants& c, const Layer& first, const Layer& second) {
+    c.image2Size[0] = float(second.image->width);
+    c.image2Size[1] = float(second.image->height);
+    // Matched sizes: B and C over A, and therefore over each other.
+    const bool stretch = app.compareSameSize && first.image->width && first.image->height;
+    c.scale2[0] = stretch ? float(second.image->width) / float(first.image->width) : 1.0f;
+    c.scale2[1] = stretch ? float(second.image->height) / float(first.image->height) : 1.0f;
+    c.channels2 = uint32_t(htv::formatInfo(second.image->format).channels);
+    c.srgb1 = isSrgbFormat(first.image->format) ? 1u : 0u;
+    c.srgb2 = isSrgbFormat(second.image->format) ? 1u : 0u;
+    c.diffGain = app.compareGain;
+}
+
+void drawCompare(const UiColors& colors) {
+    ID3D11RenderTargetView* target = app.rtv.get();
+    const float vx0 = app.vpX, vx1 = app.vpX + app.vpW;
+    auto draw = [&](int i, float left, float right, ID3D11PixelShader* ps, ID3D11ShaderResourceView* second,
+                    const ViewConstants& c) {
+        left = std::max(left, vx0);
+        right = std::min(right, vx1);
+        if (right <= left) return;
+        D3D11_VIEWPORT vp{left, app.vpY, right - left, app.vpH, 0, 1};
+        drawImage(target, vp, c, ps, c.matchOutline ? app.matchMask.get() : nullptr, layer(i).srv, second);
+    };
+    if (app.compareMode == CompareMode::Split) {
+        int ids[3];
+        const int n = compareLayers(ids);
+        float aw, ah;
+        imageSizeOnScreen(aw, ah);
+        for (int k = 0; k < n; ++k) {
+            const float left = k == 0 ? vx0 : app.originX + app.compareShutters[k - 1] * aw * app.zoom;
+            const float right = k == n - 1 ? vx1 : app.originX + app.compareShutters[k] * aw * app.zoom;
+            draw(ids[k], left, right, app.ps.get(), nullptr, layerConstants(ids[k], colors));
+        }
+        return;
+    }
+    const int first = kPairs[app.comparePair][0], second = kPairs[app.comparePair][1];
+    const Layer a = layer(first), b = layer(second);
+    if (!a.srv || !b.srv) {  // the pair is not loaded yet: A alone
+        draw(0, vx0, vx1, app.ps.get(), nullptr, layerConstants(0, colors));
+        return;
+    }
+    if (app.compareMode == CompareMode::Blend) {
+        draw(first, vx0, vx1, app.ps.get(), nullptr, layerConstants(first, colors));
+        const float f = std::clamp(app.compareBlend, 0.0f, 1.0f);
+        const float factor[4] = {f, f, f, f};
+        app.context->OMSetBlendState(app.blendFactor.get(), factor, 0xffffffff);
+        ViewConstants c = layerConstants(second, colors);
+        c.matchOutline = 0;
+        draw(second, vx0, vx1, app.ps.get(), nullptr, c);
+        app.context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+        return;
+    }
+    ViewConstants c = layerConstants(first, colors);
+    c.matchOutline = 0;
+    setSecond(c, a, b);
+    draw(first, vx0, vx1, app.psDiff.get(), b.srv, c);
+}
+
+}  // namespace
+
+int compareLayers(int* out) {
+    int n = 0;
+    if (!app.hasImage) return 0;
+    out[n++] = 0;
+    for (int i = 0; i < 2; ++i)
+        if (app.compareSlots[i].srv) out[n++] = i + 1;
+    return n;
+}
+
+void updateCompareStats() {
+    static int key[5] = {-1, -1, -1, -1, -1};
+    if (!app.compare || app.compareMode != CompareMode::Difference || !app.psDiffRead) {
+        key[0] = -1;
+        return;
+    }
+    const int first = kPairs[app.comparePair][0], second = kPairs[app.comparePair][1];
+    const Layer a = layer(first), b = layer(second);
+    if (!a.srv || !b.srv) {
+        app.compareStats = CompareStats();
+        key[0] = -1;
+        return;
+    }
+    const int now[5] = {app.comparePair, a.generation, b.generation, app.compareSameSize ? 1 : 0, 1};
+    if (std::equal(now, now + 5, key) && app.compareStats.valid) return;
+    std::copy(now, now + 5, key);
+    app.compareStats = CompareStats();
+
+    // Strips of whole rows of the first image, as scanImageGpu reads.
+    const int w = int(a.image->width), h = int(a.image->height);
+    const int strip = std::clamp((1 << 20) / std::max(w, 1), 1, h);
+    Readback rb;
+    if (!rb.create(w, strip, DXGI_FORMAT_R32G32B32A32_FLOAT)) return;
+    CompareStats st;
+    double sum = 0, sumSq = 0;
+    for (int y0 = 0; y0 < h; y0 += strip) {
+        ViewConstants c{};
+        c.imageSize[0] = float(w);
+        c.imageSize[1] = float(h);
+        c.imageOrigin[1] = float(y0);
+        c.channels = uint32_t(htv::formatInfo(a.image->format).channels);
+        setSecond(c, a, b);
+        D3D11_VIEWPORT vp{0, 0, float(w), float(strip), 0, 1};
+        drawImage(rb.rtv.get(), vp, c, app.psDiffRead.get(), nullptr, a.srv, b.srv);
+        const int rows = std::min(strip, h - y0);
+        if (!rb.read([&](int y, const uint8_t* p) {
+                if (y >= rows) return;
+                const float* d = reinterpret_cast<const float*>(p);
+                for (int x = 0; x < w; ++x, d += 4) {
+                    if (d[0] < 0) continue;  // past the second image
+                    const double m = std::max({d[0], d[1], d[2]});
+                    if (!(m == m)) continue;  // NaN
+                    st.maxDelta = std::max(st.maxDelta, m);
+                    sum += double(d[0]) + d[1] + d[2];
+                    sumSq += double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2];
+                    ++st.pixels;
+                    if (m > 2.5 / 255.0) ++st.pixelsOver;
+                }
+            }))
+            return;
+    }
+    if (st.pixels) {
+        st.meanDelta = sum / (3.0 * double(st.pixels));
+        st.mse = sumSq / (3.0 * double(st.pixels));
+    }
+    st.valid = true;
+    app.compareStats = st;
+}
+
 void render() {
     if (!app.rtv) return;
     static bool inRender = false;  // WM_PAINT can arrive while a frame is being built
@@ -607,6 +865,7 @@ void render() {
     inRender = true;
 
     updateColorMatch();
+    updateCompareStats();
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -616,10 +875,13 @@ void render() {
     const UiColors colors = uiColors();
     float clear[4] = {colors.viewport[0], colors.viewport[1], colors.viewport[2], 1.0f};
     app.context->ClearRenderTargetView(app.rtv.get(), clear);
-    if (app.hasImage && app.srv) {
+    int layers[3];
+    if (app.compare && app.hasImage && app.srv && compareLayers(layers) > 1) {
+        drawCompare(colors);
+    } else if (app.hasImage && app.srv) {
         float x0, y0, x1, y1;
         shownArea(x0, y0, x1, y1);
-        const ViewConstants c = makeConstants(x0, y0, app.zoom, app.tiling == Tiling::Off ? 1.0f : 3.0f,
+        const ViewConstants c = makeConstants(app.image, x0, y0, app.zoom, app.tiling == Tiling::Off ? 1.0f : 3.0f,
                                               std::round(kCheckerSizes[app.checkerSize] * app.scale), colors);
         // SV_Position is in window pixels whatever the viewport; the viewport only clips to the image area.
         D3D11_VIEWPORT vp{app.vpX, app.vpY, app.vpW, app.vpH, 0, 1};
@@ -640,24 +902,56 @@ void render() {
     }
 }
 
-std::vector<uint8_t> renderThumbnail(int size) {
+namespace {
+
+std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, ID3D11ShaderResourceView* srv, int size) {
     std::vector<uint8_t> out;
     static Readback rb;
-    if (!app.hasImage || !app.srv || !rb.create(size, DXGI_FORMAT_R8G8B8A8_UNORM)) return out;
+    if (!srv || !rb.create(size, DXGI_FORMAT_R8G8B8A8_UNORM)) return out;
     // Cover the square, like the design's thumbnails; rotation and flips as on screen, no tiling.
-    const float w = float(app.rotation & 1 ? app.image.height : app.image.width);
-    const float h = float(app.rotation & 1 ? app.image.width : app.image.height);
+    const float w = float(app.rotation & 1 ? image.height : image.width);
+    const float h = float(app.rotation & 1 ? image.width : image.height);
     const float zoom = float(size) / std::min(w, h);
-    ViewConstants c = makeConstants((size - w * zoom) * 0.5f, (size - h * zoom) * 0.5f, zoom, 1.0f, 4.0f, uiColors());
+    ViewConstants c =
+        makeConstants(image, (size - w * zoom) * 0.5f, (size - h * zoom) * 0.5f, zoom, 1.0f, 4.0f, uiColors());
     c.clipping = 0;
     c.matchOutline = 0;
     c.forcedMip = -1;
     D3D11_VIEWPORT vp{0, 0, float(size), float(size), 0, 1};
-    drawImage(rb.rtv.get(), vp, c, app.ps.get());
+    drawImage(rb.rtv.get(), vp, c, app.ps.get(), nullptr, srv);
     out.resize(size_t(size) * size * 4);
     if (!rb.read([&](int y, const uint8_t* row) { std::copy(row, row + size * 4, out.data() + size_t(y) * size * 4); }))
         out.clear();
     return out;
+}
+
+}  // namespace
+
+std::vector<uint8_t> renderThumbnail(int size) {
+    if (!app.hasImage) return {};
+    return renderThumbnailOf(app.image, app.srv.get(), size);
+}
+
+ID3D11ShaderResourceView* compareThumbnail(int slot) {
+    constexpr int kSize = 64;
+    static Com<ID3D11ShaderResourceView> a;
+    static int aGeneration = -1, aRotation = -1;
+    if (slot < 0) {
+        if (!app.hasImage) return nullptr;
+        if (aGeneration != app.imageGeneration || aRotation != app.rotation) {
+            const std::vector<uint8_t> px = renderThumbnailOf(app.image, app.srv.get(), kSize);
+            a = px.empty() ? Com<ID3D11ShaderResourceView>() : createTexture(px.data(), kSize, kSize);
+            aGeneration = app.imageGeneration;
+            aRotation = app.rotation;
+        }
+        return a.get();
+    }
+    CompareSlot& s = app.compareSlots[slot];
+    if (s.srv && !s.thumbnail) {
+        const std::vector<uint8_t> px = renderThumbnailOf(s.image, s.srv.get(), kSize);
+        if (!px.empty()) s.thumbnail = createTexture(px.data(), kSize, kSize);
+    }
+    return s.thumbnail.get();
 }
 
 bool readPixelsGpu(int x, int y, int n, float* rgba) {

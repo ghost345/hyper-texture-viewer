@@ -9,6 +9,7 @@ namespace htv {
 
 constexpr UINT WM_APP_LOADED = WM_APP + 1;  // a background load finished; lParam owns a LoadedFile
 constexpr UINT WM_APP_PREFETCHED = WM_APP + 2;  // a neighbour was decoded ahead; lParam owns a LoadedFile
+constexpr UINT WM_APP_COMPARE_LOADED = WM_APP + 3;  // a Compare slot's file was decoded; lParam owns a LoadedFile
 constexpr UINT_PTR kWatchTimer = 1;         // checks the shown file for changes on disk
 constexpr UINT_PTR kLoadingTimer = 2;       // keeps frames coming while a load runs
 constexpr UINT_PTR kZebraTimer = 3;         // moves the clipping stripes
@@ -25,6 +26,8 @@ bool createSwapChain(bool allowFlip);
 bool createRenderTarget();
 bool createPipeline(std::string& error);
 bool uploadImage(const htv::Image& img, std::string& error);
+// Creates a texture with mips for an image; uploadImage puts the shown image's in app.srv.
+bool createImageTexture(const htv::Image& img, Com<ID3D11ShaderResourceView>& srv, int& mips, std::string& error);
 void releaseImage();
 void resizeBuffers();
 void render();
@@ -42,6 +45,7 @@ void saveOnExit();
 void openStartupFile(const std::filesystem::path& path);  // synchronous when benchmarking
 void finishLoad(LoadedFile* file);
 void prefetchDone(LoadedFile* file);
+void compareSlotLoaded(LoadedFile* file);
 void checkFileChanged();
 bool isSupported(const std::filesystem::path& path);
 

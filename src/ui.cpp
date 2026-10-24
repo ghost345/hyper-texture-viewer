@@ -112,6 +112,7 @@ void uiFrame() {
     infoPanel();
     histogramPanel();
     colorMatchPanel();
+    comparePanel();
     settingsPanel();
     helpPanel();
     notices();
@@ -185,7 +186,7 @@ void runAction(Action a) {
         case Action::Histogram: app.showHistogram = !app.showHistogram; break;
         case Action::Info: app.showInfo = !app.showInfo; break;
         case Action::Layers: break;
-        case Action::Compare: break;
+        case Action::Compare: toggleCompare(); break;
 
         case Action::AlwaysOnTop: setTopmost(!app.topmost); break;
         case Action::ClickThrough: setClickThrough(!app.clickThrough); break;
@@ -218,6 +219,7 @@ bool uiKeyDown(int vk) {
         else if (app.showHelp) app.showHelp = false;
         else if (app.matchPicking) app.matchPicking = false;
         else if (app.colorMatch) app.colorMatch = false;
+        else if (app.compare) app.compare = false;
         else if (app.showInfo) app.showInfo = false;
         else if (app.showHistogram) app.showHistogram = false;
         else DestroyWindow(app.hwnd);

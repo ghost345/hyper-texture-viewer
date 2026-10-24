@@ -533,7 +533,10 @@ void moreMenuItems() {
 
 void compareGroup(Row& r, const TopLayout& L) {
     r.separator(16, 5);
-    r.button("compare", Icon::Compare, L.compact ? nullptr : "Compare", kDisabled, "Compare (coming soon)", "Ctrl+K");
+    const int cmpOff = noImage() ? kDisabled : 0;
+    if (r.button("compare", Icon::Compare, L.compact ? nullptr : "Compare",
+                 (app.compare && !cmpOff ? kOn : 0) | cmpOff, "Compare", keyText(Action::Compare)))
+        toggleCompare();
     if (!L.compact) return;
     const float x0 = r.x;
     const bool open = ImGui::IsPopupOpen("more menu");
