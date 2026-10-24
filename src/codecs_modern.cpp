@@ -176,6 +176,11 @@ LoadResult loadAvif(const uint8_t* data, size_t size) {
     img.description = "AVIF, " + std::to_string(im->depth) + " bit" + (pq ? ", PQ HDR" : hlg ? ", HLG HDR" : "") +
                       primariesName(primaries) + (im->alphaPlane ? ", alpha" : "");
     if (decoder->imageCount > 1) img.note = "sequence: frame 1 of " + std::to_string(decoder->imageCount) + " shown";
+    if (im->icc.size) {
+        const std::string profile = iccDescription(im->icc.data, im->icc.size);
+        if (!profile.empty()) img.metadata.push_back({"Color profile", profile});
+    }
+    if (im->exif.size) readExif(im->exif.data, im->exif.size, img);
     r.ok = true;
     return r;
 #endif
@@ -257,6 +262,21 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
                             : ce.primaries == JXL_PRIMARIES_P3 ? Primaries::DisplayP3
                                                                : Primaries::Bt709;
                 if (transfer == Transfer::Pq || transfer == Transfer::Hlg) hdr = true;
+            } else {  // an ICC profile instead of an encoding JPEG XL describes itself
+                size_t iccSize = 0;
+#if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 9, 0)
+                if (JxlDecoderGetICCProfileSize(dec, JXL_COLOR_PROFILE_TARGET_DATA, &iccSize) == JXL_DEC_SUCCESS && iccSize) {
+                    std::vector<uint8_t> icc(iccSize);
+                    if (JxlDecoderGetColorAsICCProfile(dec, JXL_COLOR_PROFILE_TARGET_DATA, icc.data(), iccSize) == JXL_DEC_SUCCESS) {
+#else
+                if (JxlDecoderGetICCProfileSize(dec, nullptr, JXL_COLOR_PROFILE_TARGET_DATA, &iccSize) == JXL_DEC_SUCCESS && iccSize) {
+                    std::vector<uint8_t> icc(iccSize);
+                    if (JxlDecoderGetColorAsICCProfile(dec, nullptr, JXL_COLOR_PROFILE_TARGET_DATA, icc.data(), iccSize) == JXL_DEC_SUCCESS) {
+#endif
+                        const std::string profile = iccDescription(icc.data(), icc.size());
+                        if (!profile.empty()) img.metadata.push_back({"Color profile", profile});
+                    }
+                }
             }
         } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
             img.width = info.xsize;

@@ -151,7 +151,7 @@ unset(BUILD_TESTING)
 
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
 find_package(Threads REQUIRED)
-add_library(htv_image STATIC src/image.cpp src/psd.cpp src/stats.cpp)
+add_library(htv_image STATIC src/image.cpp src/psd.cpp src/metadata.cpp src/stats.cpp)
 target_compile_options(htv_image PRIVATE ${htv_options})
 target_include_directories(htv_image PUBLIC src third_party)
 target_sources(htv_image PRIVATE src/codecs_modern.cpp)

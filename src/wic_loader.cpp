@@ -1,5 +1,7 @@
 #include "wic_loader.h"
 
+#include "codecs.h"
+
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -11,6 +13,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cwctype>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace htv {
 
@@ -47,6 +52,104 @@ std::string codecName(IWICBitmapDecoder* decoder) {
     std::string out(size_t(n), '\0');
     WideCharToMultiByte(CP_UTF8, 0, name.data(), int(name.size()), out.data(), n, nullptr, nullptr);
     return out;
+}
+
+std::string narrowText(const wchar_t* w) {
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string out(size_t(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+// The colour profile, resolution and the common EXIF fields of the first frame, for the Info panel.
+void readWicMetadata(IWICImagingFactory* factory, IWICBitmapDecoder* decoder, Image& img) {
+    Ptr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, frame.put()))) return;
+    UINT count = 0;
+    if (SUCCEEDED(frame->GetColorContexts(0, nullptr, &count)) && count > 0 && count < 16) {
+        std::vector<IWICColorContext*> contexts(count, nullptr);
+        for (IWICColorContext*& c : contexts) factory->CreateColorContext(&c);
+        if (SUCCEEDED(frame->GetColorContexts(count, contexts.data(), &count))) {
+            for (UINT i = 0; i < count; ++i) {
+                WICColorContextType type{};
+                if (!contexts[i] || FAILED(contexts[i]->GetType(&type))) continue;
+                if (type == WICColorContextProfile) {
+                    UINT size = 0;
+                    if (FAILED(contexts[i]->GetProfileBytes(0, nullptr, &size)) || size == 0) continue;
+                    std::vector<BYTE> icc(size);
+                    if (SUCCEEDED(contexts[i]->GetProfileBytes(size, icc.data(), &size))) {
+                        const std::string d = iccDescription(icc.data(), icc.size());
+                        if (!d.empty()) img.metadata.push_back({"Color profile", d});
+                    }
+                } else {
+                    UINT space = 0;
+                    if (SUCCEEDED(contexts[i]->GetExifColorSpace(&space)) && space == 1)
+                        img.metadata.push_back({"Color profile", "sRGB (EXIF)"});
+                }
+                break;
+            }
+        }
+        for (IWICColorContext* c : contexts)
+            if (c) c->Release();
+    }
+
+    Ptr<IWICMetadataQueryReader> reader;
+    if (FAILED(frame->GetMetadataQueryReader(reader.put()))) return;
+    // TIFF keeps EXIF tags in its own IFD; JPEG-style containers under app1.
+    auto query = [&](const wchar_t* path, PROPVARIANT& v) {
+        PropVariantInit(&v);
+        for (const wchar_t* root : {L"/ifd", L"/app1/ifd"}) {
+            std::wstring full = std::wstring(root) + path;
+            if (SUCCEEDED(reader->GetMetadataByName(full.c_str(), &v))) return true;
+        }
+        return false;
+    };
+    auto text = [&](const wchar_t* path) {
+        PROPVARIANT v;
+        std::string out;
+        if (query(path, v)) {
+            if (v.vt == VT_LPSTR && v.pszVal) out = v.pszVal;
+            else if (v.vt == VT_LPWSTR && v.pwszVal) out = narrowText(v.pwszVal);
+        }
+        PropVariantClear(&v);
+        while (!out.empty() && (out.back() == ' ' || out.back() == '\0')) out.pop_back();
+        return out;
+    };
+    auto rational = [&](const wchar_t* path) {
+        PROPVARIANT v;
+        double out = 0;
+        if (query(path, v) && (v.vt == VT_UI8 || v.vt == VT_I8)) {
+            const uint32_t num = uint32_t(v.uhVal.QuadPart & 0xffffffffu), den = uint32_t(v.uhVal.QuadPart >> 32);
+            if (den) out = double(num) / den;
+        }
+        PropVariantClear(&v);
+        return out;
+    };
+    auto integer = [&](const wchar_t* path) {
+        PROPVARIANT v;
+        int out = 0;
+        if (query(path, v)) out = v.vt == VT_UI2 ? v.uiVal : v.vt == VT_UI4 ? int(v.ulVal) : 0;
+        PropVariantClear(&v);
+        return out;
+    };
+    const double xres = rational(L"/{ushort=282}");
+    const int unit = integer(L"/{ushort=296}");
+    if (xres > 1 && img.dpi == 0.0f) img.dpi = float(unit == 3 ? xres * 2.54 : xres);
+    std::string camera = text(L"/{ushort=271}");
+    const std::string model = text(L"/{ushort=272}");
+    if (!model.empty()) camera = camera.empty() || model.rfind(camera, 0) == 0 ? model : camera + " " + model;
+    const std::pair<const char*, std::string> fields[] = {
+        {"Camera", camera},
+        {"Taken", text(L"/exif/{ushort=36867}")},
+        {"Date", text(L"/{ushort=306}")},
+        {"Software", text(L"/{ushort=305}")},
+        {"Artist", text(L"/{ushort=315}")},
+        {"Copyright", text(L"/{ushort=33432}")},
+        {"Description", text(L"/{ushort=270}")},
+    };
+    for (const auto& [key, value] : fields)
+        if (!value.empty()) img.metadata.push_back({key, value});
 }
 
 }  // namespace
@@ -162,6 +265,8 @@ LoadResult loadWithWic(const std::filesystem::path& path) {
     img.description = codecName(decoder.p) + ", " + std::to_string(bitsPerPixel) + " bpp" + (isFloat ? " float" : "") +
                       " (Windows codec)";
     r.ok = true;
+
+    readWicMetadata(factory.p, decoder.p, img);
 
     // TIFF pages and the sizes in an icon go to the Layers panel; other formats' extra frames are previews.
     std::wstring ext = path.extension().wstring();

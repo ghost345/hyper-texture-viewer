@@ -774,6 +774,82 @@ void testPsdLayers() {
     CHECK(r.image.layers.empty());
 }
 
+std::string metaValue(const Image& img, const char* key) {
+    for (const Property& p : img.metadata)
+        if (p.key == key) return p.value;
+    return {};
+}
+
+void testMetadata() {
+    // An ICC v2 profile whose description is "Test RGB".
+    Bytes icc(165, 0);
+    auto be = [](Bytes& b, size_t at, uint32_t v) {
+        for (int i = 0; i < 4; ++i) b[at + i] = uint8_t(v >> (24 - 8 * i));
+    };
+    be(icc, 0, 165);
+    icc[8] = 2;
+    icc[9] = 0x10;
+    std::memcpy(&icc[16], "RGB ", 4);
+    std::memcpy(&icc[36], "acsp", 4);
+    be(icc, 128, 1);  // one tag: desc at 144, 21 bytes
+    std::memcpy(&icc[132], "desc", 4);
+    be(icc, 136, 144);
+    be(icc, 140, 21);
+    std::memcpy(&icc[144], "desc", 4);
+    be(icc, 152, 9);
+    std::memcpy(&icc[156], "Test RGB", 9);
+    CHECK(iccDescription(icc.data(), icc.size()) == "Test RGB (ICC v2.1, RGB)");
+    CHECK(iccDescription(icc.data(), 100).empty());
+
+    // EXIF (big-endian TIFF): Make "Canon", XResolution 300, Orientation 6.
+    Bytes exif(64, 0);
+    std::memcpy(exif.data(), "MM\0*", 4);
+    be(exif, 4, 8);
+    exif[8] = 0;
+    exif[9] = 3;
+    auto entry = [&](size_t at, uint16_t tag, uint16_t type, uint32_t count, uint32_t value) {
+        exif[at] = uint8_t(tag >> 8);
+        exif[at + 1] = uint8_t(tag);
+        exif[at + 3] = uint8_t(type);
+        be(exif, at + 4, count);
+        be(exif, at + 8, value);
+    };
+    entry(10, 0x010F, 2, 6, 50);
+    entry(22, 0x0112, 3, 1, 6u << 16);
+    entry(34, 0x011A, 5, 1, 56);
+    std::memcpy(&exif[50], "Canon", 6);
+    be(exif, 56, 300);
+    be(exif, 60, 1);
+    Image img;
+    readExif(exif.data(), exif.size(), img);
+    CHECK(metaValue(img, "Camera") == "Canon");
+    CHECK(metaValue(img, "Orientation").find("90") != std::string::npos);
+    CHECK(img.dpi == 300.0f);
+
+    // PNG with pHYs (150 dpi, 5906 px/m) and a tEXt Software chunk, after IHDR.
+    Bytes png = makePng(4, 4);
+    auto chunk = [](const char* type, const Bytes& data) {
+        Bytes c(8);
+        const uint32_t n = uint32_t(data.size());
+        for (int i = 0; i < 4; ++i) c[i] = uint8_t(n >> (24 - 8 * i));
+        std::memcpy(&c[4], type, 4);
+        c.insert(c.end(), data.begin(), data.end());
+        c.insert(c.end(), 4, 0);  // CRC: not checked
+        return c;
+    };
+    Bytes phys = {0, 0, 0x17, 0x12, 0, 0, 0x17, 0x12, 1};
+    const char text[] = "Software\0Substance Designer";
+    Bytes software(text, text + sizeof text - 1);
+    Bytes extra = chunk("pHYs", phys);
+    Bytes t = chunk("tEXt", software);
+    extra.insert(extra.end(), t.begin(), t.end());
+    png.insert(png.begin() + 33, extra.begin(), extra.end());
+    LoadResult r = loadImage(png.data(), png.size(), "png");
+    CHECK(r.ok);
+    CHECK(std::fabs(r.image.dpi - 150.0f) < 0.1f);
+    CHECK(metaValue(r.image, "Software") == "Substance Designer");
+}
+
 void testGarbage() {
     const uint8_t junk[64] = {1, 2, 3};
     for (const char* ext : {"png", "exr", "dds", "hdr", "webp", "qoi", "jxl", "ktx2", "avif"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
@@ -882,6 +958,7 @@ int main(int argc, char** argv) {
     testDds();
     testDdsLayers();
     testPsdLayers();
+    testMetadata();
     testGarbage();
     testStats();
     std::printf(failures ? "%d check(s) failed\n" : "all checks passed\n", failures);

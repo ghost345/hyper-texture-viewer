@@ -93,6 +93,12 @@ struct Layer {
     bool clipped = false;       // a clipping mask on the layer below
 };
 
+// A line of the Info panel: "Camera", "Canon EOS R5".
+struct Property {
+    std::string key;
+    std::string value;
+};
+
 enum class LayerKind {
     None,
     CubeFaces,     // one at a time
@@ -120,6 +126,8 @@ struct Image {
     int shownLayer = 0;          // one-at-a-time kinds: the layer in mips; PSD: unused
     bool composited = false;     // PSD: mips[0] was rebuilt from the layers instead of being the file's own composite
     Surface fileComposite;       // PSD: the file's own composite, for when every layer is back as saved
+    std::vector<Property> metadata;  // colour profile, EXIF, text chunks: the Info panel's Metadata section
+    std::vector<Property> exr;       // EXR header details: channels, windows, attributes
 };
 
 struct LoadResult {

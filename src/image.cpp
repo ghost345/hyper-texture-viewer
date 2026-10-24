@@ -204,6 +204,59 @@ LoadResult loadExr(const uint8_t* data, size_t size) {
         channelList += header.channels[i].name;
     }
     if (header.num_channels > 8) channelList += ",...";
+
+    // Header details for the Info panel, while the pixel types are still the file's.
+    std::vector<Property> details;
+    {
+        // "A B G R · half", or each channel's type when they differ.
+        static const char* kTypes[] = {"uint", "half", "float"};
+        bool sameType = true;
+        for (int i = 1; i < header.num_channels; ++i) sameType &= header.pixel_types[i] == header.pixel_types[0];
+        std::string channels;
+        for (int i = 0; i < header.num_channels; ++i) {
+            const int t = std::clamp(header.pixel_types[i], 0, 2);
+            channels += std::string(i ? " " : "") + header.channels[i].name + (sameType ? "" : std::string(" (") + kTypes[t] + ")");
+        }
+        if (sameType && header.num_channels) channels += std::string(" \xC2\xB7 ") + kTypes[std::clamp(header.pixel_types[0], 0, 2)];
+        details.push_back({"Channels", channels});
+        auto box = [](const EXRBox2i& b) {
+            char t[96];
+            std::snprintf(t, sizeof t, "%d \xC3\x97 %d at %d, %d", b.max_x - b.min_x + 1, b.max_y - b.min_y + 1, b.min_x, b.min_y);
+            return std::string(t);
+        };
+        details.push_back({"Data window", box(header.data_window)});
+        details.push_back({"Display window", box(header.display_window)});
+        if (header.pixel_aspect_ratio != 1.0f && header.pixel_aspect_ratio > 0.0f) {
+            char t[32];
+            std::snprintf(t, sizeof t, "%g", double(header.pixel_aspect_ratio));
+            details.push_back({"Pixel aspect", t});
+        }
+        static const char* kOrder[] = {"Increasing Y", "Decreasing Y", "Random Y"};
+        if (header.line_order >= 0 && header.line_order < 3) details.push_back({"Line order", kOrder[header.line_order]});
+        // Other attributes the file carries: strings, numbers.
+        for (int i = 0; i < header.num_custom_attributes && i < 32; ++i) {
+            const EXRAttribute& a = header.custom_attributes[i];
+            const std::string type = a.type;
+            std::string value;
+            if (type == "string" && a.value) {
+                value.assign(reinterpret_cast<const char*>(a.value), size_t(std::max(0, std::min(a.size, 200))));
+                value = value.c_str();  // up to a NUL
+            } else if ((type == "float" || type == "int") && a.size == 4 && a.value) {
+                char t[32];
+                if (type == "float") {
+                    float f;
+                    std::memcpy(&f, a.value, 4);
+                    std::snprintf(t, sizeof t, "%g", double(f));
+                } else {
+                    int32_t n;
+                    std::memcpy(&n, a.value, 4);
+                    std::snprintf(t, sizeof t, "%d", int(n));
+                }
+                value = t;
+            }
+            if (!value.empty()) details.push_back({a.name, value});
+        }
+    }
     const int compression = header.compression_type;
     if (compression >= 5 && compression <= 9) {
         r.error = std::string("EXR ") + exrCompressionName(compression) +
@@ -353,6 +406,13 @@ LoadResult loadExr(const uint8_t* data, size_t size) {
     }
     img.description = std::string("EXR, ") + (anyFloat ? (anyHalf ? "half/float " : "float ") : "half ") +
                       channelList + ", " + exrCompressionName(compression);
+    if (groups.size() > 1) {
+        std::string names;
+        for (const ExrLayer& g : groups) names += (names.empty() ? "" : ", ") + (g.name.empty() ? std::string("Main") : g.name);
+        details.insert(details.begin(), {"Layers", std::to_string(groups.size()) + ": " + names});
+    }
+    details.insert(details.begin(), {"Compression", exrCompressionName(compression)});
+    img.exr = std::move(details);
     if (groups.size() == 1 && detail.find("(grey)") != std::string::npos)
         img.note = "no RGB channels: the channel is shown as grey";
     r.ok = true;
@@ -719,7 +779,9 @@ LoadResult loadGif(const uint8_t* data, size_t size) {
     return r;
 }
 
-LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extension) {
+namespace {
+
+LoadResult decodeImage(const uint8_t* data, size_t size, const std::string& extension) {
     LoadResult r;
     if (!data || size == 0) {
         r.error = "empty file";
@@ -739,6 +801,14 @@ LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extens
     if (extension == "gif") return loadGif(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
     if (r.ok && extension == "psd") readPsdLayers(data, size, r.image);
+    return r;
+}
+
+}  // namespace
+
+LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extension) {
+    LoadResult r = decodeImage(data, size, extension);
+    if (r.ok) readMetadata(data, size, extension, r.image);
     return r;
 }
 

@@ -757,11 +757,20 @@ std::vector<InfoSection> infoSections() {
                       std::max(1u, std::max(app.image.width, app.image.height) >> (app.image.mips.size() - 1)));
     else std::snprintf(mips, sizeof mips, "1 (%d made for display)", app.textureMips);
     format.rows.push_back({"Mip levels", mips});
-    format.rows.push_back({"Cube / Array", app.image.note.empty() ? "no \xC2\xB7 1" : app.image.note});
+    const htv::Image& img = app.image;
+    if (hasLayers()) {
+        std::string layers = std::string(htv::layerKindName(img.layerKind)) + " \xC2\xB7 " + std::to_string(img.layers.size());
+        if (img.layerKind != htv::LayerKind::PsdLayers) layers += " (showing " + img.layers[size_t(img.shownLayer)].name + ")";
+        format.rows.push_back({"Layers", layers});
+    } else {
+        format.rows.push_back({"Layers", "no \xC2\xB7 1"});
+    }
+    if (!img.note.empty()) format.rows.push_back({"Note", img.note});
     out.push_back(format);
-    const bool exr = app.image.description.rfind("EXR", 0) == 0;
-    if (exr) {
-        out.push_back({"EXR", {{"Layers", "first layer shown"}, {"Encoding", rgbaOrder(app.image.description.substr(5))}}});
+    if (!img.exr.empty()) {
+        InfoSection exr{"EXR", {}, nullptr};
+        for (const htv::Property& p : img.exr) exr.rows.push_back({p.key, p.value});
+        out.push_back(exr);
     } else {
         out.push_back({"EXR", {}, "n/a"});
     }
@@ -770,7 +779,15 @@ std::vector<InfoSection> infoSections() {
         std::snprintf(buf, sizeof buf, "%.4g \xE2\x80\xA6 %.4g", double(app.stats.minValue), double(app.stats.maxValue));
         out.push_back({"Values", {{"Range", buf}, {"NaN / Inf", std::to_string(app.stats.nonFinite) + " pixels"}}});
     }
-    out.push_back({"Metadata", {}, "n/a"});
+    InfoSection meta{"Metadata", {}, nullptr};
+    if (img.dpi > 0) {
+        char dpi[32];
+        std::snprintf(dpi, sizeof dpi, "%g dpi", double(std::round(img.dpi * 100.0f) / 100.0f));
+        meta.rows.push_back({"Resolution", dpi});
+    }
+    for (const htv::Property& p : img.metadata) meta.rows.push_back({p.key, p.value});
+    if (meta.rows.empty()) meta.note = "none in the file";
+    out.push_back(meta);
     return out;
 }
 
@@ -843,7 +860,7 @@ void infoPanel() {
                 }
                 if (hovered) dl->AddRectFilled(ra, rb, t.ctlh);
                 const float rcy = y + S(11);
-                drawText(dl, fontRegular, 12, ra.x + S(24), rcy, t.tx3, row.key.c_str());
+                drawText(dl, fontRegular, 12, ra.x + S(24), rcy, t.tx3, ellipsize(fontRegular, 12, row.key, S(92)).c_str());
                 const float vx = ra.x + S(24) + S(92) + S(8);
                 const float vw = rb.x - S(8) - vx - (hovered ? S(13) + S(8) : 0.0f);
                 if (copiedRecently(id)) drawText(dl, fontMono, 12, vx, rcy, t.ok, "Copied");
