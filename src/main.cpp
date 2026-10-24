@@ -1,59 +1,34 @@
-// Hyper Texture Viewer prototype: one Win32 window, Direct3D 11, all view math in one pixel shader.
+// Hyper Texture Viewer: one borderless Win32 window, Direct3D 11 (render.cpp), files loaded in the background
+// (files.cpp), the interface drawn with Dear ImGui on top (ui*.cpp).
 
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "viewer.h"
+
 #include <windowsx.h>
 #include <shellapi.h>
-#include <shlwapi.h>
-#include <d3d11.h>
-#include <d3dcompiler.h>
-#include <dxgi1_2.h>
+#include <shobjidl.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cctype>
-#include <filesystem>
 #include <iterator>
-#include <string>
-#include <vector>
 
-#include "image.h"
+#include "imgui.h"
+#include "backends/imgui_impl_dx11.h"
+#include "backends/imgui_impl_win32.h"
+#include "keys.h"
+#include "ui.h"
 #include "wic_loader.h"
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace fs = std::filesystem;
 
-namespace {
+namespace htv {
 
-template <class T>
-class Com {
-public:
-    Com() = default;
-    Com(const Com&) = delete;
-    Com& operator=(const Com&) = delete;
-    ~Com() { reset(); }
-    void reset() {
-        if (p_) p_->Release();
-        p_ = nullptr;
-    }
-    T* get() const { return p_; }
-    T* operator->() const { return p_; }
-    T** put() {
-        reset();
-        return &p_;
-    }
-    explicit operator bool() const { return p_ != nullptr; }
+App app;
 
-private:
-    T* p_ = nullptr;
-};
-
-// ---- timing ----
-
-double qpcMs() {
+double nowMs() {
     static LARGE_INTEGER freq = [] {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
@@ -89,499 +64,10 @@ std::string narrow(const std::wstring& w) {
     return s;
 }
 
-bool readFile(const fs::path& path, std::vector<uint8_t>& out, std::string& error) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        error = "cannot open file";
-        return false;
-    }
-    LARGE_INTEGER size;
-    GetFileSizeEx(f, &size);
-    if (size.QuadPart > 0x7fffffff) {
-        CloseHandle(f);
-        error = "files over 2 GB are not supported yet";
-        return false;
-    }
-    out.resize(size_t(size.QuadPart));
-    DWORD read = 0;
-    BOOL ok = out.empty() || ReadFile(f, out.data(), DWORD(out.size()), &read, nullptr);
-    CloseHandle(f);
-    if (!ok || read != out.size()) {
-        error = "cannot read file";
-        return false;
-    }
-    return true;
-}
-
-std::string lowerExtension(const fs::path& p) {
-    std::string e = narrow(p.extension().wstring());
-    if (!e.empty() && e[0] == '.') e.erase(0, 1);
-    for (char& c : e) c = char(tolower(static_cast<unsigned char>(c)));
-    return e;
-}
-
-bool hasBuiltInDecoder(const std::string& ext) {
-    const auto& list = htv::supportedExtensions();
-    return std::find(list.begin(), list.end(), ext) != list.end();
-}
-
-bool isSupported(const fs::path& p) {
-    const std::string ext = lowerExtension(p);
-    const auto& wic = htv::wicExtensions();
-    return hasBuiltInDecoder(ext) || std::find(wic.begin(), wic.end(), ext) != wic.end();
-}
-
-// ---- shaders ----
-
-const char kShader[] = R"(
-cbuffer View : register(b0) {
-    float2 imageSize;
-    float2 imageOrigin;    // top-left corner of the image in window pixels
-    float zoom;
-    float exposureScale;   // 2^EV
-    uint channelMode;      // 0 RGBA, 1 R, 2 G, 3 B, 4 A, 5 RGB without alpha
-    uint channels;         // channels the texture format stores
-    uint encodeSrgb;       // sampled values are linear light
-    uint signedValues;     // snorm data in [-1, 1]
-    float2 pad;
-    float4 background;
-};
-Texture2D<float4> tex : register(t0);
-SamplerState trilinear : register(s0);
-
-float4 vsMain(uint id : SV_VertexID) : SV_Position {
-    float2 uv = float2((id << 1) & 2, id & 2);
-    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-}
-
-float3 srgbEncode(float3 c) {
-    c = saturate(c);
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-    return float3(c.r <= 0.0031308 ? lo.r : hi.r, c.g <= 0.0031308 ? lo.g : hi.g, c.b <= 0.0031308 ? lo.b : hi.b);
-}
-
-float4 psMain(float4 pos : SV_Position) : SV_Target {
-    float2 ip = (pos.xy - imageOrigin) / zoom;
-    if (ip.x < 0 || ip.y < 0 || ip.x >= imageSize.x || ip.y >= imageSize.y) return background;
-
-    float4 c;
-    if (zoom >= 1.0) {
-        // Magnified or 1:1: exact texels, no filtering.
-        c = tex.Load(int3(floor(ip), 0));
-    } else {
-        // Minified: the mip chain averages all source pixels under each screen pixel.
-        float2 uv = ip / imageSize;
-        float2 g = 1.0 / (zoom * imageSize);
-        c = tex.SampleGrad(trilinear, uv, float2(g.x, 0), float2(0, g.y));
-    }
-    if (signedValues) c.rgb = c.rgb * 0.5 + 0.5;
-    if (channels == 1) c = float4(c.rrr, 1);
-    else if (channels == 2) c = float4(c.rg, 0, 1);
-
-    // NaN and Inf show as magenta. Written without isnan/isinf so every HLSL compiler accepts it.
-    if (any(c != c) || any(abs(c) > 3.402823e38)) return float4(1, 0, 1, 1);
-
-    if (channelMode == 4) return float4(c.aaa, 1);
-    float3 rgb = c.rgb;
-    float a = c.a;
-    if (channelMode == 1) rgb = c.rrr;
-    else if (channelMode == 2) rgb = c.ggg;
-    else if (channelMode == 3) rgb = c.bbb;
-    if (channelMode != 0) a = 1;
-
-    rgb *= exposureScale;
-    rgb = encodeSrgb ? srgbEncode(rgb) : saturate(rgb);
-
-    float2 cell = floor(pos.xy / 8);
-    float checker = fmod(cell.x + cell.y, 2) < 1 ? 0.20 : 0.30;
-    return float4(lerp(checker.xxx, rgb, saturate(a)), 1);
-}
-)";
-
-struct ViewConstants {
-    float imageSize[2];
-    float imageOrigin[2];
-    float zoom;
-    float exposureScale;
-    uint32_t channelMode;
-    uint32_t channels;
-    uint32_t encodeSrgb;
-    uint32_t signedValues;
-    float pad[2];
-    float background[4];
-};
-static_assert(sizeof(ViewConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
-
-// d3dcompiler_47.dll ships with Windows 8.1 and later; loading it lazily keeps it off the import table.
-using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
-                                      UINT, UINT, ID3DBlob**, ID3DBlob**);
-
-// ---- application ----
-
-struct App {
-    HWND hwnd = nullptr;
-    Com<ID3D11Device> device;
-    Com<ID3D11DeviceContext> context;
-    Com<IDXGISwapChain> swapChain;
-    Com<ID3D11RenderTargetView> rtv;
-    Com<ID3D11VertexShader> vs;
-    Com<ID3D11PixelShader> ps;
-    Com<ID3D11Buffer> constants;
-    Com<ID3D11SamplerState> trilinear;
-    Com<ID3D11ShaderResourceView> srv;
-    D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_10_0;
-    bool warp = false;
-    const char* swapEffect = "";
-
-    htv::Image image;
-    bool hasImage = false;
-    fs::path path;
-    std::string error;
-
-    int viewW = 1, viewH = 1;
-    float zoom = 1.0f, originX = 0.0f, originY = 0.0f;
-    bool fit = true;
-    float exposure = 0.0f;
-    int channelMode = 0;
-    bool dragging = false;
-    POINT dragStart{};
-    float dragOriginX = 0.0f, dragOriginY = 0.0f;
-    int mouseX = -1, mouseY = -1;
-
-    // Benchmark mode: open the file, draw one frame, write timings and quit.
-    std::wstring benchPath;
-    double tStart = 0, tDevice = 0, tLoad = 0, tUpload = 0;
-    bool firstFrameDone = false;
-};
-
-App app;
-
-bool createDevice() {
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-    for (D3D_DRIVER_TYPE type : {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP}) {
-        HRESULT hr = D3D11CreateDevice(nullptr, type, nullptr, 0, levels, UINT(std::size(levels)), D3D11_SDK_VERSION,
-                                       app.device.put(), &app.featureLevel, app.context.put());
-        if (SUCCEEDED(hr)) {
-            app.warp = type == D3D_DRIVER_TYPE_WARP;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool createSwapChain() {
-    Com<IDXGIDevice> dxgiDevice;
-    Com<IDXGIAdapter> adapter;
-    Com<IDXGIFactory> factory;
-    if (FAILED(app.device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(dxgiDevice.put()))) ||
-        FAILED(dxgiDevice->GetAdapter(adapter.put())) ||
-        FAILED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(factory.put()))))
-        return false;
-
-    // Flip model where available (Windows 10, then 8), the classic blt model on Windows 7.
-    Com<IDXGIFactory2> factory2;
-    if (SUCCEEDED(factory->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(factory2.put())))) {
-        const std::pair<DXGI_SWAP_EFFECT, const char*> effects[] = {{DXGI_SWAP_EFFECT(4), "flip-discard"},
-                                                                    {DXGI_SWAP_EFFECT(3), "flip-sequential"}};
-        for (auto [effect, name] : effects) {
-            DXGI_SWAP_CHAIN_DESC1 d{};
-            d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            d.SampleDesc.Count = 1;
-            d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-            d.BufferCount = 2;
-            d.SwapEffect = effect;
-            Com<IDXGISwapChain1> sc1;
-            if (SUCCEEDED(factory2->CreateSwapChainForHwnd(app.device.get(), app.hwnd, &d, nullptr, nullptr, sc1.put()))) {
-                sc1->QueryInterface(__uuidof(IDXGISwapChain), reinterpret_cast<void**>(app.swapChain.put()));
-                app.swapEffect = name;
-                break;
-            }
-        }
-    }
-    if (!app.swapChain) {
-        DXGI_SWAP_CHAIN_DESC d{};
-        d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        d.SampleDesc.Count = 1;
-        d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        d.BufferCount = 1;
-        d.OutputWindow = app.hwnd;
-        d.Windowed = TRUE;
-        d.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        if (FAILED(factory->CreateSwapChain(app.device.get(), &d, app.swapChain.put()))) return false;
-        app.swapEffect = "discard";
-    }
-    factory->MakeWindowAssociation(app.hwnd, DXGI_MWA_NO_ALT_ENTER);
-    return true;
-}
-
-bool createRenderTarget() {
-    app.rtv.reset();
-    Com<ID3D11Texture2D> back;
-    if (FAILED(app.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(back.put()))))
-        return false;
-    return SUCCEEDED(app.device->CreateRenderTargetView(back.get(), nullptr, app.rtv.put()));
-}
-
-bool createPipeline(std::string& error) {
-    HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
-    auto compile = compiler ? reinterpret_cast<D3DCompileFn>(reinterpret_cast<void (*)()>(GetProcAddress(compiler, "D3DCompile"))) : nullptr;
-    if (!compile) {
-        error = "d3dcompiler_47.dll not found";
-        return false;
-    }
-    Com<ID3DBlob> vsBlob, psBlob, log;
-    const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS;
-    if (FAILED(compile(kShader, sizeof(kShader) - 1, "view.hlsl", nullptr, nullptr, "vsMain", "vs_4_0", flags, 0,
-                       vsBlob.put(), log.put())) ||
-        FAILED(compile(kShader, sizeof(kShader) - 1, "view.hlsl", nullptr, nullptr, "psMain", "ps_4_0", flags, 0,
-                       psBlob.put(), log.put()))) {
-        error = log ? std::string(static_cast<const char*>(log->GetBufferPointer()), log->GetBufferSize())
-                    : "shader compilation failed";
-        return false;
-    }
-    if (FAILED(app.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr,
-                                              app.vs.put())) ||
-        FAILED(app.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr,
-                                             app.ps.put()))) {
-        error = "cannot create shaders";
-        return false;
-    }
-
-    D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = sizeof(ViewConstants);
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    D3D11_SAMPLER_DESC sd{};
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(app.device->CreateBuffer(&bd, nullptr, app.constants.put())) ||
-        FAILED(app.device->CreateSamplerState(&sd, app.trilinear.put()))) {
-        error = "cannot create pipeline state";
-        return false;
-    }
-    return true;
-}
-
-bool uploadImage(const htv::Image& img, std::string& error) {
-    const DXGI_FORMAT format = DXGI_FORMAT(img.format);
-    const htv::FormatInfo& info = htv::formatInfo(img.format);
-    UINT support = 0;
-    app.device->CheckFormatSupport(format, &support);
-    if (!(support & D3D11_FORMAT_SUPPORT_TEXTURE2D)) {
-        error = std::string(info.name) + " needs a Direct3D 11 class GPU";
-        return false;
-    }
-    const UINT maxSize = app.featureLevel >= D3D_FEATURE_LEVEL_11_0 ? 16384 : 8192;
-    if (img.width > maxSize || img.height > maxSize) {
-        error = "images over " + std::to_string(maxSize) + " px are not supported yet (tiling is planned)";
-        return false;
-    }
-    if (info.compressed && (img.width % 4 || img.height % 4)) {
-        error = "compressed textures must be a multiple of 4 px for now";
-        return false;
-    }
-
-    D3D11_TEXTURE2D_DESC d{};
-    d.Width = img.width;
-    d.Height = img.height;
-    d.ArraySize = 1;
-    d.Format = format;
-    d.SampleDesc.Count = 1;
-    d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-    const bool autoMips = img.mips.size() == 1 && (img.width > 1 || img.height > 1) &&
-                          (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN) && (support & D3D11_FORMAT_SUPPORT_RENDER_TARGET);
-    Com<ID3D11Texture2D> texture;
-    if (autoMips) {
-        d.MipLevels = 0;
-        d.BindFlags |= D3D11_BIND_RENDER_TARGET;
-        d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-        if (FAILED(app.device->CreateTexture2D(&d, nullptr, texture.put()))) {
-            error = "cannot create texture";
-            return false;
-        }
-        app.context->UpdateSubresource(texture.get(), 0, nullptr, img.mips[0].data.data(), img.mips[0].rowPitch, 0);
-    } else {
-        d.MipLevels = UINT(img.mips.size());
-        std::vector<D3D11_SUBRESOURCE_DATA> init(img.mips.size());
-        for (size_t i = 0; i < img.mips.size(); ++i) {
-            init[i].pSysMem = img.mips[i].data.data();
-            init[i].SysMemPitch = img.mips[i].rowPitch;
-        }
-        if (FAILED(app.device->CreateTexture2D(&d, init.data(), texture.put()))) {
-            error = "cannot create texture";
-            return false;
-        }
-    }
-    app.srv.reset();
-    if (FAILED(app.device->CreateShaderResourceView(texture.get(), nullptr, app.srv.put()))) {
-        error = "cannot create texture view";
-        return false;
-    }
-    if (autoMips) app.context->GenerateMips(app.srv.get());
-    return true;
-}
-
-void fitToWindow() {
-    if (!app.hasImage) return;
-    float z = std::min(float(app.viewW) / app.image.width, float(app.viewH) / app.image.height);
-    if (z > 1.0f) z = std::floor(z);  // small textures grow in whole steps so pixels stay square
-    app.zoom = std::max(z, 1.0f / 256.0f);
-    app.originX = std::round((app.viewW - app.image.width * app.zoom) * 0.5f);
-    app.originY = std::round((app.viewH - app.image.height * app.zoom) * 0.5f);
-}
-
-void updateTitle() {
-    std::wstring t;
-    if (!app.path.empty()) t = app.path.filename().wstring();
-    if (app.hasImage) {
-        t += L"  |  " + std::to_wstring(app.image.width) + L"x" + std::to_wstring(app.image.height) + L"  " +
-             widen(app.image.description);
-        if (!app.image.note.empty()) t += L" (" + widen(app.image.note) + L")";
-        wchar_t buf[256];
-        swprintf(buf, 256, L"  |  %g%%  EV %+.2f", double(app.zoom * 100.0f), double(app.exposure));
-        t += buf;
-        if (app.image.maxValue > 0) {
-            swprintf(buf, 256, L"  max %.3g", double(app.image.maxValue));
-            t += buf;
-        }
-        const wchar_t* channelNames[] = {L"", L"  [R]", L"  [G]", L"  [B]", L"  [A]", L"  [RGB]"};
-        t += channelNames[app.channelMode];
-        if (app.mouseX >= 0) {
-            const float fx = (app.mouseX - app.originX) / app.zoom, fy = (app.mouseY - app.originY) / app.zoom;
-            if (fx >= 0 && fy >= 0 && fx < app.image.width && fy < app.image.height) {
-                const uint32_t x = uint32_t(fx), y = uint32_t(fy);
-                float px[4];
-                if (htv::readPixel(app.image, x, y, px))
-                    swprintf(buf, 256, L"  |  %u,%u  %.4g %.4g %.4g %.4g", x, y, double(px[0]), double(px[1]),
-                             double(px[2]), double(px[3]));
-                else
-                    swprintf(buf, 256, L"  |  %u,%u  (compressed)", x, y);
-                t += buf;
-            }
-        }
-    }
-    if (!app.error.empty()) t += L"  |  " + widen(app.error);
-    if (t.empty()) t = L"Hyper Texture Viewer - drop an image here";
-    SetWindowTextW(app.hwnd, t.c_str());
-}
-
-void writeBench(bool ok);
-
-bool openFile(const fs::path& path) {
-    std::string error;
-    const double t0 = qpcMs();
-    app.path = path;
-    const std::string ext = lowerExtension(path);
-    htv::LoadResult r;
-    if (hasBuiltInDecoder(ext)) {
-        std::vector<uint8_t> bytes;
-        if (!readFile(path, bytes, error)) {
-            app.error = error;
-            updateTitle();
-            return false;
-        }
-        r = htv::loadImage(bytes.data(), bytes.size(), ext);
-    }
-    // Anything the built-in decoders don't cover goes to the codecs installed in Windows.
-    if (!r.ok) {
-        htv::LoadResult wic = htv::loadWithWic(path);
-        if (wic.ok || r.error.empty()) r = std::move(wic);
-    }
-    const double t1 = qpcMs();
-    if (!r.ok || !uploadImage(r.image, error)) {
-        app.error = r.ok ? error : r.error;
-        updateTitle();
-        return false;
-    }
-    app.context->Flush();
-    const double t2 = qpcMs();
-    app.tLoad = t1 - t0;
-    app.tUpload = t2 - t1;
-    app.image = std::move(r.image);
-    app.hasImage = true;
-    app.error.clear();
-    if (app.fit) fitToWindow();
-    updateTitle();
-    InvalidateRect(app.hwnd, nullptr, FALSE);
-    return true;
-}
-
-void step(int delta) {
-    if (app.path.empty()) return;
-    std::vector<fs::path> files;
-    std::error_code ec;
-    for (const auto& e : fs::directory_iterator(app.path.parent_path(), ec))
-        if (e.is_regular_file(ec) && isSupported(e.path())) files.push_back(e.path());
-    if (files.empty()) return;
-    std::sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) {
-        return StrCmpLogicalW(a.filename().c_str(), b.filename().c_str()) < 0;
-    });
-    auto it = std::find(files.begin(), files.end(), app.path);
-    long i = it == files.end() ? 0 : long(it - files.begin());
-    const long n = long(files.size());
-    i = ((i + delta) % n + n) % n;
-    openFile(files[size_t(i)]);
-}
-
-void render() {
-    if (!app.rtv) return;
-    const float bg[4] = {0.12f, 0.12f, 0.12f, 1.0f};
-    app.context->ClearRenderTargetView(app.rtv.get(), bg);
-    if (app.hasImage && app.srv) {
-        const htv::FormatInfo& info = htv::formatInfo(app.image.format);
-        D3D11_MAPPED_SUBRESOURCE m;
-        if (SUCCEEDED(app.context->Map(app.constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            ViewConstants c{};
-            c.imageSize[0] = float(app.image.width);
-            c.imageSize[1] = float(app.image.height);
-            c.imageOrigin[0] = app.originX;
-            c.imageOrigin[1] = app.originY;
-            c.zoom = app.zoom;
-            c.exposureScale = std::exp2(app.exposure);
-            c.channelMode = uint32_t(app.channelMode);
-            c.channels = uint32_t(info.channels);
-            c.encodeSrgb = info.linear ? 1u : 0u;
-            c.signedValues = info.snorm ? 1u : 0u;
-            for (int i = 0; i < 4; ++i) c.background[i] = bg[i];
-            *static_cast<ViewConstants*>(m.pData) = c;
-            app.context->Unmap(app.constants.get(), 0);
-        }
-        D3D11_VIEWPORT vp{0, 0, float(app.viewW), float(app.viewH), 0, 1};
-        ID3D11RenderTargetView* rtv = app.rtv.get();
-        ID3D11Buffer* cb = app.constants.get();
-        ID3D11ShaderResourceView* srv = app.srv.get();
-        ID3D11SamplerState* sampler = app.trilinear.get();
-        app.context->OMSetRenderTargets(1, &rtv, nullptr);
-        app.context->RSSetViewports(1, &vp);
-        app.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        app.context->IASetInputLayout(nullptr);
-        app.context->VSSetShader(app.vs.get(), nullptr, 0);
-        app.context->PSSetShader(app.ps.get(), nullptr, 0);
-        app.context->PSSetConstantBuffers(0, 1, &cb);
-        app.context->PSSetShaderResources(0, 1, &srv);
-        app.context->PSSetSamplers(0, 1, &sampler);
-        app.context->Draw(3, 0);
-    }
-    app.swapChain->Present(1, 0);
-    if (!app.firstFrameDone) {
-        app.firstFrameDone = true;
-        if (!app.benchPath.empty()) {
-            writeBench(app.hasImage);
-            PostQuitMessage(app.hasImage ? 0 : 1);
-        }
-    }
-}
-
 void writeBench(bool ok) {
     FILE* f = _wfopen(app.benchPath.c_str(), L"a");
     if (!f) return;
-    const double now = qpcMs();
+    const double now = nowMs();
     std::fprintf(f,
                  "%s\n  result: %s\n  gpu: %s, feature level %x, swap %s\n"
                  "  process start -> first frame: %.1f ms (coarse clock)\n"
@@ -594,120 +80,312 @@ void writeBench(bool ok) {
     std::fclose(f);
 }
 
-void zoomAt(float newZoom, int x, int y) {
-    newZoom = std::clamp(newZoom, 1.0f / 256.0f, 256.0f);
-    app.originX = std::round(x - (x - app.originX) * newZoom / app.zoom);
-    app.originY = std::round(y - (y - app.originY) * newZoom / app.zoom);
-    app.zoom = newZoom;
-    app.fit = false;
+namespace {
+
+double lastInputMs = 0;  // frames keep coming for a moment after input, for hover states and tooltips
+bool redraw = false;     // something changed outside of input, e.g. a load finished
+bool spaceDown = false;  // Space + drag pans, like the left button alone
+
+void layout() {
+    const float top = app.showBars ? uiTopBarHeight() : 0.0f;
+    const float bottom = app.showBars ? uiBottomBarHeight() : 0.0f;
+    // The rulers take a strip off the top and left of the image area.
+    const float ruler = app.ruler && app.showBars ? std::round(18 * app.scale) : 0.0f;
+    app.vpX = ruler;
+    app.vpY = top + ruler;
+    app.vpW = std::max(1.0f, float(app.winW) - ruler);
+    app.vpH = std::max(1.0f, float(app.winH) - top - bottom - ruler);
 }
 
-void redraw() {
-    updateTitle();
-    InvalidateRect(app.hwnd, nullptr, FALSE);
+bool inViewport(int x, int y) {
+    return x >= app.vpX && y >= app.vpY && x < app.vpX + app.vpW && y < app.vpY + app.vpH;
+}
+
+void applyDpi(float scale) {
+    app.dpiScale = scale;
+    applyInterfaceScale();
+}
+
+int resizeBorder() { return int(std::round(5 * app.scale)); }
+
+void startDrag(LPARAM lp) {
+    app.dragging = true;
+    app.dragStart = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    app.dragOriginX = app.originX;
+    app.dragOriginY = app.originY;
+    SetCapture(app.hwnd);
+}
+
+// Right drag anywhere moves the window: the top bar leaves little empty space to grab.
+bool movingWindow = false;
+POINT moveCursorStart{};
+RECT moveWindowStart{};
+
+void startWindowMove() {
+    if (IsZoomed(app.hwnd)) return;
+    movingWindow = true;
+    GetCursorPos(&moveCursorStart);
+    GetWindowRect(app.hwnd, &moveWindowStart);
+    if (GetCapture() != app.hwnd) SetCapture(app.hwnd);  // ImGui may hold it already
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
+    if ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
+        msg == WM_NCMOUSEMOVE || msg == WM_MOUSELEAVE || msg == WM_SIZE || msg == WM_ACTIVATE)
+        lastInputMs = nowMs();
+    const bool uiMouse = ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
+
     switch (msg) {
-        case WM_SIZE:
-            app.viewW = std::max(1, int(LOWORD(lp)));
-            app.viewH = std::max(1, int(HIWORD(lp)));
-            if (app.swapChain) {
-                app.rtv.reset();
-                app.context->OMSetRenderTargets(0, nullptr, nullptr);
-                app.swapChain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
-                createRenderTarget();
-                if (app.fit) fitToWindow();
-                redraw();
+        case WM_NCCALCSIZE:
+            // No system frame: the client area is the whole window. A maximised window would hang over the
+            // screen edges by the invisible resize border, so it is clipped to the monitor's work area.
+            if (wp) {
+                if (IsZoomed(hwnd)) {
+                    MONITORINFO mi{};
+                    mi.cbSize = sizeof(mi);
+                    if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+                        reinterpret_cast<NCCALCSIZE_PARAMS*>(lp)->rgrc[0] = mi.rcWork;
+                }
+                return 0;
             }
+            break;
+        case WM_NCHITTEST: {
+            POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &p);
+            if (!IsZoomed(hwnd)) {
+                const int b = resizeBorder();
+                const bool l = p.x < b, r = p.x >= app.winW - b, t = p.y < b, bt = p.y >= app.winH - b;
+                if (t && l) return HTTOPLEFT;
+                if (t && r) return HTTOPRIGHT;
+                if (bt && l) return HTBOTTOMLEFT;
+                if (bt && r) return HTBOTTOMRIGHT;
+                if (l) return HTLEFT;
+                if (r) return HTRIGHT;
+                if (t) return HTTOP;
+                if (bt) return HTBOTTOM;
+            }
+            if (uiIsCaption(float(p.x), float(p.y))) return HTCAPTION;
+            // Alt + drag on the image moves the window, which matters when the bars are hidden. Panels over the
+            // image keep their Alt+clicks (a layer's eye).
+            if ((GetKeyState(VK_MENU) & 0x8000) && inViewport(p.x, p.y) && !uiMouse) return HTCAPTION;
+            return HTCLIENT;
+        }
+        case WM_NCACTIVATE:
+            return DefWindowProcW(hwnd, msg, wp, -1);  // keeps Windows from painting a frame over the bars
+        case WM_GETMINMAXINFO: {
+            auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+            // Wide enough for the top bar with everything it can fold away in "...".
+            mm->ptMinTrackSize.x = std::max(LONG(480 * app.scale), LONG(std::ceil(uiMinWidth())));
+            mm->ptMinTrackSize.y = LONG(320 * app.scale);
             return 0;
+        }
+        case WM_SIZE:
+            app.winW = std::max(1, int(LOWORD(lp)));
+            app.winH = std::max(1, int(HIWORD(lp)));
+            layout();
+            resizeBuffers();
+            if (app.fit) fitToWindow();
+            if (wp != SIZE_MINIMIZED) render();
+            return 0;
+        case WM_DPICHANGED: {
+            const RECT* r = reinterpret_cast<const RECT*>(lp);
+            applyDpi(float(HIWORD(wp)) / 96.0f);
+            SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+        case WM_EXITSIZEMOVE:
+        case WM_DISPLAYCHANGE:
+            queryDisplayPeak();  // the window may now be on another monitor
+            break;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT:
             render();
             ValidateRect(hwnd, nullptr);
             return 0;
+        case WM_SETTINGCHANGE:
+            // Windows switched between light and dark apps.
+            if (app.themeMode == 2 && lp && std::wstring(reinterpret_cast<const wchar_t*>(lp)) == L"ImmersiveColorSet")
+                applyTheme();
+            break;
+        case WM_COPYDATA: {
+            // A second start with single instance on hands its file over.
+            const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+            if (!cd || cd->dwData != kOpenFileMessage) return FALSE;
+            const std::wstring path(static_cast<const wchar_t*>(cd->lpData), cd->cbData / sizeof(wchar_t));
+            if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            if (!path.empty()) openPath(path);
+            return TRUE;
+        }
+        case WM_TIMER:
+            if (wp == kWatchTimer) {
+                if (app.toastUntilMs > 0 && nowMs() > app.toastUntilMs) {
+                    app.toastUntilMs = 0;
+                    redraw = true;
+                }
+                checkFileChanged();
+            } else if (wp == kLoadingTimer) {
+                checkFileChanged();  // updates the progress
+                redraw = true;
+            } else if (wp == kZebraTimer) {
+                redraw = true;
+            } else if (wp == kFrameTimer) {
+                advanceFrame();
+            }
+            return 0;
+        case WM_APP_LOADED:
+            finishLoad(reinterpret_cast<LoadedFile*>(lp));
+            redraw = true;
+            return 0;
+        case WM_APP_PREFETCHED:
+            prefetchDone(reinterpret_cast<LoadedFile*>(lp));
+            return 0;
+        case WM_APP_COMPARE_LOADED:
+            compareSlotLoaded(reinterpret_cast<LoadedFile*>(lp));
+            return 0;
         case WM_MOUSEWHEEL: {
             POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &p);
             const int notches = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+            if (GetKeyState(VK_MENU) & 0x8000) {
+                setOpacity(app.opacity + 0.05f * notches);  // Alt+wheel anywhere: window opacity
+                return 0;
+            }
+            if (uiMouse || !inViewport(p.x, p.y)) return 0;
             if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) {
-                app.exposure += 0.25f * notches;  // Ctrl+wheel: exposure in quarter stops
+                if (app.hasImage && isHighPrecision(app.image))
+                    app.exposure = std::clamp(app.exposure + 0.25f * notches, -10.0f, 10.0f);  // quarter stops
             } else if (notches) {
                 float z = app.zoom;
                 for (int i = 0; i < std::abs(notches); ++i) {
                     const float next = notches > 0 ? z * 1.25f : z / 1.25f;
                     z = ((z < 1.0f && next > 1.0f) || (z > 1.0f && next < 1.0f)) ? 1.0f : next;  // stop at 100%
                 }
-                zoomAt(z, p.x, p.y);
+                zoomAt(z, float(p.x), float(p.y));
             }
-            redraw();
             return 0;
         }
         case WM_LBUTTONDOWN:
-            app.dragging = true;
-            app.dragStart = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            app.dragOriginX = app.originX;
-            app.dragOriginY = app.originY;
-            SetCapture(hwnd);
+            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+            if (app.matchPicking || (GetKeyState(VK_MENU) < 0 && app.colorMatch)) {
+                // Color match target: the eyedropper, or Alt+click while the panel is open.
+                int x, y;
+                if (windowToPixel(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), x, y) && setMatchTarget(x, y)) {
+                    app.matchPicking = false;
+                    app.colorMatch = true;
+                }
+                return 0;
+            }
+            if (wp & MK_CONTROL) {
+                // Ctrl+click locks the readout to this pixel, or releases it.
+                int x, y;
+                if (app.pixelLocked) app.pixelLocked = false;
+                else if (windowToPixel(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), x, y)) {
+                    app.pixelLocked = true;
+                    app.lockedX = x;
+                    app.lockedY = y;
+                }
+                return 0;
+            }
+            startDrag(lp);
+            return 0;
+        case WM_RBUTTONDOWN:
+            startWindowMove();
+            return 0;
+        case WM_NCRBUTTONDOWN:
+            if (wp != HTCAPTION) break;
+            startWindowMove();
+            return 0;
+        case WM_RBUTTONUP:
+            if (movingWindow) {
+                movingWindow = false;
+                ReleaseCapture();
+            }
+            return 0;
+        case WM_CAPTURECHANGED:
+            if (reinterpret_cast<HWND>(lp) != hwnd) {  // lost to another window, not re-taken by this one
+                movingWindow = false;
+                app.dragging = false;
+            }
+            break;
+        case WM_MBUTTONDOWN:
+            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+            startDrag(lp);
             return 0;
         case WM_LBUTTONUP:
-            app.dragging = false;
-            ReleaseCapture();
+        case WM_MBUTTONUP:
+            if (app.dragging) {
+                app.dragging = false;
+                ReleaseCapture();
+            }
             return 0;
         case WM_LBUTTONDBLCLK:
+            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || (wp & MK_CONTROL)) return 0;
             app.fit = true;
             fitToWindow();
-            redraw();
             return 0;
         case WM_MOUSEMOVE:
+            if (movingWindow) {
+                POINT p;
+                GetCursorPos(&p);
+                SetWindowPos(hwnd, nullptr, moveWindowStart.left + p.x - moveCursorStart.x,
+                             moveWindowStart.top + p.y - moveCursorStart.y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                return 0;
+            }
             app.mouseX = GET_X_LPARAM(lp);
             app.mouseY = GET_Y_LPARAM(lp);
             if (app.dragging) {
                 app.originX = app.dragOriginX + float(app.mouseX - app.dragStart.x);
                 app.originY = app.dragOriginY + float(app.mouseY - app.dragStart.y);
                 app.fit = false;
-                InvalidateRect(hwnd, nullptr, FALSE);
             }
-            updateTitle();
             return 0;
+        case WM_MOUSELEAVE:
+            app.mouseX = app.mouseY = -1;
+            return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT && app.matchPicking && app.hasImage && !uiMouse) {
+                SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+                return TRUE;
+            }
+            if (LOWORD(lp) == HTCLIENT && (app.dragging || spaceDown) && app.hasImage && !uiMouse) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                return TRUE;
+            }
+            break;
         case WM_KEYDOWN:
-            switch (wp) {
-                case VK_ESCAPE: DestroyWindow(hwnd); break;
-                case VK_RIGHT:
-                case VK_NEXT:
-                case VK_SPACE: step(+1); break;
-                case VK_LEFT:
-                case VK_PRIOR:
-                case VK_BACK: step(-1); break;
-                case 'F': app.fit = true; fitToWindow(); break;
-                case '1': zoomAt(1.0f, app.viewW / 2, app.viewH / 2); break;
-                case '2': zoomAt(2.0f, app.viewW / 2, app.viewH / 2); break;
-                case '4': zoomAt(4.0f, app.viewW / 2, app.viewH / 2); break;
-                case '8': zoomAt(8.0f, app.viewW / 2, app.viewH / 2); break;
-                case VK_OEM_PLUS:
-                case VK_ADD: app.exposure += 0.5f; break;
-                case VK_OEM_MINUS:
-                case VK_SUBTRACT: app.exposure -= 0.5f; break;
-                case '0': app.exposure = 0.0f; break;
-                case 'C': app.channelMode = 0; break;
-                case 'R': app.channelMode = app.channelMode == 1 ? 0 : 1; break;
-                case 'G': app.channelMode = app.channelMode == 2 ? 0 : 2; break;
-                case 'B': app.channelMode = app.channelMode == 3 ? 0 : 3; break;
-                case 'A': app.channelMode = app.channelMode == 4 ? 0 : 4; break;
-                case 'X': app.channelMode = app.channelMode == 5 ? 0 : 5; break;
-                default: return 0;
+        case WM_SYSKEYDOWN:
+            if (wp == VK_SPACE && !(ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput)) {
+                // Space plays or pauses an animation while the Frames panel is open, otherwise it pans.
+                if (app.showFrames && isAnimation()) {
+                    if (!spaceDown) { app.framePlaying = !app.framePlaying; app.frameShownMs = nowMs(); requestRedraw(); }
+                    return 0;
+                }
+                spaceDown = true;
+                return 0;
             }
-            redraw();
-            return 0;
+            if (uiKeyDown(int(wp))) return 0;
+            break;
+        case WM_KEYUP:
+            if (wp == VK_SPACE) spaceDown = false;
+            break;
+        case WM_SYSCOMMAND:
+            if ((wp & 0xfff0) == SC_KEYMENU) return 0;  // no menu bar: Alt alone must not take the keyboard
+            break;
         case WM_DROPFILES: {
             HDROP drop = reinterpret_cast<HDROP>(wp);
             wchar_t file[MAX_PATH * 4];
-            if (DragQueryFileW(drop, 0, file, UINT(std::size(file)))) openFile(file);
+            if (DragQueryFileW(drop, 0, file, UINT(std::size(file)))) openPath(file);
             DragFinish(drop);
+            SetForegroundWindow(hwnd);
             return 0;
         }
         case WM_DESTROY:
+            saveOnExit();
             PostQuitMessage(0);
             return 0;
     }
@@ -725,9 +403,248 @@ void enableDpiAwareness() {
 
 }  // namespace
 
+void requestRedraw() { redraw = true; }
+
+void relayout() {
+    layout();
+    if (app.fit) fitToWindow();
+}
+
+void toggleRuler() {
+    app.ruler = !app.ruler;
+    relayout();
+}
+
+// ---- actions ----
+
+bool isSrgbFormat(htv::GpuFormat f) {
+    using G = htv::GpuFormat;
+    return f == G::RGBA8Srgb || f == G::BGRA8Srgb || f == G::BC1Srgb || f == G::BC2Srgb || f == G::BC3Srgb ||
+           f == G::BC7Srgb;
+}
+
+bool isFloatFormat(const htv::FormatInfo& info) { return info.linear && !isSrgbFormat(info.format); }
+
+bool isHighPrecision(const htv::Image& image) {
+    using G = htv::GpuFormat;
+    const G f = image.format;
+    return isFloatFormat(htv::formatInfo(f)) || f == G::RGBA16Unorm || f == G::RG16Unorm || f == G::R16Unorm ||
+           f == G::RGB10A2;
+}
+
+bool pickImageFile(std::filesystem::path& out) {
+    Com<IFileOpenDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dialog.put()))))
+        return false;
+    std::wstring pattern;
+    auto add = [&](const std::vector<std::string>& exts) {
+        for (const std::string& e : exts) pattern += (pattern.empty() ? L"*." : L";*.") + widen(e);
+    };
+    add(htv::supportedExtensions());
+    add(htv::wicExtensions());
+    const COMDLG_FILTERSPEC filters[] = {{L"Images", pattern.c_str()}, {L"All files", L"*.*"}};
+    dialog->SetFileTypes(UINT(std::size(filters)), filters);
+    dialog->SetTitle(L"Open image");
+    if (!app.path.empty()) {
+        Com<IShellItem> folder;
+        if (SUCCEEDED(SHCreateItemFromParsingName(app.path.parent_path().c_str(), nullptr,
+                                                  IID_PPV_ARGS(folder.put()))))
+            dialog->SetFolder(folder.get());
+    }
+    if (FAILED(dialog->Show(app.hwnd))) return false;
+    Com<IShellItem> item;
+    wchar_t* name = nullptr;
+    if (FAILED(dialog->GetResult(item.put())) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &name))) return false;
+    out = name;
+    CoTaskMemFree(name);
+    return true;
+}
+
+void showOpenDialog() {
+    std::filesystem::path path;
+    if (pickImageFile(path)) openPath(path);
+}
+
+void imageSizeOnScreen(float& w, float& h) {
+    w = float(app.rotation & 1 ? app.image.height : app.image.width);
+    h = float(app.rotation & 1 ? app.image.width : app.image.height);
+}
+
+// The origin is always the original image; tiling adds a copy on every side of it.
+void shownArea(float& x0, float& y0, float& x1, float& y1) {
+    float w, h;
+    imageSizeOnScreen(w, h);
+    const int around = app.tiling != Tiling::Off ? 1 : 0;
+    x0 = app.originX - around * w * app.zoom;
+    y0 = app.originY - around * h * app.zoom;
+    x1 = app.originX + (1 + around) * w * app.zoom;
+    y1 = app.originY + (1 + around) * h * app.zoom;
+}
+
+void fitToWindow() {
+    if (!app.hasImage) return;
+    float w, h;
+    imageSizeOnScreen(w, h);
+    // The design leaves a 16 px margin around a fitted image; the clean view fills the window.
+    const float margin = app.showBars ? std::round(16 * app.scale) : 0.0f;
+    float z = std::min((app.vpW - 2 * margin) / w, (app.vpH - 2 * margin) / h);
+    if (z > 1.0f) z = std::floor(z);  // small textures grow in whole steps so pixels stay square
+    app.zoom = std::max(z, 1.0f / 256.0f);
+    app.originX = app.vpX + std::round((app.vpW - w * app.zoom) * 0.5f);
+    app.originY = app.vpY + std::round((app.vpH - h * app.zoom) * 0.5f);
+}
+
+void zoomAt(float newZoom, float x, float y) {
+    if (!app.hasImage) return;
+    newZoom = std::clamp(newZoom, 1.0f / 256.0f, 256.0f);
+    app.originX = std::round(x - (x - app.originX) * newZoom / app.zoom);
+    app.originY = std::round(y - (y - app.originY) * newZoom / app.zoom);
+    app.zoom = newZoom;
+    app.fit = false;
+}
+
+void zoomCentered(float newZoom) { zoomAt(newZoom, app.vpX + app.vpW * 0.5f, app.vpY + app.vpH * 0.5f); }
+
+void rotate(int quarterTurns) {
+    // Keep the image centre where it is on screen.
+    float w, h;
+    imageSizeOnScreen(w, h);
+    const float cx = app.originX + w * app.zoom * 0.5f, cy = app.originY + h * app.zoom * 0.5f;
+    app.rotation = (app.rotation + quarterTurns + 4) % 4;
+    if (app.fit) {
+        fitToWindow();
+        return;
+    }
+    imageSizeOnScreen(w, h);
+    app.originX = std::round(cx - w * app.zoom * 0.5f);
+    app.originY = std::round(cy - h * app.zoom * 0.5f);
+}
+
+bool windowToPixel(float wx, float wy, int& x, int& y) {
+    if (!app.hasImage) return false;
+    float x0, y0, x1, y1;
+    shownArea(x0, y0, x1, y1);
+    if (wx < x0 || wy < y0 || wx >= x1 || wy >= y1) return false;
+    const int sw = int(app.rotation & 1 ? app.image.height : app.image.width);
+    const int sh = int(app.rotation & 1 ? app.image.width : app.image.height);
+    const int u = int(std::floor((wx - x0) / app.zoom)), v = int(std::floor((wy - y0) / app.zoom));
+    int du = std::min(u, 3 * sw - 1) % sw, dv = std::min(v, 3 * sh - 1) % sh;
+    if (app.flipH) du = sw - 1 - du;
+    if (app.flipV) dv = sh - 1 - dv;
+    switch (app.rotation) {
+        case 0: x = du; y = dv; break;
+        case 1: x = dv; y = sw - 1 - du; break;
+        case 2: x = sw - 1 - du; y = sh - 1 - dv; break;
+        default: x = sh - 1 - dv; y = du; break;
+    }
+    return true;
+}
+
+void imageRectToWindow(float x0, float y0, float x1, float y1, float& wx0, float& wy0, float& wx1, float& wy1) {
+    const float sw = float(app.rotation & 1 ? app.image.height : app.image.width);
+    const float sh = float(app.rotation & 1 ? app.image.width : app.image.height);
+    // The inverse of windowToPixel for each corner, on continuous coordinates.
+    auto toShown = [&](float x, float y, float& u, float& v) {
+        switch (app.rotation) {
+            case 0: u = x; v = y; break;
+            case 1: u = sw - y; v = x; break;
+            case 2: u = sw - x; v = sh - y; break;
+            default: u = y; v = sh - x; break;
+        }
+        if (app.flipH) u = sw - u;
+        if (app.flipV) v = sh - v;
+    };
+    float u0, v0, u1, v1;
+    toShown(x0, y0, u0, v0);
+    toShown(x1, y1, u1, v1);
+    wx0 = app.originX + std::min(u0, u1) * app.zoom;
+    wx1 = app.originX + std::max(u0, u1) * app.zoom;
+    wy0 = app.originY + std::min(v0, v1) * app.zoom;
+    wy1 = app.originY + std::max(v0, v1) * app.zoom;
+}
+
+void showMatchRegion(int index) {
+    if (index < 0 || index >= int(app.matchRegions.boxes.size())) return;
+    app.matchRegion = index;
+    const htv::MaskRegion& r = app.matchRegions.boxes[size_t(index)];
+    float x0, y0, x1, y1;
+    imageRectToWindow(float(r.x0), float(r.y0), float(r.x1), float(r.y1), x0, y0, x1, y1);
+    // Zoom out until the region takes at most 80% of the viewport; never zoom in.
+    const float room = std::min(app.vpW * 0.8f / std::max(x1 - x0, 1.0f), app.vpH * 0.8f / std::max(y1 - y0, 1.0f));
+    if (room < 1.0f) {
+        zoomAt(app.zoom * room, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+        imageRectToWindow(float(r.x0), float(r.y0), float(r.x1), float(r.y1), x0, y0, x1, y1);
+    }
+    app.originX += std::round(app.vpX + app.vpW * 0.5f - (x0 + x1) * 0.5f);
+    app.originY += std::round(app.vpY + app.vpH * 0.5f - (y0 + y1) * 0.5f);
+    app.fit = false;
+}
+
+void setTopmost(bool on) {
+    app.topmost = on;
+    SetWindowPos(app.hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// Opacity and click-through both need a layered window, which the next frame sets up (see render); clicks
+// pass through only with WS_EX_TRANSPARENT on top of that.
+static void applyLayering() {
+    const LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+    const LONG_PTR wanted = app.clickThrough ? (ex | WS_EX_TRANSPARENT) : (ex & ~LONG_PTR(WS_EX_TRANSPARENT));
+    if (wanted != ex) SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, wanted);
+    redraw = true;
+}
+
+void setOpacity(float opacity) {
+    app.opacity = std::clamp(std::round(opacity * 20.0f) / 20.0f, 0.1f, 1.0f);
+    applyLayering();
+}
+
+void setClickThrough(bool on) {
+    if (on == app.clickThrough) return;
+    // Only for a window that stays in sight over the one being clicked: see-through or always on top.
+    // Its key works while the window has the focus, which Alt+Tab or the taskbar gives back.
+    if (on && app.opacity >= 1.0f && !app.topmost) return;
+    app.clickThrough = on;
+    applyLayering();
+}
+
+void applyInterfaceScale() {
+    app.scale = app.interfaceScale > 0 ? app.interfaceScale : app.dpiScale;
+    uiSetScale(app.scale);
+    layout();
+    if (app.fit && app.hasImage) fitToWindow();
+    redraw = true;
+}
+
+void applyTheme() {
+    bool dark = app.themeMode != 1;
+    if (app.themeMode == 2) {
+        DWORD light = 0, size = sizeof(light);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                         L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS)
+            dark = light == 0;
+    }
+    app.darkTheme = dark;
+    redraw = true;
+}
+
+void toggleMaximize() { ShowWindow(app.hwnd, IsZoomed(app.hwnd) ? SW_RESTORE : SW_MAXIMIZE); }
+
+void toggleBars() {
+    app.showBars = !app.showBars;
+    const float top = app.vpY;
+    layout();
+    if (app.fit) fitToWindow();
+    else app.originY += app.vpY - top;  // the image stays put on screen
+}
+
+}  // namespace htv
+
+using namespace htv;
+
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
-    app.tStart = qpcMs();
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);  // for Windows codecs
+    app.tStart = nowMs();
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);  // for Windows codecs and dialogs
     enableDpiAwareness();
 
     int argc = 0;
@@ -741,6 +658,27 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     }
     LocalFree(argv);
     app.path = file;
+    if (app.benchPath.empty()) loadSettings();
+    applyTheme();
+
+    // Single instance: a file opened while a viewer runs goes to that window, which comes to the front.
+    HANDLE instanceMutex = nullptr;
+    if (app.benchPath.empty() && app.singleInstance) {
+        instanceMutex = CreateMutexW(nullptr, FALSE, L"HyperTextureViewer.SingleInstance");
+        if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (HWND other = FindWindowW(L"HyperTextureViewer", nullptr)) {
+                std::error_code ec;
+                const std::wstring path = file.empty() ? std::wstring() : fs::absolute(file, ec).wstring();
+                COPYDATASTRUCT cd{kOpenFileMessage, DWORD(path.size() * sizeof(wchar_t)), const_cast<wchar_t*>(path.c_str())};
+                DWORD_PTR result = 0;
+                AllowSetForegroundWindow(ASFW_ANY);
+                if (SendMessageTimeoutW(other, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cd), SMTO_ABORTIFHUNG, 3000,
+                                        &result) &&
+                    result)
+                    return 0;
+            }
+        }
+    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -752,6 +690,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     wc.lpszClassName = L"HyperTextureViewer";
     RegisterClassExW(&wc);
 
+    // A normal overlapped window keeps snapping, the taskbar and minimise animations; WM_NCCALCSIZE removes its frame.
     app.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Hyper Texture Viewer", WS_OVERLAPPEDWINDOW,
                                CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, nullptr, instance, nullptr);
     // A start-up failure is reported in a message box, or in the benchmark file when benchmarking.
@@ -767,27 +706,91 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     };
     if (!app.hwnd) return failStartup("cannot create the window");
 
+    // The default size is 1280x800 at 100%, scaled for the monitor and kept on its work area.
+    app.scale = ImGui_ImplWin32_GetDpiScaleForHwnd(app.hwnd);
+    {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(MonitorFromWindow(app.hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        const RECT& wa = mi.rcWork;
+        const int w = std::min(int(1280 * app.scale), int(wa.right - wa.left));
+        const int h = std::min(int(800 * app.scale), int(wa.bottom - wa.top));
+        SetWindowPos(app.hwnd, nullptr, wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - h) / 2,
+                     w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    // A one-pixel sliver of DWM frame brings back the window shadow without drawing anything visible.
+    const MARGINS shadow{0, 0, 1, 0};
+    DwmExtendFrameIntoClientArea(app.hwnd, &shadow);
+    // Windows 11 draws a 1 px border around the frame; the bars already end the window. Older versions ignore it.
+    const DWORD noBorder = 0xFFFFFFFE;  // DWMWA_COLOR_NONE
+    DwmSetWindowAttribute(app.hwnd, 34 /* DWMWA_BORDER_COLOR */, &noBorder, sizeof(noBorder));
+
     std::string error;
-    const double tDevice0 = qpcMs();
+    const double tDevice0 = nowMs();
     if (!createDevice()) return failStartup("no Direct3D 11 device, not even WARP");
     if (!createSwapChain()) return failStartup("cannot create the swap chain");
     if (!createRenderTarget()) return failStartup("cannot create the render target");
     if (!createPipeline(error)) return failStartup(error);
-    app.tDevice = qpcMs() - tDevice0;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui_ImplWin32_Init(app.hwnd);
+    if (!ImGui_ImplDX11_Init(app.device.get(), app.context.get())) return failStartup("cannot start the interface");
+    uiInit();
+    app.tDevice = nowMs() - tDevice0;
 
     RECT rc;
     GetClientRect(app.hwnd, &rc);
-    app.viewW = std::max(1, int(rc.right));
-    app.viewH = std::max(1, int(rc.bottom));
-    if (!file.empty()) openFile(fs::absolute(file));
-    updateTitle();
+    app.winW = std::max(1, int(rc.right));
+    app.winH = std::max(1, int(rc.bottom));
+    applyDpi(app.scale);
+    if (!file.empty()) openStartupFile(fs::absolute(file));
     ShowWindow(app.hwnd, show);
     UpdateWindow(app.hwnd);
-
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    if (app.benchPath.empty()) {
+        queryDisplayPeak();
+        SetTimer(app.hwnd, kWatchTimer, 500, nullptr);
     }
-    return int(msg.wParam);
+
+    // Frames are drawn while something changes and for a moment after the last input, then the loop sleeps.
+    MSG msg{};
+    int exitCode = 0;
+    bool zebraTimer = false, frameTimer = false;
+    for (;;) {
+        // The clipping stripes move, so they need frames while they are on screen (15 a second is plenty).
+        const bool zebra = app.showClipping && app.hasImage && isHighPrecision(app.image) && app.benchPath.empty();
+        if (zebra != zebraTimer) {
+            if (zebra) SetTimer(app.hwnd, kZebraTimer, 66, nullptr);
+            else KillTimer(app.hwnd, kZebraTimer);
+            zebraTimer = zebra;
+        }
+        // An animation playing needs a steady beat; the frame's own delay decides when the next goes up.
+        const bool playing = isAnimation() && app.framePlaying && app.benchPath.empty();
+        if (playing != frameTimer) {
+            if (playing) SetTimer(app.hwnd, kFrameTimer, 15, nullptr);
+            else KillTimer(app.hwnd, kFrameTimer);
+            frameTimer = playing;
+        }
+        const bool active = nowMs() - lastInputMs < 1500.0 || app.dragging || app.loading;
+        if (!active || IsIconic(app.hwnd)) WaitMessage();
+        bool quit = false;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                quit = true;
+                exitCode = int(msg.wParam);  // later messages in this batch reuse `msg`
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (quit) break;
+        // A timer tick that changed nothing does not cost a frame.
+        const bool input = nowMs() - lastInputMs < 1500.0;
+        if (!IsIconic(app.hwnd) && (input || app.dragging || app.loading || redraw)) render();
+        redraw = false;
+    }
+
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    return exitCode;
 }
