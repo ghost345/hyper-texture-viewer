@@ -248,6 +248,39 @@ Bytes makeDds(uint32_t w, uint32_t h, bool bc7, GpuFormat dx10 = GpuFormat::BC7S
     return b;
 }
 
+// An RGBA8 image whose blue is empty and red and green wander around 0.5: a normal map with Z left out.
+Image makeRgba8(uint32_t w, uint32_t h, uint8_t blue) {
+    Image img;
+    img.width = w;
+    img.height = h;
+    img.format = GpuFormat::RGBA8;
+    Surface s;
+    s.width = w;
+    s.height = h;
+    s.rowPitch = w * 4;
+    s.data.resize(size_t(s.rowPitch) * h);
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) {
+            uint8_t* p = s.data.data() + size_t(y) * s.rowPitch + x * 4;
+            p[0] = uint8_t(96 + (x * 64) / w);
+            p[1] = uint8_t(96 + (y * 64) / h);
+            p[2] = blue;
+            p[3] = 255;
+        }
+    img.mips.push_back(std::move(s));
+    return img;
+}
+
+void testNormalHint() {
+    CHECK(!missingNormalZ(makeRgba8(64, 64, 0), "rock.png").empty());
+    CHECK(missingNormalZ(makeRgba8(64, 64, 255), "rock_normal.png").empty());  // tangent space with Z: bluish
+    Image bc5;
+    bc5.width = bc5.height = 4;
+    bc5.format = GpuFormat::BC5;
+    bc5.mips.resize(1);
+    CHECK(!missingNormalZ(bc5, "x.dds").empty());
+}
+
 void testHalf() {
     const float values[] = {0.0f, -0.0f, 1.0f, -2.5f, 0.1f, 65504.0f, 6.1035156e-05f, 5.9604645e-08f, 1000.25f};
     for (float v : values) {
@@ -531,6 +564,7 @@ int main(int argc, char** argv) {
         return ok ? 0 : 1;
     }
     testHalf();
+    testNormalHint();
     testPng();
     testWebp();
     testQoi();

@@ -32,7 +32,7 @@ cbuffer View : register(b0) {
     uint rotation;         // quarter turns clockwise
     uint flips;            // 1 horizontal, 2 vertical
     float tiles;           // 1, or 3 for the 3x3 tiling preview
-    uint normalMap;        // 1 rebuild Z from X and Y, 2 flip green
+    uint reserved;         // keeps the layout
     int forcedMip;         // -1: pick the mip from the zoom
     float invGamma;
     float checkerSize;     // target pixels per checker cell
@@ -147,11 +147,6 @@ float4 psMain(float4 pos : SV_Position) : SV_Target {
     if (signedValues) c.rgb = c.rgb * 0.5 + 0.5;
     if (channels == 1) c = float4(c.rrr, 1);
     else if (channels == 2) c = float4(c.rg, 0, 1);
-    if (normalMap & 2) c.g = 1 - c.g;
-    if (normalMap & 1) {
-        float2 n = c.rg * 2 - 1;
-        c.b = sqrt(saturate(1 - dot(n, n))) * 0.5 + 0.5;
-    }
 
     // NaN and Inf. Written without isnan/isinf so every HLSL compiler accepts it.
     if (any(c != c) || any(abs(c) > 3.402823e38)) return clipping ? float4(1, 0, 1, 1) : float4(0, 0, 0, 1);
@@ -285,7 +280,7 @@ struct ViewConstants {
     uint32_t rotation;
     uint32_t flips;
     float tiles;
-    uint32_t normalMap;
+    uint32_t reserved;
     int32_t forcedMip;
     float invGamma;
     float checkerSize;
@@ -340,7 +335,6 @@ ViewConstants makeConstants(const htv::Image& image, float originX, float origin
     c.rotation = uint32_t(app.rotation);
     c.flips = (app.flipH ? 1u : 0u) | (app.flipV ? 2u : 0u);
     c.tiles = tiles;
-    c.normalMap = (app.normalZ ? 1u : 0u) | (app.flipGreen ? 2u : 0u);
     c.forcedMip = app.forcedMip;
     // Range, tone mapping and gamma belong to the HDR row, which only float and 16-bit images show.
     c.invGamma = hdr ? 1.0f / app.gamma : 1.0f;

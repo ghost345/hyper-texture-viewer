@@ -132,6 +132,8 @@ struct App {
     float loadingProgress = -1.0f;  // share of the file read, or -1 while decoding
 
     // "Reloaded" notice after the file changed on disk.
+    std::string normalHint;      // why the image looks like a normal map with Z left out; empty when it doesn't
+    bool normalHintDismissed = false;
     double toastUntilMs = 0;
     std::string toastName;
 
@@ -161,8 +163,6 @@ struct App {
     Channel channel = Channel::RGB;
     bool ignoreAlpha = false;
     bool dataIsLinear = false;  // how stored values are interpreted; defaults per format on open
-    bool normalZ = false;       // rebuild blue from red and green
-    bool flipGreen = false;
     int forcedMip = -1;
     int rotation = 0;  // quarter turns clockwise
     bool flipH = false, flipV = false;
@@ -172,7 +172,6 @@ struct App {
     Tiling tiling = Tiling::Off;
     bool grid = false;
     int gridStep = 1;
-    bool pixelOutline = false;
 
     // Pixel readout.
     int mouseX = -1, mouseY = -1;

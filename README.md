@@ -9,13 +9,13 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Compressed DDS goes to the GPU as is, so BC textures look exactly as in a game.
 - Pixels stay sharp when zoomed in (no filtering at 100% and above). Below 100% the mip chain averages the source pixels, so detail does not flicker or alias.
 - HDR: exposure, black and white points on a log scale over the image's histogram (Auto picks them from the image), tone mapping (linear clip, Reinhard, ACES, AgX), zebra stripes above the white point, NaN/Inf counted and shown in magenta.
-- Single channels, luminance, sRGB or linear interpretation, normal map Z reconstruction, forced mip level, 3x3 tiling preview.
+- Single channels, luminance, sRGB or linear interpretation, forced mip level, 3x3 tiling preview. A normal map that seems to have left Z out (two-channel formats such as BC5, or empty blue with red and green around 0.5) gets a warning.
 - Alpha over a checkerboard (three sizes), black, grey, white or a custom colour.
-- Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid and outline.
+- Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid; a dashed outline always marks the pixels the readout reads.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
 - Color match (`M`): dashed outline around every pixel within ± N of a target colour, compared by whole colour, one channel, luminance, hue or saturation; pixel count, share of the image and regions, with `,` / `.` to step the view through the regions. Alt+click or the eyedropper picks the target.
 - Compare (`Ctrl+K`): up to three images (A is the shown one, B and C are other files) as split shutters you drag on the image, a blend slider, or a difference through a heat ramp with adjustable gain and Max Δ / Mean Δ / Pixels Δ>2 / PSNR.
-- Frames (`L` on a GIF or animated WebP): play, pause (Space), step (`,` / `.`) and scrub the frames, with the frame delay and loop count. For a still image `L` shows the Layers panel (PSD and EXR layer lists are planned).
+- Frames (`L` on a GIF or animated WebP): play, pause (Space), step (`,` / `.`) and scrub the frames, with the frame delay and loop count; delays play as in browsers (0 or 10 ms as 100 ms). PSD and EXR layer lists are planned.
 - Settings (Ctrl+,): theme (dark, light or as Windows), interface scale, viewport colour, checker size, what stays when switching files, folder order, automatic reload, single instance, portable mode, and every key reassignable (the F1 screen shows the current keys).
 - Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top (Ctrl+Shift+T), window opacity and, when on top or below 100%, transparent to mouse (Ctrl+T while the window has the focus), borderless window that hides its bars with Tab.
 - The top bar folds its tools into a "..." menu one at a time as the window narrows; the window stops shrinking before anything would overlap.
@@ -37,7 +37,7 @@ All shortcuts are listed in the app under F1. The most used:
 | Ctrl + wheel, `-` / `=`, `0` | HDR exposure, reset |
 | Ctrl+A, `Z` | Auto range, show clipping |
 | Ctrl + click, Ctrl+C | Lock the readout to a pixel, copy its value |
-| `T`, Shift+A, Shift+L, `N` | Tiling, alpha background, sRGB/linear, normal map mode |
+| `T`, Shift+A, Shift+L | Tiling, alpha background, sRGB/linear |
 | Right drag, Alt + drag | Move the window |
 | Tab, `I`, Ctrl+H, F1, Ctrl+, | Hide bars, info panel, histogram, shortcuts, settings |
 | Ctrl+O, Ctrl+V, F5 | Open, paste from clipboard, reload |

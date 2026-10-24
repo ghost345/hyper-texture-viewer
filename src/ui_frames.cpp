@@ -1,6 +1,5 @@
-// Frames (L on an animation): step or play through a GIF or animated WebP's frames.
-// Layers (L otherwise): the file's layers; PSD and EXR layer extraction is still to come, so for now
-// a single-image file shows its one composite layer.
+// Frames (L on an animation): step or play through a GIF or animated WebP's frames. Files without
+// frames have no panel; PSD and EXR layers are still to come.
 
 #include "ui.h"
 #include "ui_internal.h"
@@ -85,7 +84,10 @@ void framesBody(ImDrawList* dl, ImVec2 p, float width) {
 
     // Delay of the current frame and the loop count.
     char delay[32], loop[32];
-    std::snprintf(delay, sizeof delay, "delay %d ms", app.image.frames[size_t(app.frameIndex)].delayMs);
+    // 0 and 10 ms play at 100 ms, as in browsers.
+    const int stored = app.image.frames[size_t(app.frameIndex)].delayMs;
+    if (stored <= 10) std::snprintf(delay, sizeof delay, "delay 100 ms (file: %d)", stored);
+    else std::snprintf(delay, sizeof delay, "delay %d ms", stored);
     if (app.image.loopCount <= 0) std::snprintf(loop, sizeof loop, "loop \xE2\x88\x9E");
     else std::snprintf(loop, sizeof loop, "loop %d\xC3\x97", app.image.loopCount);
     drawText(dl, fontMono, 11, x0, y + S(6), t.tx3, delay);
@@ -95,42 +97,15 @@ void framesBody(ImDrawList* dl, ImVec2 p, float width) {
     ImGui::Dummy(ImVec2(width, y - p.y));
 }
 
-void layersBody(ImDrawList* dl, ImVec2 p, float width) {
-    const Theme& t = T();
-    const float x0 = p.x + S(10), x1 = p.x + width - S(10);
-    float y = p.y + S(26);
-
-    // The one composite layer every file has; real PSD / EXR layers are still to come.
-    const float h = S(34), cy = y + h * 0.5f;
-    drawIcon(dl, Icon::Info, ImVec2(x0, std::round(cy - S(7))), S(14), t.tx2);
-    const ImVec2 ta(x0 + S(14) + S(8), std::round(cy - S(13)));
-    if (ID3D11ShaderResourceView* thumb = compareThumbnail(-1)) dl->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(thumb))), ta,
-                                                                            ImVec2(ta.x + S(26), ta.y + S(26)));
-    dl->AddRect(ta, ImVec2(ta.x + S(26), ta.y + S(26)), t.bd2, 0, 0, line());
-    drawText(dl, fontRegular, 12, ta.x + S(26) + S(8), cy, t.tx, "Composite");
-    y += h;
-    dl->AddRectFilled(ImVec2(p.x + line(), y), ImVec2(p.x + width - line(), y + line()), t.bd);
-    y += line() + S(8);
-    const char* msg = "This file has a single layer.";
-    drawText(dl, fontRegular, 12, x0, y + S(7), t.tx3, msg);
-    y += S(14) + S(4);
-    drawText(dl, fontRegular, 11, x0, y + S(7), t.tx3,
-             ellipsize(fontRegular, 11, "PSD and EXR layer lists are planned.", x1 - x0).c_str());
-    y += S(14) + S(10);
-    ImGui::SetCursorScreenPos(p);
-    ImGui::Dummy(ImVec2(width, y - p.y));
-}
-
 }  // namespace
 
 void toggleFramesOrLayers() {
-    if (!app.hasImage) return;
+    if (!app.hasImage || !isAnimation()) return;
     app.showFrames = !app.showFrames;
 }
 
 void framesPanel() {
-    if (!app.showFrames || !app.hasImage) return;
-    const bool anim = isAnimation();
+    if (!app.showFrames || !app.hasImage || !isAnimation()) return;
     const Theme& t = T();
     const float width = S(300);
     // Under the top-right corner, like the other analysis panels.
@@ -141,24 +116,17 @@ void framesPanel() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p = ImGui::GetWindowPos();
     const float hh = S(26);
-    panelHeader(dl, p, width, hh, anim ? "Frames" : "Layers", 12, 9);
-    // The format and count next to the title.
-    char tag[32];
-    if (anim) {
-        const std::string& d = app.image.description;
-        std::snprintf(tag, sizeof tag, "%s", d.compare(0, 3, "GIF") == 0 ? "GIF" : "WebP");
-    } else {
-        std::snprintf(tag, sizeof tag, "1");
-    }
-    const float titleW = textSize(fontSemibold, 12, anim ? "Frames" : "Layers").x;
+    panelHeader(dl, p, width, hh, "Frames", 12, 9);
+    // The format next to the title.
+    const char* tag = app.image.description.compare(0, 3, "GIF") == 0 ? "GIF" : "WebP";
+    const float titleW = textSize(fontSemibold, 12, "Frames").x;
     drawText(dl, fontRegular, 12, p.x + S(9) + titleW + S(8), p.y + (hh - line()) * 0.5f, t.tx3, tag);
     if (smallButton(dl, "close", Icon::Dismiss,
                     ImVec2(p.x + width - S(3) - S(20), std::round(p.y + (hh - line() - S(20)) * 0.5f)), 20, 14, "Close",
                     keyText(Action::Layers)))
         app.showFrames = false;
 
-    if (anim) framesBody(dl, p, width);
-    else layersBody(dl, p, width);
+    framesBody(dl, p, width);
     ImGui::End();
 }
 

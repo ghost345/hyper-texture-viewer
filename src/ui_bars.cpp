@@ -194,10 +194,6 @@ void textureMenuItems() {
     if (menuItem({"sRGB", "Shift+L", !app.dataIsLinear, true, true})) app.dataIsLinear = false;
     if (menuItem({"Linear", "Shift+L", app.dataIsLinear, true, true})) app.dataIsLinear = true;
     menuSeparator();
-    menuHeading("Normal map");
-    if (menuItem({"Reconstruct Z", keyText(Action::NormalMode), app.normalZ, true, true})) app.normalZ = !app.normalZ;
-    if (menuItem({"Flip green (DirectX / OpenGL)", nullptr, app.flipGreen, true, true})) app.flipGreen = !app.flipGreen;
-    menuSeparator();
     menuHeading("Mip level");
     const bool fileMips = app.hasImage && app.textureMips > 1;
     if (menuItem({"Auto", nullptr, app.forcedMip < 0, true, true})) app.forcedMip = -1;
@@ -296,33 +292,19 @@ void tilingMenuItems() {
     menuNote("T cycles through the modes");
 }
 
-void themeMenuItems() {
-    if (menuItem({"Dark", nullptr, app.darkTheme, true, true}) && !app.darkTheme) {
-        app.themeMode = 0;
-        applyTheme();
-        saveSettings();
-    }
-    if (menuItem({"Light", nullptr, !app.darkTheme, true, true}) && app.darkTheme) {
-        app.themeMode = 1;
-        applyTheme();
-        saveSettings();
-    }
-}
-
 // ---- top bar ----
 
 bool noImage() { return !app.hasImage; }
 
 // Controls that move into the "..." menu one at a time as the window narrows, in bar order.
-enum class Tool { ActualSize, Zoom, RotL, RotR, FlipH, FlipV, Channels, TexMode, AlphaBg, Tiling, Grid, Ruler, Outline,
-                  Match, Histogram, Info, Layers, Compare, CompareLabel, OnTop, Theme, Settings, Help, Count };
+enum class Tool { ActualSize, Zoom, RotL, RotR, FlipH, FlipV, Channels, TexMode, AlphaBg, Tiling, Grid, Ruler,
+                  Match, Histogram, Info, Layers, Compare, OnTop, Settings, Help, Count };
 
 // Which goes first: the least used, keeping the tools that read the image and the channel switch for last.
-const Tool kHideOrder[] = {Tool::Ruler,  Tool::Help,      Tool::Settings, Tool::Theme,      Tool::CompareLabel,
-                           Tool::Outline, Tool::Grid,     Tool::FlipV,    Tool::FlipH,      Tool::RotR,
-                           Tool::RotL,   Tool::Tiling,    Tool::AlphaBg,  Tool::OnTop,      Tool::Layers,
-                           Tool::Histogram, Tool::Info,   Tool::Match,    Tool::Compare,    Tool::ActualSize,
-                           Tool::Zoom,   Tool::TexMode,   Tool::Channels};
+const Tool kHideOrder[] = {Tool::Ruler,     Tool::Help,  Tool::Settings, Tool::Grid,       Tool::FlipV,
+                           Tool::FlipH,     Tool::RotR,  Tool::RotL,     Tool::Tiling,     Tool::AlphaBg,
+                           Tool::OnTop,     Tool::Layers, Tool::Histogram, Tool::Info,     Tool::Match,
+                           Tool::Compare,   Tool::ActualSize, Tool::Zoom, Tool::TexMode,   Tool::Channels};
 constexpr int kHideable = int(sizeof kHideOrder / sizeof kHideOrder[0]);
 
 // How the bar fits the window: the first `hidden` tools of kHideOrder sit in the "..." menu; once they all
@@ -338,11 +320,7 @@ struct TopLayout {
             if (kHideOrder[i] == tool) return false;
         return true;
     }
-    bool menu() const {
-        for (int i = 0; i < hidden; ++i)
-            if (kHideOrder[i] != Tool::CompareLabel) return true;
-        return false;
-    }
+    bool menu() const { return hidden > 0; }
 };
 
 void fileGroup(Row& r, const TopLayout& L) {
@@ -465,7 +443,6 @@ void channelSwitch(Row& row) {
 
 std::string textureModeLabel() {
     std::string mode = app.dataIsLinear ? "Linear" : "sRGB";
-    if (app.normalZ || app.flipGreen) mode += " \xC2\xB7 Normal";
     if (app.forcedMip >= 0) mode += " \xC2\xB7 Mip " + std::to_string(app.forcedMip);
     return mode;
 }
@@ -478,7 +455,7 @@ void channelsGroup(Row& r, const TopLayout& L) {
     ImRect tr;
     const std::string mode = textureModeLabel();
     toggleMenuOnPress(r.dropdown("texmode", mode.c_str(), fontRegular, 12, 22, 7, 4, "Texture mode", nullptr, &tr, noImage(),
-                                 "Linear \xC2\xB7 Normal"),
+                                 "Linear \xC2\xB7 Mip 10"),
                       "texmode menu");
     if (!r.measure && beginMenu("texmode menu", ImVec2(tr.Min.x, tr.Max.y + S(4)))) {
         textureMenuItems();
@@ -517,20 +494,18 @@ void backgroundGroup(Row& r, const TopLayout& L) {
 }
 
 void overlaysGroup(Row& r, const TopLayout& L) {
-    if (!L.shows(Tool::Grid) && !L.shows(Tool::Ruler) && !L.shows(Tool::Outline)) return;
+    if (!L.shows(Tool::Grid) && !L.shows(Tool::Ruler)) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     if (L.shows(Tool::Grid) &&
         r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", keyText(Action::Grid)))
         app.grid = !app.grid;
     if (L.shows(Tool::Ruler)) r.button("ruler", Icon::Ruler, nullptr, kDisabled, "Ruler (coming soon)", "Ctrl+U");
-    if (L.shows(Tool::Outline) && r.button("outline", Icon::PixelOutline, nullptr, (app.pixelOutline && !off ? kOn : 0) | off,
-                                           "Pixel outline", keyText(Action::PixelOutline)))
-        app.pixelOutline = !app.pixelOutline;
 }
 
 void analysisGroup(Row& r, const TopLayout& L) {
-    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Info) && !L.shows(Tool::Layers)) return;
+    const bool anim = isAnimation();  // the one kind of file with layers to show so far: frames
+    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Info) && !(anim && L.shows(Tool::Layers))) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     if (L.shows(Tool::Match) && r.button("match", Icon::ColorMatch, nullptr, (app.colorMatch && !off ? kOn : 0) | off, "Color match",
@@ -541,9 +516,8 @@ void analysisGroup(Row& r, const TopLayout& L) {
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
     if (L.shows(Tool::Info) && r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
         app.showInfo = !app.showInfo;
-    const bool anim = isAnimation();
-    if (L.shows(Tool::Layers) && r.button("layers", Icon::Layers, nullptr, (app.showFrames && anim ? kOn : 0) | (noImage() ? kDisabled : 0),
-                 anim ? "Frames" : "Layers", keyText(Action::Layers)))
+    if (anim && L.shows(Tool::Layers) &&
+        r.button("layers", Icon::Layers, nullptr, app.showFrames ? kOn : 0, "Frames", keyText(Action::Layers)))
         toggleFramesOrLayers();
 }
 
@@ -591,9 +565,6 @@ void moreMenuItems(const TopLayout& L) {
     }
     if (item(Tool::Grid, 3) && menuItem({"Pixel grid", keyText(Action::Grid), app.grid, !off, false, Icon::Grid})) app.grid = !app.grid;
     if (item(Tool::Ruler, 3)) menuItem({"Ruler (coming soon)", "Ctrl+U", false, false, false, Icon::Ruler});
-    if (item(Tool::Outline, 3) &&
-        menuItem({"Pixel outline", keyText(Action::PixelOutline), app.pixelOutline, !off, false, Icon::PixelOutline}))
-        app.pixelOutline = !app.pixelOutline;
     if (item(Tool::Match, 4) && menuItem({"Color match", keyText(Action::ColorMatch), app.colorMatch, !off, false, Icon::ColorMatch}))
         toggleColorMatch();
     if (item(Tool::Histogram, 4) &&
@@ -603,17 +574,12 @@ void moreMenuItems(const TopLayout& L) {
         menuItem({"Info", keyText(Action::Info), app.showInfo, !(off && app.error.empty()), false, Icon::Info}))
         app.showInfo = !app.showInfo;
     const bool anim = isAnimation();
-    if (item(Tool::Layers, 4) &&
-        menuItem({anim ? "Frames" : "Layers", keyText(Action::Layers), app.showFrames, !off, false, Icon::Layers}))
+    if (anim && item(Tool::Layers, 4) && menuItem({"Frames", keyText(Action::Layers), app.showFrames, true, false, Icon::Layers}))
         toggleFramesOrLayers();
     if (item(Tool::Compare, 4) && menuItem({"Compare", keyText(Action::Compare), app.compare, !off, false, Icon::Compare}))
         toggleCompare();
     if (item(Tool::OnTop, 5) && menuItem({"Always on top", keyText(Action::AlwaysOnTop), app.topmost, true, false, Icon::OnTop}))
         setTopmost(!app.topmost);
-    if (item(Tool::Theme, 6) && submenu("more theme", "Theme", app.darkTheme ? Icon::Theme : Icon::Sun)) {
-        themeMenuItems();
-        endSubmenu();
-    }
     if (item(Tool::Settings, 6) && menuItem({"Settings", keyText(Action::Settings), app.showSettings, true, false, Icon::Settings}))
         app.showSettings = !app.showSettings;
     if (item(Tool::Help, 6) && menuItem({"Keyboard shortcuts", keyText(Action::Help), app.showHelp, true, false, Icon::Help}))
@@ -623,7 +589,7 @@ void moreMenuItems(const TopLayout& L) {
 void compareGroup(Row& r, const TopLayout& L) {
     r.separator(16, 5);
     const int cmpOff = noImage() ? kDisabled : 0;
-    if (L.shows(Tool::Compare) && r.button("compare", Icon::Compare, L.shows(Tool::CompareLabel) ? "Compare" : nullptr,
+    if (L.shows(Tool::Compare) && r.button("compare", Icon::Compare, nullptr,
                  (app.compare && !cmpOff ? kOn : 0) | cmpOff, "Compare", keyText(Action::Compare)))
         toggleCompare();
     if (!L.menu()) return;
@@ -658,12 +624,6 @@ void rightGroup(Row& r, const TopLayout& L) {
                                "Window opacity", "Alt+Wheel"),
                       "opacity menu");
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
-    if (L.shows(Tool::Theme) && r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
-                                         app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
-        app.themeMode = app.darkTheme ? 1 : 0;
-        applyTheme();
-        saveSettings();
-    }
     if (L.shows(Tool::Settings) &&
         r.button("settings", Icon::Settings, nullptr, app.showSettings ? kOn : 0, "Settings", keyText(Action::Settings)))
         app.showSettings = !app.showSettings;
@@ -746,7 +706,7 @@ void opacityPopup(ImVec2 anchor) {
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const ImVec2 p(p0.x + S(6), p0.y + S(6));  // 10 px padding: 4 from the menu plus 6
     const float w = S(214);
-    ImGui::Dummy(ImVec2(w + 2 * S(6), S(6) + S(16) + S(10) + S(16) + S(8) + S(10) + S(8) + S(18) + S(6)));
+    ImGui::Dummy(ImVec2(w + 2 * S(6), S(6) + S(16) + S(10) + S(16) + S(8) + S(18) + S(6)));
     char buf[16];
     std::snprintf(buf, sizeof buf, "%d%%", int(std::lround(app.opacity * 100)));
     float y = p.y + S(8);
@@ -757,10 +717,7 @@ void opacityPopup(ImVec2 anchor) {
     bool reset = false;
     if (slider(dl, "opacity slider", p.x, y, 214, v, 0.0f, &reset)) setOpacity(0.1f + v * 0.9f);
     if (reset) setOpacity(1.0f);
-    y += S(8) + S(8) + S(5);
-    drawText(dl, fontMono, 10, p.x, y, t.tx3, "10%");
-    drawText(dl, fontMono, 10, p.x + w - textSize(fontMono, 10, "100%").x, y, t.tx3, "100%");
-    y += S(5) + S(8) + S(9);
+    y += S(8) + S(8) + S(9);
     const float kw = kbdChip(dl, p.x, y, "Alt");
     drawText(dl, fontRegular, 11, p.x + kw + S(6), y, t.tx3, "+ wheel anywhere");
     if (!app.layerError.empty()) {
@@ -917,6 +874,14 @@ void rangeSlider(ImDrawList* dl, float x, float cy, float width) {
     const float span = std::max(hi - lo, 2.0f);
     lo -= span * 0.055f;
     hi += span * 0.02f;
+    // While a point is dragged the scale stays put: it would otherwise grow with the white point under a
+    // mouse held at the end and run away. It catches up on release.
+    static int dragging = -1;
+    static float dragLo = 0, dragHi = 0;
+    if (dragging >= 0) {
+        lo = dragLo;
+        hi = dragHi;
+    }
     auto pos = [&](float v) { return v <= 0 ? 0.0f : std::clamp((std::log2(v) - lo) / (hi - lo), 0.0f, 1.0f); };
     auto valueAt = [&](float p) { return p <= 0.005f ? 0.0f : std::exp2(lo + p * (hi - lo)); };
 
@@ -983,11 +948,15 @@ void rangeSlider(ImDrawList* dl, float x, float cy, float width) {
 
     // Dragging moves the nearer point; a double click resets to 0 .. 1.
     // The points stick to 0, 1.0 and the marks when dragged close to them (Alt drags freely).
-    static int dragging = -1;
     ImGui::SetCursorScreenPos(ImVec2(x - S(4), top + S(8)));
     ImGui::InvisibleButton("range", ImVec2(w + S(8), S(28)));
-    const float mp = std::clamp((mouseClientX() - x) / w, 0.0f, 1.0f);
-    if (ImGui::IsItemActivated()) dragging = std::fabs(mp * w - (bx - x)) <= std::fabs(mp * w - (wx - x)) ? 0 : 1;
+    const float mouse = mouseClientX();
+    const float mp = std::clamp((mouse - x) / w, 0.0f, 1.0f);
+    if (ImGui::IsItemActivated()) {
+        dragging = std::fabs(mp * w - (bx - x)) <= std::fabs(mp * w - (wx - x)) ? 0 : 1;
+        dragLo = lo;
+        dragHi = hi;
+    }
     if (dragging >= 0 && !leftButtonHeld()) dragging = -1;
     if (dragging >= 0) {
         const float minMark = st.valid ? pos(st.minLuminance) : -1.0f, maxMark = st.valid ? pos(st.maxValue) : -1.0f;
@@ -998,7 +967,10 @@ void rangeSlider(ImDrawList* dl, float x, float cy, float width) {
                                       app.whitePoint * 0.99f);
         } else {
             const float p = snapPosition(mp, {pos(1.0f), peakMark, maxMark, minMark}, w);
-            const float v = p == pos(1.0f)   ? 1.0f
+            // Past the right end the white point keeps rising, slowly: a stop for every 60 px.
+            const float beyond = std::max(0.0f, mouse - (x + w)) / S(60);
+            const float v = beyond > 0       ? std::exp2(hi + beyond)
+                            : p == pos(1.0f) ? 1.0f
                             : p == peakMark  ? app.displayPeak
                             : p == maxMark   ? st.maxValue
                             : p == minMark   ? st.minLuminance

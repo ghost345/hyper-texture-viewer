@@ -744,4 +744,43 @@ float halfToFloat(uint16_t value) {
     return f;
 }
 
+std::string missingNormalZ(const Image& image, const std::string& name) {
+    if (!image.width || image.mips.empty()) return {};
+    const FormatInfo& info = formatInfo(image.format);
+    if (info.channels == 2) {
+        if (image.format == GpuFormat::BC5 || image.format == GpuFormat::BC5Snorm)
+            return "BC5 stores X and Y only";
+        return std::string(info.name) + " stores two channels: X and Y only";
+    }
+    std::string lower = name;
+    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const std::string stem = lower.substr(0, lower.rfind('.'));
+    const bool named = stem.find("normal") != std::string::npos || stem.find("nrm") != std::string::npos ||
+                       (stem.size() > 2 && stem.compare(stem.size() - 2, 2, "_n") == 0);
+    if (info.compressed || info.channels < 3) return {};
+    // Up to 64x64 samples spread over the image.
+    const uint32_t stepX = std::max(1u, image.width / 64), stepY = std::max(1u, image.height / 64);
+    double sum[3] = {0, 0, 0};
+    float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+    int n = 0;
+    for (uint32_t y = stepY / 2; y < image.height; y += stepY)
+        for (uint32_t x = stepX / 2; x < image.width; x += stepX) {
+            float p[4];
+            if (!readPixel(image, x, y, p)) return {};
+            for (int c = 0; c < 3; ++c) {
+                sum[c] += p[c];
+                lo[c] = std::min(lo[c], p[c]);
+                hi[c] = std::max(hi[c], p[c]);
+            }
+            ++n;
+        }
+    if (!n) return {};
+    const float meanR = float(sum[0] / n), meanG = float(sum[1] / n);
+    const bool blueEmpty = hi[2] <= 2.5f / 255.0f;
+    const bool centred = std::fabs(meanR - 0.5f) < 0.15f && std::fabs(meanG - 0.5f) < 0.15f;
+    const bool varies = hi[0] - lo[0] > 8.0f / 255.0f || hi[1] - lo[1] > 8.0f / 255.0f;
+    if (blueEmpty && varies && (centred || named)) return "Blue is empty and red and green centre on 0.5";
+    return {};
+}
+
 }  // namespace htv

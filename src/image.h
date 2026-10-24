@@ -97,6 +97,12 @@ const std::vector<std::string>& supportedExtensions();
 // Reads one pixel of mip 0 as floats. Returns false for compressed formats.
 bool readPixel(const Image& image, uint32_t x, uint32_t y, float rgba[4]);
 
+// Why the image looks like a normal map whose Z (blue) was left out to be rebuilt as sqrt(1 - x² - y²),
+// or empty when it doesn't. A guess from the format (two channels, e.g. BC5), the file name ("normal",
+// "nrm", "_n") and the colours (red and green around 0.5, blue empty: yellow-green instead of the bluish
+// tangent-space look). `name` is the file name, lower or upper case.
+std::string missingNormalZ(const Image& image, const std::string& name);
+
 uint16_t floatToHalf(float value);
 float halfToFloat(uint16_t value);
 

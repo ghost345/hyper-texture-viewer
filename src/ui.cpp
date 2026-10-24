@@ -161,11 +161,6 @@ void runAction(Action a) {
         case Action::Alpha: channel(Channel::A); break;
         case Action::Luminance: channel(Channel::Luminance); break;
         case Action::SrgbLinear: app.dataIsLinear = !app.dataIsLinear; break;
-        case Action::NormalMode:  // off, reconstruct Z, reconstruct Z with green flipped
-            if (!app.normalZ) app.normalZ = true;
-            else if (!app.flipGreen) app.flipGreen = true;
-            else app.normalZ = app.flipGreen = false;
-            break;
         case Action::MipDown: app.forcedMip = app.forcedMip <= 0 ? -1 : app.forcedMip - 1; break;
         case Action::MipUp: app.forcedMip = std::min(app.forcedMip + 1, std::max(app.textureMips - 1, 0)); break;
         case Action::AlphaBackground: cycleAlphaBackground(); break;
@@ -178,7 +173,6 @@ void runAction(Action a) {
         case Action::Clipping: app.showClipping = !app.showClipping; break;
 
         case Action::Grid: app.grid = !app.grid; break;
-        case Action::PixelOutline: app.pixelOutline = !app.pixelOutline; break;
         case Action::LockPixel: toggleLockPixel(); break;
         case Action::CopyValue: copyColorValue(); break;
         case Action::CopyAllFormats: copyAllColorFormats(); break;

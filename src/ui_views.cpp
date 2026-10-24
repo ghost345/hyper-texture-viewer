@@ -395,15 +395,36 @@ void viewportOverlays() {
                 dashedLine(dl, ImVec2(x0, std::round(y0 + i * sh)), ImVec2(x1, std::round(y0 + i * sh)));
             }
         }
-        // Outline around the pixel under the cursor.
-        int px, py;
-        if (app.pixelOutline && !ImGui::GetIO().WantCaptureMouse &&
-            windowToPixel(float(app.mouseX), float(app.mouseY), px, py)) {
-            const float cx = x0 + std::floor((app.mouseX - x0) / app.zoom) * app.zoom;
-            const float cy = y0 + std::floor((app.mouseY - y0) / app.zoom) * app.zoom;
-            const float z = std::max(app.zoom, 1.0f);
-            dashedRect(dl, ImVec2(std::round(cx) - line(), std::round(cy) - line()),
-                       ImVec2(std::round(cx + z) + line(), std::round(cy + z) + line()));
+        // Outline around the pixels the readout reads: the one under the cursor or the locked one, with its
+        // neighbours when Avg is 3x3 or 5x5.
+        int px = 0, py = 0;
+        bool show = app.pixelLocked;
+        float shiftX = 0, shiftY = 0;  // the copy under the cursor when tiled
+        if (app.pixelLocked) {
+            px = app.lockedX;
+            py = app.lockedY;
+        } else if (!ImGui::GetIO().WantCaptureMouse && app.mouseX >= app.vpX && app.mouseY >= app.vpY &&
+                   app.mouseX < app.vpX + app.vpW && app.mouseY < app.vpY + app.vpH &&
+                   windowToPixel(float(app.mouseX), float(app.mouseY), px, py)) {
+            show = true;
+            if (app.tiling != Tiling::Off) {
+                const float w = float(app.rotation & 1 ? app.image.height : app.image.width) * app.zoom;
+                const float h = float(app.rotation & 1 ? app.image.width : app.image.height) * app.zoom;
+                shiftX = float(std::clamp(int(std::floor((app.mouseX - app.originX) / w)), -1, 1)) * w;
+                shiftY = float(std::clamp(int(std::floor((app.mouseY - app.originY) / h)), -1, 1)) * h;
+            }
+        }
+        if (show) {
+            const int half = app.averageSize / 2;
+            const int bx0 = std::max(0, px - half), by0 = std::max(0, py - half);
+            const int bx1 = std::min(int(app.image.width), px + half + 1), by1 = std::min(int(app.image.height), py + half + 1);
+            float wx0, wy0, wx1, wy1;
+            imageRectToWindow(float(bx0), float(by0), float(bx1), float(by1), wx0, wy0, wx1, wy1);
+            wx0 = std::round(wx0 + shiftX);
+            wy0 = std::round(wy0 + shiftY);
+            wx1 = std::max(std::round(wx1 + shiftX), wx0 + 1);
+            wy1 = std::max(std::round(wy1 + shiftY), wy0 + 1);
+            dashedRect(dl, ImVec2(wx0 - line(), wy0 - line()), ImVec2(wx1 + line(), wy1 + line()));
         }
     }
     dl->PopClipRect();
@@ -441,6 +462,36 @@ void notices() {
         if (smallButton(dl, "dismiss", Icon::Dismiss, ImVec2(x, std::round(cy - S(10))), 20, 12, "Dismiss", nullptr))
             app.toastUntilMs = 0;
         ImGui::End();
+    }
+    // A normal map that left Z out: blue has to be rebuilt where it is used, so the colours here are not
+    // what the engine shades with.
+    if (!app.normalHint.empty() && !app.normalHintDismissed && app.hasImage && !isLoadingVisible()) {
+        const char* title = "Normal map without Z?";
+        const std::string& detail = app.normalHint;
+        const float w = line() + S(10) + S(14) + S(8) + textSize(fontRegular, 12, title).x + S(8) +
+                        textSize(fontRegular, 12, detail.c_str()).x + S(8) + S(20) + S(6) + line();
+        const float h = S(28);
+        if (w < app.vpW - S(28)) {
+            const ImVec2 a(std::round(app.vpX + (app.vpW - w) * 0.5f), app.vpY + app.vpH - S(14) - h), b(a.x + w, a.y + h);
+            beginArea("##normalhint", a, b);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            chipFrame(dl, a, b);
+            const float cy = a.y + h * 0.5f;
+            float x = a.x + line() + S(10);
+            drawIcon(dl, Icon::Warning, ImVec2(x, std::round(cy - S(7))), S(14), t.warn);
+            x += S(14) + S(8);
+            drawText(dl, fontRegular, 12, x, cy, t.tx, title);
+            x += textSize(fontRegular, 12, title).x + S(8);
+            drawText(dl, fontRegular, 12, x, cy, t.tx3, detail.c_str());
+            requestTip(ImRect(a, ImVec2(x + textSize(fontRegular, 12, detail.c_str()).x, b.y)),
+                       "Only X and Y seem to be stored. Z is rebuilt where the map is used, as sqrt(1 - x\xC2\xB2 - y\xC2\xB2), "
+                       "so the blue here is not what the engine shades with. A guess from the format, name and colours.",
+                       nullptr, true);
+            x += textSize(fontRegular, 12, detail.c_str()).x + S(8);
+            if (smallButton(dl, "dismiss", Icon::Dismiss, ImVec2(x, std::round(cy - S(10))), 20, 12, "Dismiss", nullptr))
+                app.normalHintDismissed = true;
+            ImGui::End();
+        }
     }
     // Clean mode: a short hint how to bring the panels back.
     if (!app.showBars && ImGui::GetTime() < cleanHintUntil) {
@@ -694,7 +745,6 @@ const std::vector<HelpGroup>& helpColumn(int c) {
            {"All channels", {}, {A::AllChannels}},
            {"Luminance", {}, {A::Luminance}},
            {"sRGB / Linear", {}, {A::SrgbLinear}},
-           {"Normal map mode", {}, {A::NormalMode}},
            {"Mip level \xE2\x88\x92 / +", {}, {A::MipDown, A::MipUp}},
            {"Alpha background", {}, {A::AlphaBackground}},
            {"Tiling", {}, {A::Tiling}}}},
@@ -706,7 +756,6 @@ const std::vector<HelpGroup>& helpColumn(int c) {
            {"Show clipping", {}, {A::Clipping}}}}},
         {{"Analysis",
           {{"Pixel grid", {}, {A::Grid}},
-           {"Pixel outline", {}, {A::PixelOutline}},
            {"Lock pixel", {"Ctrl+Click"}, {A::LockPixel}},
            {"Copy pixel value", {}, {A::CopyValue}},
            {"Color match", {}, {A::ColorMatch}},

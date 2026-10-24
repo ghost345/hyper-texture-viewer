@@ -45,7 +45,6 @@ const ActionInfo kActions[int(Action::Count)] = {
     {"alpha", "Show alpha channel", {key('A')}},
     {"luminance", "Show luminance", {key('Y')}},
     {"srgb_linear", "sRGB / Linear", {key('L', S)}},
-    {"normal_mode", "Normal map mode", {key('N')}},
     {"mip_down", "Mip level down", {key(VK_OEM_4)}},
     {"mip_up", "Mip level up", {key(VK_OEM_6)}},
     {"alpha_background", "Alpha background", {key('A', S)}},
@@ -58,7 +57,6 @@ const ActionInfo kActions[int(Action::Count)] = {
     {"clipping", "Show clipping", {key('Z')}},
 
     {"grid", "Pixel grid", {key('G', C)}},
-    {"pixel_outline", "Pixel outline", {key('P')}},
     {"lock_pixel", "Lock pixel under the cursor", {}},
     {"copy_value", "Copy pixel value", {key('C', C)}},
     {"copy_all_formats", "Copy pixel value in all formats", {key('C', C | S)}},

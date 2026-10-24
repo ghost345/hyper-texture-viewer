@@ -484,16 +484,6 @@ void colorMatchPanel() {
         if (r.button("next region", Icon::Next, nullptr, kBordered | off, "Next region",
                      keyText(Action::MatchNextRegion), 14, 22, 3))
             stepMatchRegion(+1);
-        r.gap = 0;
-        const char* copyLabel = "Copy";
-        const float bw = line() + S(8) + textSize(fontRegular, 12, copyLabel).x + S(8) + line();
-        r.x = x1 - bw;
-        const ImGuiID copyId = ImGui::GetID("copy count");
-        if (r.button("copy count", Icon::Count, copyLabel, kBordered | (ready ? 0 : kDisabled),
-                     copiedRecently(copyId) ? "Copied" : "Copy the number of matching pixels", nullptr, 16, 22, 8)) {
-            ImGui::SetClipboardText(std::to_string(m.pixels).c_str());
-            flashCopied(copyId);
-        }
     }
     y += rowH + S(10);
     ImGui::SetCursorScreenPos(p);

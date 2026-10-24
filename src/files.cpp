@@ -572,6 +572,8 @@ void finishLoad(LoadedFile* raw) {
     app.shownPath = f->path;
     app.fileSize = f->fileSize;
     app.error.clear();
+    app.normalHint = htv::missingNormalZ(app.image, f->clipboard ? std::string() : narrow(f->path.filename().wstring()));
+    if (f->mode != OpenMode::Reload) app.normalHintDismissed = false;
     if (f->mode != OpenMode::Reload) app.dataIsLinear = isFloatFormat(htv::formatInfo(app.image.format));
     if (app.forcedMip >= app.textureMips) app.forcedMip = -1;
     if (app.pixelLocked) {
@@ -673,11 +675,26 @@ void showFrame(int index) {
     requestRedraw();
 }
 
+// How long a frame stays, as browsers play it: GIFs saved with 0 or 10 ms mean "as fast as possible",
+// which every browser shows as 100 ms, and the animations are made to look right there.
+static double frameDelayMs(int index) {
+    const int delay = app.image.frames[size_t(index)].delayMs;
+    return delay <= 10 ? 100.0 : double(delay);
+}
+
 void advanceFrame() {
     if (!isAnimation() || !app.framePlaying) return;
-    const int delay = std::max(app.image.frames[size_t(app.frameIndex)].delayMs, 20);  // 0 ms frames would spin
-    if (nowMs() - app.frameShownMs + 1.0 < double(delay)) return;
-    showFrame(app.frameIndex + 1);
+    // Frames follow a clock of their own: each one is due a delay after the previous one was due, not after
+    // it went up, so the timer's coarse ticks don't add up into a slower animation.
+    double due = app.frameShownMs + frameDelayMs(app.frameIndex);
+    const double now = nowMs();
+    if (now + 1.0 < due) return;
+    int next = app.frameIndex + 1;
+    const int n = int(app.image.frames.size());
+    while (now >= due + frameDelayMs(next % n) && next - app.frameIndex < n) due += frameDelayMs(next++ % n);  // skip what was missed
+    if (now - due > 1000.0) due = now;  // after a stall, start over instead of racing to catch up
+    showFrame(next);
+    app.frameShownMs = due;
 }
 
 void openStartupFile(const fs::path& path) { requestOpen(path, OpenMode::New); }

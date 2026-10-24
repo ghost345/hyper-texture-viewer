@@ -13,11 +13,11 @@ enum class Action : int {
     // View
     Fit, ActualSize, Zoom200, Zoom400, Zoom800, ZoomIn, ZoomOut, RotateLeft, RotateRight, FlipH, FlipV, HidePanels,
     // Channels and modes
-    AllChannels, Red, Green, Blue, Alpha, Luminance, SrgbLinear, NormalMode, MipDown, MipUp, AlphaBackground, Tiling,
+    AllChannels, Red, Green, Blue, Alpha, Luminance, SrgbLinear, MipDown, MipUp, AlphaBackground, Tiling,
     // HDR
     ExposureDown, ExposureUp, ResetExposure, AutoRange, Clipping,
     // Analysis
-    Grid, PixelOutline, LockPixel, CopyValue, CopyAllFormats, ColorMatch, MatchPrevRegion, MatchNextRegion, Histogram, Info, Layers, Compare,
+    Grid, LockPixel, CopyValue, CopyAllFormats, ColorMatch, MatchPrevRegion, MatchNextRegion, Histogram, Info, Layers, Compare,
     // Window
     AlwaysOnTop, ClickThrough, Settings, Help, Quit,
     Count
