@@ -121,7 +121,7 @@ struct Row {
     // `widest` is the longest value the dropdown can show: its width does not change with the value.
     bool dropdown(const char* id, const char* value, ImFont* f, float fontSize, float height, float padL, float padR,
                   const char* tip, const char* key, ImRect* outRect = nullptr, bool disabled = false,
-                  const char* widest = nullptr);
+                  const char* widest = nullptr, float minWidth = 0);  // minWidth in physical pixels
     void separator(float height, float margin, ImU32 color = 0);
     void text(const char* t, ImFont* f, float size, ImU32 col, float marginL = 0, float marginR = 0);
     // Text with a tooltip that takes at least the width of `widest`, so changing values keep the row still.
@@ -187,6 +187,10 @@ void viewportOverlays();  // grid, tile borders, pixel outline, and the empty, e
 void notices();           // "Reloaded", the clean-mode hint
 void infoPanel();
 void histogramPanel();  // ui_panels.cpp
+void colorMatchPanel();
+// M: opens Color match on the locked pixel or the one under the cursor (else waits for a click), or closes it.
+void toggleColorMatch();
+void stepMatchRegion(int delta);
 void settingsPanel();   // ui_settings.cpp
 // While Settings waits for a new key, takes the key press. False when it is not waiting.
 bool settingsKeyDown(KeyBinding k);

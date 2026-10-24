@@ -62,6 +62,18 @@ private:
 // per-channel data, which costs about as much again.
 ImageStats computeStats(const Image& image, bool channels = false);
 
+// Areas of a mask, for Color match: 4-connected regions of non-zero bytes.
+struct MaskRegion {
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // bounding box, x1 and y1 exclusive
+    uint64_t pixels = 0;
+};
+struct MaskRegions {
+    uint64_t pixels = 0;   // non-zero bytes
+    uint64_t regions = 0;  // all of them, even past `boxes`
+    std::vector<MaskRegion> boxes;  // in reading order of each region's first pixel
+};
+MaskRegions findRegions(const uint8_t* mask, int width, int height, size_t pitch, size_t maxBoxes = 100000);
+
 // Whether any pixel is not fully opaque. Block-compressed formats answer from the format alone.
 bool hasTranslucentPixels(const Image& image);
 

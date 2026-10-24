@@ -63,6 +63,8 @@ const ActionInfo kActions[int(Action::Count)] = {
     {"copy_value", "Copy pixel value", {key('C', C)}},
     {"copy_all_formats", "Copy pixel value in all formats", {key('C', C | S)}},
     {"color_match", "Color match", {key('M')}},
+    {"match_prev_region", "Color match: previous region", {key(VK_OEM_COMMA)}},
+    {"match_next_region", "Color match: next region", {key(VK_OEM_PERIOD)}},
     {"histogram", "Histogram", {key('H', C)}},
     {"info", "Info", {key('I')}},
     {"layers", "Layers", {key('L')}},

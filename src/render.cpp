@@ -46,8 +46,14 @@ cbuffer View : register(b0) {
     float4 checker1;       // alpha background: checker colours (equal for a solid colour)
     float4 checker2;
     float4 background;     // viewport outside the image
+    float4 matchTarget;    // Color match, in the space psMatch compares in
+    uint matchMode;        // 0 RGB, 1 RGBA, 2 R, 3 G, 4 B, 5 A, 6 luminance, 7 hue, 8 saturation
+    float matchTolerance;
+    uint matchSrgb;        // compare sRGB-encoded values: the GPU decoded the texture to linear
+    uint matchOutline;     // outline the pixels set in `mask`
 };
 Texture2D<float4> tex : register(t0);
+Texture2D<float> mask : register(t1);
 SamplerState trilinear : register(s0);
 
 float4 vsMain(uint id : SV_VertexID) : SV_Position {
@@ -85,18 +91,41 @@ float3 agx(float3 v) {
     return pow(saturate(v), 2.2);
 }
 
-float4 psMain(float4 pos : SV_Position) : SV_Target {
+// Position in the source image under a target pixel, through tiling, flips and rotation. False outside the image.
+bool imagePos(float2 pos, out float2 ip) {
     float2 shownSize = (rotation & 1) ? imageSize.yx : imageSize;
-    float2 d = (pos.xy - imageOrigin) / zoom;
-    if (d.x < 0 || d.y < 0 || d.x >= shownSize.x * tiles || d.y >= shownSize.y * tiles) return background;
+    float2 d = (pos - imageOrigin) / zoom;
+    ip = float2(0, 0);
+    if (d.x < 0 || d.y < 0 || d.x >= shownSize.x * tiles || d.y >= shownSize.y * tiles) return false;
     d = fmod(d, shownSize);
     if (flips & 1) d.x = shownSize.x - d.x;
     if (flips & 2) d.y = shownSize.y - d.y;
-    float2 ip = d;
+    ip = d;
     if (rotation == 1) ip = float2(d.y, shownSize.x - d.x);
     else if (rotation == 2) ip = imageSize - d;
     else if (rotation == 3) ip = float2(shownSize.y - d.y, d.x);
+    return true;
+}
+
+// Whether the Color match mask is set under a target pixel.
+bool matchedAt(float2 pos) {
+    float2 ip;
+    if (!imagePos(pos, ip)) return false;
+    return mask.Load(int3(clamp(floor(ip), 0, imageSize - 1), 0)) > 0.5;
+}
+
+float4 psMain(float4 pos : SV_Position) : SV_Target {
+    float2 ip;
+    if (!imagePos(pos.xy, ip)) return background;
     int2 texel = int2(clamp(floor(ip), 0, imageSize - 1));
+
+    // Color match: a dashed line, black on white, along the inside edge of the matching areas.
+    if (matchOutline && matchedAt(pos.xy) &&
+        (!matchedAt(pos.xy + float2(1, 0)) || !matchedAt(pos.xy - float2(1, 0)) ||
+         !matchedAt(pos.xy + float2(0, 1)) || !matchedAt(pos.xy - float2(0, 1)))) {
+        int dash = int(floor((pos.x + pos.y) / max(zebraWidth, 1.0)));
+        return (dash & 1) ? float4(1, 1, 1, 1) : float4(0, 0, 0, 1);
+    }
 
     float4 c;
     if (forcedMip >= 0) {
@@ -152,6 +181,39 @@ float4 psMain(float4 pos : SV_Position) : SV_Target {
     return float4(lerp(under, rgb, saturate(a)), 1);
 }
 
+// Hue (a fraction of the circle) and saturation as in HSV.
+float2 hueSaturation(float3 c) {
+    float mx = max(max(c.r, c.g), c.b), mn = min(min(c.r, c.g), c.b), d = mx - mn;
+    float hue = 0;
+    if (d > 0) {
+        if (mx == c.r) hue = (c.g - c.b) / d;
+        else if (mx == c.g) hue = 2 + (c.b - c.r) / d;
+        else hue = 4 + (c.r - c.g) / d;
+        hue = frac(hue / 6 + 1);
+    }
+    return float2(hue, mx > 0 ? d / mx : 0);
+}
+
+// Color match mask: 1 where a texel is within the tolerance of the target.
+float4 psMatch(float4 pos : SV_Position) : SV_Target {
+    float4 c = tex.Load(int3(int2(pos.xy), 0));
+    if (matchSrgb) c.rgb = srgbEncode(c.rgb);
+    if (channels == 1) c = float4(c.rrr, 1);
+    else if (channels == 2) c = float4(c.rg, 0, 1);
+    float4 t = matchTarget;
+    float d;
+    if (matchMode == 0) d = max(max(abs(c.r - t.r), abs(c.g - t.g)), abs(c.b - t.b));
+    else if (matchMode == 1) d = max(max(abs(c.r - t.r), abs(c.g - t.g)), max(abs(c.b - t.b), abs(c.a - t.a)));
+    else if (matchMode <= 5) d = abs(dot(c - t, float4(matchMode == 2, matchMode == 3, matchMode == 4, matchMode == 5)));
+    else if (matchMode == 6) d = abs(dot(c.rgb - t.rgb, float3(0.2126, 0.7152, 0.0722)));
+    else {
+        float2 hc = hueSaturation(c.rgb), ht = hueSaturation(t.rgb);
+        float dh = abs(hc.x - ht.x);
+        d = matchMode == 7 ? min(dh, 1 - dh) : abs(hc.y - ht.y);
+    }
+    return d <= matchTolerance ? 1 : 0;
+}
+
 // Pixel readout for formats the CPU cannot decode: texels from imageOrigin on, as sampled.
 float4 psRead(float4 pos : SV_Position) : SV_Target {
     int2 p = clamp(int2(imageOrigin) + int2(pos.xy), 0, int2(imageSize) - 1);
@@ -185,6 +247,11 @@ struct ViewConstants {
     float checker1[4];
     float checker2[4];
     float background[4];
+    float matchTarget[4];
+    uint32_t matchMode;
+    float matchTolerance;
+    uint32_t matchSrgb;
+    uint32_t matchOutline;
 };
 static_assert(sizeof(ViewConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
@@ -241,17 +308,23 @@ ViewConstants makeConstants(float originX, float originY, float zoom, float tile
     }
     for (int i = 0; i < 3; ++i) c.background[i] = colors.viewport[i];
     c.checker1[3] = c.checker2[3] = c.background[3] = 1.0f;
+    c.matchOutline = app.colorMatch && app.matchValid && app.matchMask ? 1u : 0u;
     return c;
 }
 
-void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const ViewConstants& c, ID3D11PixelShader* ps) {
+// `mask` is the Color match mask the outline reads, or none.
+void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const ViewConstants& c, ID3D11PixelShader* ps,
+               ID3D11ShaderResourceView* mask = nullptr) {
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(app.context->Map(app.constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
     *static_cast<ViewConstants*>(m.pData) = c;
     app.context->Unmap(app.constants.get(), 0);
     ID3D11Buffer* cb = app.constants.get();
-    ID3D11ShaderResourceView* srv = app.srv.get();
+    ID3D11ShaderResourceView* srvs[2] = {app.srv.get(), mask};
     ID3D11SamplerState* sampler = app.trilinear.get();
+    // Unbind the mask first: it may be the target of this draw.
+    ID3D11ShaderResourceView* none = nullptr;
+    app.context->PSSetShaderResources(1, 1, &none);
     app.context->OMSetRenderTargets(1, &target, nullptr);
     app.context->RSSetViewports(1, &vp);
     app.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -259,7 +332,7 @@ void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const V
     app.context->VSSetShader(app.vs.get(), nullptr, 0);
     app.context->PSSetShader(ps, nullptr, 0);
     app.context->PSSetConstantBuffers(0, 1, &cb);
-    app.context->PSSetShaderResources(0, 1, &srv);
+    app.context->PSSetShaderResources(0, 2, srvs);
     app.context->PSSetSamplers(0, 1, &sampler);
     app.context->Draw(3, 0);
 }
@@ -412,13 +485,14 @@ bool createPipeline(std::string& error) {
         error = "d3dcompiler_47.dll not found";
         return false;
     }
-    Com<ID3DBlob> vsBlob, psBlob, readBlob, log;
+    Com<ID3DBlob> vsBlob, psBlob, readBlob, matchBlob, log;
     const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS;
     auto build = [&](const char* entry, const char* target, Com<ID3DBlob>& out) {
         return SUCCEEDED(compile(kShader, sizeof(kShader) - 1, "view.hlsl", nullptr, nullptr, entry, target, flags, 0,
                                  out.put(), log.put()));
     };
-    if (!build("vsMain", "vs_4_0", vsBlob) || !build("psMain", "ps_4_0", psBlob) || !build("psRead", "ps_4_0", readBlob)) {
+    if (!build("vsMain", "vs_4_0", vsBlob) || !build("psMain", "ps_4_0", psBlob) || !build("psRead", "ps_4_0", readBlob) ||
+        !build("psMatch", "ps_4_0", matchBlob)) {
         error = log ? std::string(static_cast<const char*>(log->GetBufferPointer()), log->GetBufferSize())
                     : "shader compilation failed";
         return false;
@@ -428,7 +502,9 @@ bool createPipeline(std::string& error) {
         FAILED(app.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr,
                                              app.ps.put())) ||
         FAILED(app.device->CreatePixelShader(readBlob->GetBufferPointer(), readBlob->GetBufferSize(), nullptr,
-                                             app.psRead.put()))) {
+                                             app.psRead.put())) ||
+        FAILED(app.device->CreatePixelShader(matchBlob->GetBufferPointer(), matchBlob->GetBufferSize(), nullptr,
+                                             app.psMatch.put()))) {
         error = "cannot create shaders";
         return false;
     }
@@ -530,6 +606,7 @@ void render() {
     if (inRender) return;
     inRender = true;
 
+    updateColorMatch();
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -546,7 +623,7 @@ void render() {
                                               std::round(kCheckerSizes[app.checkerSize] * app.scale), colors);
         // SV_Position is in window pixels whatever the viewport; the viewport only clips to the image area.
         D3D11_VIEWPORT vp{app.vpX, app.vpY, app.vpW, app.vpH, 0, 1};
-        drawImage(app.rtv.get(), vp, c, app.ps.get());
+        drawImage(app.rtv.get(), vp, c, app.ps.get(), c.matchOutline ? app.matchMask.get() : nullptr);
     }
     ID3D11RenderTargetView* rtv = app.rtv.get();
     app.context->OMSetRenderTargets(1, &rtv, nullptr);
@@ -573,6 +650,7 @@ std::vector<uint8_t> renderThumbnail(int size) {
     const float zoom = float(size) / std::min(w, h);
     ViewConstants c = makeConstants((size - w * zoom) * 0.5f, (size - h * zoom) * 0.5f, zoom, 1.0f, 4.0f, uiColors());
     c.clipping = 0;
+    c.matchOutline = 0;
     c.forcedMip = -1;
     D3D11_VIEWPORT vp{0, 0, float(size), float(size), 0, 1};
     drawImage(rb.rtv.get(), vp, c, app.ps.get());
@@ -630,6 +708,97 @@ bool scanImageGpu(const std::function<void(const float* rgba, int width)>& row) 
             return false;
     }
     return true;
+}
+
+namespace {
+
+// As the shader's srgbEncode.
+float srgbEncode(float c) {
+    c = std::clamp(c, 0.0f, 1.0f);
+    return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+}  // namespace
+
+bool setMatchTarget(int x, int y) {
+    float c[4];
+    if (!readPixelsGpu(x, y, 1, c)) return false;
+    if (isSrgbFormat(app.image.format))
+        for (int i = 0; i < 3; ++i) c[i] = srgbEncode(c[i]);
+    const int channels = htv::formatInfo(app.image.format).channels;
+    if (channels == 1) c[1] = c[2] = c[0], c[3] = 1.0f;
+    else if (channels == 2) c[2] = 0.0f, c[3] = 1.0f;
+    std::copy(c, c + 4, app.matchTarget);
+    app.matchHasTarget = true;
+    app.matchValid = false;
+    return true;
+}
+
+void updateColorMatch() {
+    // What the current mask was made from.
+    static int generation = -1, mode = -1, tolerance = -1;
+    static float target[4];
+    if (!app.colorMatch || !app.matchHasTarget || !app.hasImage || !app.srv || !app.psMatch) {
+        app.matchValid = false;
+        generation = -1;
+        return;
+    }
+    if (generation == app.imageGeneration && mode == app.matchMode && tolerance == app.matchTolerance &&
+        std::equal(target, target + 4, app.matchTarget) && app.matchValid)
+        return;
+    if (generation != app.imageGeneration) app.matchRegion = -1;
+    generation = app.imageGeneration;
+    mode = app.matchMode;
+    tolerance = app.matchTolerance;
+    std::copy(app.matchTarget, app.matchTarget + 4, target);
+    app.matchValid = false;
+
+    // One byte per pixel: rendered on the GPU, read back for the count and the regions.
+    static Com<ID3D11Texture2D> texture, staging;
+    static Com<ID3D11RenderTargetView> rtv;
+    static int width = 0, height = 0;
+    const int w = int(app.image.width), h = int(app.image.height);
+    if (w != width || h != height || !rtv) {
+        width = height = 0;
+        app.matchMask.reset();
+        rtv.reset();
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = UINT(w);
+        d.Height = UINT(h);
+        d.MipLevels = d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(app.device->CreateTexture2D(&d, nullptr, texture.put())) ||
+            FAILED(app.device->CreateRenderTargetView(texture.get(), nullptr, rtv.put())) ||
+            FAILED(app.device->CreateShaderResourceView(texture.get(), nullptr, app.matchMask.put())))
+            return;
+        d.Usage = D3D11_USAGE_STAGING;
+        d.BindFlags = 0;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(app.device->CreateTexture2D(&d, nullptr, staging.put()))) return;
+        width = w;
+        height = h;
+    }
+    ViewConstants c{};
+    c.imageSize[0] = float(w);
+    c.imageSize[1] = float(h);
+    c.channels = uint32_t(htv::formatInfo(app.image.format).channels);
+    std::copy(app.matchTarget, app.matchTarget + 4, c.matchTarget);
+    c.matchMode = uint32_t(app.matchMode);
+    // Half a step more, so values that went through decoding and encoding still meet at ± 0.
+    c.matchTolerance = (float(app.matchTolerance) + 0.5f) / 255.0f;
+    c.matchSrgb = isSrgbFormat(app.image.format) ? 1u : 0u;
+    D3D11_VIEWPORT vp{0, 0, float(w), float(h), 0, 1};
+    drawImage(rtv.get(), vp, c, app.psMatch.get());
+    app.context->CopyResource(staging.get(), texture.get());
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(app.context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &m))) return;
+    app.matchRegions = htv::findRegions(static_cast<const uint8_t*>(m.pData), w, h, m.RowPitch);
+    app.context->Unmap(staging.get(), 0);
+    if (app.matchRegion >= int(app.matchRegions.boxes.size())) app.matchRegion = -1;
+    app.matchValid = true;
 }
 
 Com<ID3D11ShaderResourceView> createTexture(const uint8_t* rgba, int width, int height) {

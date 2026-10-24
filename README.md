@@ -13,6 +13,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Alpha over a checkerboard (three sizes), black, grey, white or a custom colour.
 - Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid and outline.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
+- Color match (`M`): dashed outline around every pixel within ± N of a target colour, compared by whole colour, one channel, luminance, hue or saturation; pixel count, share of the image and regions, with `,` / `.` to step the view through the regions. Alt+click or the eyedropper picks the target.
 - Settings (Ctrl+,): theme (dark, light or as Windows), interface scale, viewport colour, checker size, what stays when switching files, folder order, automatic reload, single instance, portable mode, and every key reassignable (the F1 screen shows the current keys).
 - Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top and window opacity, borderless window that hides its bars with Tab.
 - Files load in the background with progress; images you leave stay decoded in a cache (size in Settings) and the folder's neighbours are decoded ahead, so Previous/Next is instant; the open file reloads when it changes on disk, a broken file shows what went wrong without stopping browsing. Recent files with thumbnails, paste from the clipboard.

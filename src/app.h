@@ -72,6 +72,7 @@ struct App {
     Com<ID3D11VertexShader> vs;
     Com<ID3D11PixelShader> ps;
     Com<ID3D11PixelShader> psRead;  // copies texels into a float target for the pixel readout
+    Com<ID3D11PixelShader> psMatch;  // Color match mask
     Com<ID3D11Buffer> constants;
     Com<ID3D11SamplerState> trilinear;
     Com<ID3D11ShaderResourceView> srv;
@@ -149,6 +150,18 @@ struct App {
     ColorFormat colorFormat = ColorFormat::Html;
     int averageSize = 1;  // 1, 3 or 5
 
+    // Color match (M): outlines the pixels within a tolerance of a target colour.
+    bool colorMatch = false;
+    bool matchPicking = false;    // the next click on the image sets the target
+    bool matchHasTarget = false;
+    float matchTarget[4] = {};    // as psMatch compares: sRGB formats re-encoded, one- and two-channel data expanded
+    int matchMode = 0;            // whole colour (RGB), RGBA, R, G, B, A, luminance, hue, saturation
+    int matchTolerance = 2;       // in 8-bit steps: values within N/255 match
+    bool matchValid = false;      // matchMask and matchRegions are up to date
+    Com<ID3D11ShaderResourceView> matchMask;
+    htv::MaskRegions matchRegions;
+    int matchRegion = -1;         // the region the view went to last
+
     bool showInfo = false;
     bool showHelp = false;
     bool showHistogram = false;
@@ -224,6 +237,8 @@ void imageSizeOnScreen(float& w, float& h);  // after rotation, in image pixels;
 void shownArea(float& x0, float& y0, float& x1, float& y1);
 // Image pixel under a window position, honouring rotation, flips and tiling. False outside the image.
 bool windowToPixel(float wx, float wy, int& x, int& y);
+// The window rectangle an image rectangle (in image pixels, x1 and y1 exclusive) covers on the original copy.
+void imageRectToWindow(float x0, float y0, float x1, float y1, float& wx0, float& wy0, float& wx1, float& wy1);
 
 bool isFloatFormat(const htv::FormatInfo& info);  // linear-light values (half/float, BC6H, sRGB-decoded excluded)
 bool isSrgbFormat(htv::GpuFormat format);         // the GPU decodes sRGB when sampling
@@ -231,6 +246,10 @@ bool isHighPrecision(const htv::Image& image);     // float or 16-bit: shows the
 // Reads an n x n block of mip 0 around (x, y) through the GPU, for formats the CPU cannot decode.
 // Values are as the shader samples them (sRGB formats decoded to linear). False when unavailable.
 bool readPixelsGpu(int x, int y, int n, float* rgba);
+// Color match: the target becomes the pixel at (x, y); the mask and its regions follow on the next frame.
+bool setMatchTarget(int x, int y);
+void updateColorMatch();  // rebuilds the mask when the image, target, mode or tolerance changed
+void showMatchRegion(int index);  // centres the view on a region, zooming out when it does not fit
 double nowMs();
 
 }  // namespace htv

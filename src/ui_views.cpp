@@ -709,6 +709,7 @@ const std::vector<HelpGroup>& helpColumn(int c) {
            {"Lock pixel", {"Ctrl+Click"}, {A::LockPixel}},
            {"Copy pixel value", {}, {A::CopyValue}},
            {"Color match", {}, {A::ColorMatch}},
+           {"Previous / next match region", {}, {A::MatchPrevRegion, A::MatchNextRegion}},
            {"Histogram / Info / Layers", {}, {A::Histogram, A::Info, A::Layers}},
            {"Compare", {}, {A::Compare}}}},
          {"Window",

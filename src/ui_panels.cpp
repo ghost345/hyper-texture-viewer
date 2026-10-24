@@ -1,4 +1,4 @@
-// Analysis panels over the image: Histogram.
+// Analysis panels over the image: Histogram and Color match.
 
 #include "ui_internal.h"
 
@@ -265,6 +265,237 @@ void histogramPanel() {
         y += rowH * 4 - S(2);
     }
     y += S(10);
+    ImGui::SetCursorScreenPos(p);
+    ImGui::Dummy(ImVec2(width, y - p.y));
+    ImGui::End();
+}
+
+// ---- Color match ----
+
+void toggleColorMatch() {
+    if (app.colorMatch || app.matchPicking) {
+        app.colorMatch = app.matchPicking = false;
+        return;
+    }
+    if (!app.hasImage) return;
+    app.colorMatch = true;
+    // The target: the locked pixel, the pixel under the cursor, or the next click on the image.
+    int x = app.lockedX, y = app.lockedY;
+    if (app.pixelLocked ? setMatchTarget(x, y)
+                        : windowToPixel(float(app.mouseX), float(app.mouseY), x, y) && setMatchTarget(x, y))
+        return;
+    if (!app.matchHasTarget) app.matchPicking = true;
+}
+
+void stepMatchRegion(int delta) {
+    if (!app.colorMatch || !app.matchValid || app.matchRegions.boxes.empty()) return;
+    const int n = int(app.matchRegions.boxes.size());
+    const int i = app.matchRegion < 0 ? (delta > 0 ? 0 : n - 1) : (app.matchRegion + delta + n) % n;
+    showMatchRegion(i);
+}
+
+namespace {
+
+// "123 930": thousands apart, as the design writes counts.
+std::string groupDigits(uint64_t v) {
+    std::string d = std::to_string(v), out;
+    for (size_t i = 0; i < d.size(); ++i) {
+        if (i && (d.size() - i) % 3 == 0) out += ' ';
+        out += d[i];
+    }
+    return out;
+}
+
+const char* kMatchModes[] = {"Whole color (RGB)", "Whole color (RGBA)", "Red", "Green", "Blue", "Alpha",
+                             "Luminance", "Hue", "Saturation"};
+
+}  // namespace
+
+void colorMatchPanel() {
+    if (!app.colorMatch || !app.hasImage) return;
+    const Theme& t = T();
+    const float width = S(300);
+    // Top right; under Info when that is open in its place.
+    if (!beginPanel("##colormatch", ImVec2(app.vpX + app.vpW - width - S(16), app.vpY + S(16)), width)) {
+        ImGui::End();
+        return;
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetWindowPos();
+    const float hh = S(26);
+    panelHeader(dl, p, width, hh, "Color match", 12, 9);
+    if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(3) - S(20), std::round(p.y + (hh - line() - S(20)) * 0.5f)),
+                    20, 14, "Close", keyText(Action::ColorMatch)))
+        app.colorMatch = app.matchPicking = false;
+
+    const float x0 = p.x + S(10), x1 = p.x + width - S(10), controlX = x0 + S(86);
+    const float rowH = S(22), gap = S(8);
+    float y = p.y + hh + S(10);
+    Row r;
+    r.dl = dl;
+    auto label = [&](const char* text, float cy, const char* tip) {
+        drawText(dl, fontRegular, 12, x0, cy, t.tx2, text);
+        if (tip) {
+            ImGui::PushID(text);
+            tipArea("label", ImRect(ImVec2(x0, cy - rowH * 0.5f), ImVec2(controlX - S(8), cy + rowH * 0.5f)), tip);
+            ImGui::PopID();
+        }
+    };
+    const bool eightBit = !isHighPrecision(app.image);
+
+    // Target: swatch, value and the eyedropper.
+    float cy = y + rowH * 0.5f;
+    label("Target", cy, "The colour pixels are compared with");
+    {
+        const float* c = app.matchTarget;
+        const bool srgb = isSrgbFormat(app.image.format);
+        // The swatch shows the target as the viewer shows it: sRGB values as they are, linear data encoded.
+        auto shown = [&](float v) {
+            v = std::clamp(v, 0.0f, 1.0f);
+            if (app.dataIsLinear && !srgb) v = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+            return int(v * 255.0f + 0.5f);
+        };
+        const ImVec2 sa(controlX, std::round(cy - S(11))), sb(sa.x + S(22), sa.y + S(22));
+        if (app.matchHasTarget) dl->AddRectFilled(sa, sb, IM_COL32(shown(c[0]), shown(c[1]), shown(c[2]), 255));
+        else dashedBox(dl, sa, sb, t.bd2);
+        dl->AddRect(sa, sb, t.bd2, 0, 0, line());
+        char text[64] = "none";
+        if (app.matchHasTarget) {
+            auto byte = [](float v) { return int(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            const bool alpha = app.matchMode == 1 || app.matchMode == 5;
+            if (eightBit && alpha)
+                std::snprintf(text, sizeof text, "#%02X%02X%02X%02X", byte(c[0]), byte(c[1]), byte(c[2]), byte(c[3]));
+            else if (eightBit)
+                std::snprintf(text, sizeof text, "#%02X%02X%02X", byte(c[0]), byte(c[1]), byte(c[2]));
+            else
+                std::snprintf(text, sizeof text, "%.4g %.4g %.4g", double(c[0]), double(c[1]), double(c[2]));
+        }
+        const float tx = sb.x + S(8);
+        drawText(dl, fontMono, 12, tx, cy, app.matchHasTarget ? t.tx : t.tx3,
+                 ellipsize(fontMono, 12, text, x1 - S(22) - S(8) - tx).c_str());
+        tipArea("target", ImRect(sa, ImVec2(x1 - S(22) - S(8), sb.y)),
+                app.matchHasTarget ? "Target colour, as stored in the file" : "Pick a pixel on the image");
+        r.x = x1 - S(22);
+        r.cy = cy;
+        if (r.button("pick", Icon::ColorMatch, nullptr, kBordered | (app.matchPicking ? kOn : 0),
+                     app.matchPicking ? "Click a pixel on the image (Esc cancels)" : "Pick the target from the image",
+                     "Alt+Click", 14, 22, 3))
+            app.matchPicking = !app.matchPicking;
+    }
+    y += rowH + gap;
+
+    // Compare by.
+    cy = y + rowH * 0.5f;
+    label("Compare by", cy, "Which part of the colour has to match");
+    {
+        r.x = controlX;
+        r.cy = cy;
+        ImRect dr;
+        toggleMenuOnPress(r.dropdown("mode", kMatchModes[app.matchMode], fontRegular, 12, 22, 8, 4,
+                                     "Which part of the colour has to match", nullptr, &dr, false, "Whole color (RGBA)",
+                                     x1 - controlX),
+                          "mode menu");
+        if (beginMenu("mode menu", ImVec2(dr.Min.x, dr.Max.y + S(4)), ImVec2(0, 0), dr.GetWidth())) {
+            const int channels = htv::formatInfo(app.image.format).channels;
+            for (int i = 0; i < 9; ++i) {
+                // Only what the format stores: no alpha modes without alpha, no colour modes for grey.
+                const bool usable = !((i == 1 || i == 5) && channels < 4) && !(channels == 1 && (i == 3 || i == 4 || i >= 7)) &&
+                                    !(channels == 2 && i == 4);
+                if (menuItem({kMatchModes[i], nullptr, app.matchMode == i, usable, true})) app.matchMode = i;
+                if (i == 1 || i == 5) menuSeparator();
+            }
+            endMenu();
+        }
+    }
+    y += rowH + gap;
+
+    // Tolerance: a square-law slider, so the small values that matter most get most of its length.
+    cy = y + rowH * 0.5f;
+    label("Tolerance", cy, nullptr);
+    {
+        const char* tip = app.matchMode == 7 ? "How far the hue may differ, in 1/255 of the colour circle"
+                          : eightBit         ? "How far each value may differ, in 8-bit steps"
+                                             : "How far each value may differ, in steps of 1/255";
+        tipArea("tolerance label", ImRect(ImVec2(x0, cy - rowH * 0.5f), ImVec2(controlX - S(8), cy + rowH * 0.5f)), tip);
+        float tpos = std::sqrt(float(app.matchTolerance) / 255.0f);
+        bool reset = false;
+        if (slider(dl, "tolerance", controlX + S(4), cy, 120, tpos, 0.0f, &reset, -1.0f, std::sqrt(2.0f / 255.0f)))
+            app.matchTolerance = std::clamp(int(std::round(tpos * tpos * 255.0f)), 0, 255);
+        if (reset) app.matchTolerance = 2;
+        requestTip(ImRect(ImVec2(controlX, cy - S(8)), ImVec2(controlX + S(128), cy + S(8))), tip, nullptr, true);
+        char text[16];
+        std::snprintf(text, sizeof text, "\xC2\xB1 %d", app.matchTolerance);
+        float v = float(app.matchTolerance);
+        if (numberField(dl, "tolerance value", x1 - S(54), cy, 54, text, v, "Type a tolerance, 0\xE2\x80\x93" "255"))
+            app.matchTolerance = std::clamp(int(std::round(v)), 0, 255);
+    }
+    y += rowH + gap;
+
+    dl->AddRectFilled(ImVec2(p.x + line(), y - S(6)), ImVec2(p.x + width - line(), y - S(6) + line()), t.bd);
+    y += S(4);
+
+    // Found: the count, its share of the image and the regions.
+    const MaskRegions& m = app.matchRegions;
+    const bool ready = app.matchValid;
+    cy = y + S(12);
+    label("Found", cy, nullptr);
+    {
+        const std::string count = ready ? groupDigits(m.pixels) : app.matchHasTarget ? "\xE2\x80\xA6" : "\xE2\x80\x94";
+        drawText(dl, fontMono, 20, controlX, cy, t.tx, count.c_str());
+        const float cw = textSize(fontMono, 20, count.c_str()).x;
+        drawText(dl, fontMono, 12, controlX + cw + S(6), cy + S(3), t.tx3, "px");
+        tipArea("found", ImRect(ImVec2(x0, cy - S(12)), ImVec2(x1, cy + S(12))), "Pixels within the tolerance of the target");
+    }
+    y += S(24) + gap;
+    cy = y + S(8);
+    if (ready) {
+        const double total = double(app.image.width) * double(app.image.height);
+        char text[96];
+        const double share = total > 0 ? 100.0 * double(m.pixels) / total : 0.0;
+        char pct[16];
+        if (share > 0 && share < 0.1) std::snprintf(pct, sizeof pct, "<0.1");
+        else std::snprintf(pct, sizeof pct, "%.1f", share);
+        std::snprintf(text, sizeof text, "%s%% of image \xC2\xB7 %s region%s", pct, groupDigits(m.regions).c_str(),
+                      m.regions == 1 ? "" : "s");
+        drawText(dl, fontMono, 12, controlX, cy, t.tx2, text);
+        tipArea("share", ImRect(ImVec2(controlX, cy - S(8)), ImVec2(x1, cy + S(8))),
+                "Regions are areas of matching pixels that touch by an edge");
+    } else if (!app.matchHasTarget) {
+        drawText(dl, fontRegular, 12, controlX, cy, t.tx3, "Click a pixel to pick the target");
+    }
+    y += S(16) + gap;
+
+    // Region: step through them; the view centres on each.
+    cy = y + rowH * 0.5f;
+    label("Region", cy, nullptr);
+    {
+        const int n = ready ? int(m.boxes.size()) : 0;
+        const int off = n ? 0 : kDisabled;
+        r.x = controlX;
+        r.cy = cy;
+        r.gap = S(4);
+        if (r.button("prev region", Icon::Prev, nullptr, kBordered | off, "Previous region",
+                     keyText(Action::MatchPrevRegion), 14, 22, 3))
+            stepMatchRegion(-1);
+        char text[48];
+        if (n && app.matchRegion >= 0) std::snprintf(text, sizeof text, "%d / %d", app.matchRegion + 1, n);
+        else std::snprintf(text, sizeof text, "\xE2\x80\x93 / %d", n);
+        r.field("region index", text, fontMono, 12, n ? t.tx : t.tx3, "Region shown, of all regions", "000 / 000");
+        if (r.button("next region", Icon::Next, nullptr, kBordered | off, "Next region",
+                     keyText(Action::MatchNextRegion), 14, 22, 3))
+            stepMatchRegion(+1);
+        r.gap = 0;
+        const char* copyLabel = "Copy";
+        const float bw = line() + S(8) + textSize(fontRegular, 12, copyLabel).x + S(8) + line();
+        r.x = x1 - bw;
+        const ImGuiID copyId = ImGui::GetID("copy count");
+        if (r.button("copy count", Icon::Count, copyLabel, kBordered | (ready ? 0 : kDisabled),
+                     copiedRecently(copyId) ? "Copied" : "Copy the number of matching pixels", nullptr, 16, 22, 8)) {
+            ImGui::SetClipboardText(std::to_string(m.pixels).c_str());
+            flashCopied(copyId);
+        }
+    }
+    y += rowH + S(10);
     ImGui::SetCursorScreenPos(p);
     ImGui::Dummy(ImVec2(width, y - p.y));
     ImGui::End();

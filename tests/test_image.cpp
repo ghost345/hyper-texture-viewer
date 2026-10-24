@@ -472,6 +472,16 @@ void testStats() {
     for (uint32_t n : ch.channel[1].log) logged += n;
     CHECK(logged == 2);
 
+    // Two regions: an L shape joined through the row below, and a lone pixel; a diagonal does not join.
+    const uint8_t mask[4 * 5] = {1, 0, 1, 0, 0,
+                                 1, 0, 1, 0, 0,
+                                 1, 1, 1, 0, 0,
+                                 0, 0, 0, 1, 0};
+    const MaskRegions regions = findRegions(mask, 5, 4, 5);
+    CHECK(regions.pixels == 8 && regions.regions == 2 && regions.boxes.size() == 2);
+    CHECK(regions.boxes[0].x0 == 0 && regions.boxes[0].x1 == 3 && regions.boxes[0].y1 == 3 && regions.boxes[0].pixels == 7);
+    CHECK(regions.boxes[1].x0 == 3 && regions.boxes[1].y0 == 3 && regions.boxes[1].pixels == 1);
+
     Image bc;
     bc.width = bc.height = 4;
     bc.format = GpuFormat::BC7;

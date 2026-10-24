@@ -115,6 +115,66 @@ ImageStats computeStats(const Image& image, bool channels) {
     return acc.finish();
 }
 
+MaskRegions findRegions(const uint8_t* mask, int width, int height, size_t pitch, size_t maxBoxes) {
+    // Runs of set bytes per row, joined to the runs they touch in the row above (union-find over runs).
+    struct Run {
+        int x0, x1, y;
+        uint32_t parent;
+    };
+    std::vector<Run> runs;
+    MaskRegions out;
+    auto find = [&](uint32_t i) {
+        while (runs[i].parent != i) {
+            runs[i].parent = runs[runs[i].parent].parent;
+            i = runs[i].parent;
+        }
+        return i;
+    };
+    size_t prevBegin = 0, prevEnd = 0;
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* row = mask + size_t(y) * pitch;
+        const size_t begin = runs.size();
+        size_t above = prevBegin;
+        for (int x = 0; x < width;) {
+            if (!row[x]) {
+                ++x;
+                continue;
+            }
+            const int x0 = x;
+            while (x < width && row[x]) ++x;
+            const uint32_t id = uint32_t(runs.size());
+            runs.push_back({x0, x, y, id});
+            out.pixels += uint64_t(x - x0);
+            while (above < prevEnd && runs[above].x1 <= x0) ++above;
+            for (size_t a = above; a < prevEnd && runs[a].x0 < x; ++a) {
+                const uint32_t ra = find(uint32_t(a)), rb = find(id);
+                if (ra != rb) runs[std::max(ra, rb)].parent = std::min(ra, rb);  // the earlier run stays the root
+            }
+        }
+        prevBegin = begin;
+        prevEnd = runs.size();
+    }
+    // Roots are each region's first run, so their order is the reading order.
+    std::vector<uint32_t> boxOf(runs.size(), UINT32_MAX);
+    for (uint32_t i = 0; i < runs.size(); ++i) {
+        const uint32_t r = find(i);
+        if (r == i) {
+            ++out.regions;
+            if (out.boxes.size() < maxBoxes) {
+                boxOf[i] = uint32_t(out.boxes.size());
+                out.boxes.push_back({runs[i].x0, runs[i].y, runs[i].x1, runs[i].y + 1, 0});
+            }
+        }
+        if (boxOf[r] == UINT32_MAX) continue;
+        MaskRegion& b = out.boxes[boxOf[r]];
+        b.x0 = std::min(b.x0, runs[i].x0);
+        b.x1 = std::max(b.x1, runs[i].x1);
+        b.y1 = std::max(b.y1, runs[i].y + 1);
+        b.pixels += uint64_t(runs[i].x1 - runs[i].x0);
+    }
+    return out;
+}
+
 bool hasTranslucentPixels(const Image& image) {
     const FormatInfo& info = formatInfo(image.format);
     if (info.channels < 4 || image.format == GpuFormat::BGRX8 || image.mips.empty()) return false;

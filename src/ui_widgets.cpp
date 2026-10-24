@@ -443,9 +443,10 @@ bool Row::button(const char* id, Icon icon, const char* label, int flags, const 
 
 // Dropdown field (.dd): bordered box with a value and a chevron; accent border while its menu is open.
 bool Row::dropdown(const char* id, const char* value, ImFont* f, float fontSize, float height, float padL, float padR,
-                   const char* tip, const char* key, ImRect* outRect, bool disabled, const char* widest) {
+                   const char* tip, const char* key, ImRect* outRect, bool disabled, const char* widest,
+                   float minWidth) {
     const float textW = std::max(textSize(f, fontSize, value).x, widest ? textSize(f, fontSize, widest).x : 0.0f);
-    const float w = line() + S(padL) + textW + S(5) + S(10) + S(padR) + line();
+    const float w = std::max(minWidth, line() + S(padL) + textW + S(5) + S(10) + S(padR) + line());
     if (measure) {
         advance(w);
         return false;

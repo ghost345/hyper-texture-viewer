@@ -264,6 +264,15 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONDOWN:
             if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+            if (app.matchPicking || (GetKeyState(VK_MENU) < 0 && app.colorMatch)) {
+                // Color match target: the eyedropper, or Alt+click while the panel is open.
+                int x, y;
+                if (windowToPixel(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), x, y) && setMatchTarget(x, y)) {
+                    app.matchPicking = false;
+                    app.colorMatch = true;
+                }
+                return 0;
+            }
             if (wp & MK_CONTROL) {
                 // Ctrl+click locks the readout to this pixel, or releases it.
                 int x, y;
@@ -333,6 +342,10 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             app.mouseX = app.mouseY = -1;
             return 0;
         case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT && app.matchPicking && app.hasImage && !uiMouse) {
+                SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+                return TRUE;
+            }
             if (LOWORD(lp) == HTCLIENT && (app.dragging || spaceDown) && app.hasImage && !uiMouse) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 return TRUE;
@@ -504,6 +517,46 @@ bool windowToPixel(float wx, float wy, int& x, int& y) {
         default: x = sh - 1 - dv; y = du; break;
     }
     return true;
+}
+
+void imageRectToWindow(float x0, float y0, float x1, float y1, float& wx0, float& wy0, float& wx1, float& wy1) {
+    const float sw = float(app.rotation & 1 ? app.image.height : app.image.width);
+    const float sh = float(app.rotation & 1 ? app.image.width : app.image.height);
+    // The inverse of windowToPixel for each corner, on continuous coordinates.
+    auto toShown = [&](float x, float y, float& u, float& v) {
+        switch (app.rotation) {
+            case 0: u = x; v = y; break;
+            case 1: u = sw - y; v = x; break;
+            case 2: u = sw - x; v = sh - y; break;
+            default: u = y; v = sh - x; break;
+        }
+        if (app.flipH) u = sw - u;
+        if (app.flipV) v = sh - v;
+    };
+    float u0, v0, u1, v1;
+    toShown(x0, y0, u0, v0);
+    toShown(x1, y1, u1, v1);
+    wx0 = app.originX + std::min(u0, u1) * app.zoom;
+    wx1 = app.originX + std::max(u0, u1) * app.zoom;
+    wy0 = app.originY + std::min(v0, v1) * app.zoom;
+    wy1 = app.originY + std::max(v0, v1) * app.zoom;
+}
+
+void showMatchRegion(int index) {
+    if (index < 0 || index >= int(app.matchRegions.boxes.size())) return;
+    app.matchRegion = index;
+    const htv::MaskRegion& r = app.matchRegions.boxes[size_t(index)];
+    float x0, y0, x1, y1;
+    imageRectToWindow(float(r.x0), float(r.y0), float(r.x1), float(r.y1), x0, y0, x1, y1);
+    // Zoom out until the region takes at most 80% of the viewport; never zoom in.
+    const float room = std::min(app.vpW * 0.8f / std::max(x1 - x0, 1.0f), app.vpH * 0.8f / std::max(y1 - y0, 1.0f));
+    if (room < 1.0f) {
+        zoomAt(app.zoom * room, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+        imageRectToWindow(float(r.x0), float(r.y0), float(r.x1), float(r.y1), x0, y0, x1, y1);
+    }
+    app.originX += std::round(app.vpX + app.vpW * 0.5f - (x0 + x1) * 0.5f);
+    app.originY += std::round(app.vpY + app.vpH * 0.5f - (y0 + y1) * 0.5f);
+    app.fit = false;
 }
 
 void setTopmost(bool on) {

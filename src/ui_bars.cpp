@@ -492,7 +492,9 @@ void overlaysGroup(Row& r) {
 void analysisGroup(Row& r) {
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
-    r.button("match", Icon::ColorMatch, nullptr, kDisabled, "Color match (coming soon)", "M");
+    if (r.button("match", Icon::ColorMatch, nullptr, (app.colorMatch && !off ? kOn : 0) | off, "Color match",
+                 keyText(Action::ColorMatch)))
+        toggleColorMatch();
     if (r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", keyText(Action::Histogram)))
         app.showHistogram = !app.showHistogram;
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
