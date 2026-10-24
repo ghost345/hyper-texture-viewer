@@ -90,7 +90,12 @@ struct App {
     Com<ID3D11Device> device;
     Com<ID3D11DeviceContext> context;
     Com<IDXGISwapChain> swapChain;
-    Com<ID3D11RenderTargetView> rtv;
+    Com<ID3D11RenderTargetView> rtv;  // the swap chain's back buffer, or `layer` while the window is layered
+    // A translucent or click-through window is a layered one, which Present can't draw into: frames go to this
+    // GDI-compatible texture and from there to UpdateLayeredWindow.
+    Com<ID3D11Texture2D> layer;
+    bool rtvOnLayer = false;
+    bool layeredStyle = false;  // WS_EX_LAYERED is set
     Com<ID3D11VertexShader> vs;
     Com<ID3D11PixelShader> ps;
     Com<ID3D11PixelShader> psRead;  // copies texels into a float target for the pixel readout

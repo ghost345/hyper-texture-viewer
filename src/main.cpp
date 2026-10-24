@@ -577,30 +577,18 @@ void setTopmost(bool on) {
     SetWindowPos(app.hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
-// Opacity and click-through both need a layered window.
-static void applyLayering(bool wasLayered) {
-    const bool layered = app.opacity < 1.0f || app.clickThrough;
-    if (layered != wasLayered) {
-        // Flip-model swap chains do not compose with layered windows; switch presentation models.
-        app.rtv.reset();
-        app.context->ClearState();
-        app.context->Flush();
-        app.swapChain.reset();
-        LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, layered ? (ex | WS_EX_LAYERED) : (ex & ~LONG_PTR(WS_EX_LAYERED)));
-        createSwapChain(!layered);
-        createRenderTarget();
-    }
+// Opacity and click-through both need a layered window, which the next frame sets up (see render); clicks
+// pass through only with WS_EX_TRANSPARENT on top of that.
+static void applyLayering() {
     const LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
     const LONG_PTR wanted = app.clickThrough ? (ex | WS_EX_TRANSPARENT) : (ex & ~LONG_PTR(WS_EX_TRANSPARENT));
     if (wanted != ex) SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, wanted);
-    if (layered) SetLayeredWindowAttributes(app.hwnd, 0, BYTE(std::lround(app.opacity * 255)), LWA_ALPHA);
+    redraw = true;
 }
 
 void setOpacity(float opacity) {
-    const bool wasLayered = app.opacity < 1.0f || app.clickThrough;
     app.opacity = std::clamp(std::round(opacity * 20.0f) / 20.0f, 0.1f, 1.0f);
-    applyLayering(wasLayered);
+    applyLayering();
 }
 
 void setClickThrough(bool on) {
@@ -608,10 +596,8 @@ void setClickThrough(bool on) {
     // Only for a window that stays in sight over the one being clicked: see-through or always on top.
     // Its key works while the window has the focus, which Alt+Tab or the taskbar gives back.
     if (on && app.opacity >= 1.0f && !app.topmost) return;
-    const bool wasLayered = app.opacity < 1.0f || app.clickThrough;
     app.clickThrough = on;
-    applyLayering(wasLayered);
-    redraw = true;
+    applyLayering();
 }
 
 void applyInterfaceScale() {

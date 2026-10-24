@@ -477,7 +477,7 @@ bool createDevice() {
 }
 
 // Flip model where available (Windows 10, then 8), the classic blt model on Windows 7. A translucent
-// (layered) window needs the blt model, so changing the window opacity recreates the swap chain.
+// (layered) window doesn't present through it at all: see presentLayered.
 bool createSwapChain(bool allowFlip) {
     Com<IDXGIDevice> dxgiDevice;
     Com<IDXGIAdapter> adapter;
@@ -525,6 +525,7 @@ bool createSwapChain(bool allowFlip) {
 
 bool createRenderTarget() {
     app.rtv.reset();
+    app.rtvOnLayer = false;
     Com<ID3D11Texture2D> back;
     if (FAILED(app.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(back.put()))))
         return false;
@@ -873,10 +874,72 @@ void updateCompareStats() {
     app.compareStats = st;
 }
 
+namespace {
+
+// Window opacity and click-through need WS_EX_LAYERED, and a layered window shows only what
+// UpdateLayeredWindow gives it, whatever a swap chain presents. So while layered, frames are drawn into a
+// GDI-compatible texture of the window's size and handed over through its DC with the opacity as the
+// constant alpha. This works the same from Windows 7 to 11.
+bool useLayer(bool layered) {
+    if (layered != app.layeredStyle) {
+        const LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, layered ? (ex | WS_EX_LAYERED) : (ex & ~LONG_PTR(WS_EX_LAYERED)));
+        app.layeredStyle = layered;
+    }
+    if (!layered) {
+        if (app.rtvOnLayer) createRenderTarget();
+        app.layer.reset();
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC have{};
+    if (app.layer) app.layer->GetDesc(&have);
+    // The window's size right now, not the last WM_SIZE: UpdateLayeredWindow resizes the window to the bitmap.
+    RECT rc{};
+    GetWindowRect(app.hwnd, &rc);
+    const UINT w = UINT(std::max(1L, rc.right - rc.left)), h = UINT(std::max(1L, rc.bottom - rc.top));
+    if (!app.rtvOnLayer || have.Width != w || have.Height != h) {
+        app.rtv.reset();
+        app.layer.reset();
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = w;
+        d.Height = h;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;  // the one format GDI can read
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        d.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
+        if (FAILED(app.device->CreateTexture2D(&d, nullptr, app.layer.put())) ||
+            FAILED(app.device->CreateRenderTargetView(app.layer.get(), nullptr, app.rtv.put()))) {
+            app.layer.reset();
+            createRenderTarget();
+            return false;
+        }
+        app.rtvOnLayer = true;
+    }
+    return true;
+}
+
+void presentLayered() {
+    app.context->OMSetRenderTargets(0, nullptr, nullptr);  // GetDC wants the texture unbound
+    Com<IDXGISurface1> surface;
+    if (FAILED(app.layer->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(surface.put())))) return;
+    HDC dc = nullptr;
+    if (FAILED(surface->GetDC(FALSE, &dc))) return;
+    POINT origin{0, 0};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, BYTE(std::lround(app.opacity * 255)), 0};  // constant alpha only
+    UpdateLayeredWindow(app.hwnd, nullptr, nullptr, nullptr, dc, &origin, 0, &blend, ULW_ALPHA);  // size: the window's
+    surface->ReleaseDC(nullptr);
+}
+
+}  // namespace
+
 void render() {
-    if (!app.rtv) return;
     static bool inRender = false;  // WM_PAINT can arrive while a frame is being built
     if (inRender) return;
+    const bool layered = useLayer(app.opacity < 1.0f || app.clickThrough);
+    if (!app.rtv) return;
     inRender = true;
 
     updateColorMatch();
@@ -905,7 +968,8 @@ void render() {
     ID3D11RenderTargetView* rtv = app.rtv.get();
     app.context->OMSetRenderTargets(1, &rtv, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    app.swapChain->Present(1, 0);
+    if (layered && app.rtvOnLayer) presentLayered();
+    else app.swapChain->Present(1, 0);
     inRender = false;
 
     if (!app.firstFrameDone) {
