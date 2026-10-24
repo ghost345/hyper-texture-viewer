@@ -640,6 +640,17 @@ void rightGroup(Row& r, const TopLayout& L) {
     if (L.shows(Tool::OnTop) &&
         r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", keyText(Action::AlwaysOnTop)))
         setTopmost(!app.topmost);
+    // Transparent to mouse: only for a see-through or always-on-top window, and always labelled with its key,
+    // since the button itself can't be clicked while it is on.
+    if (app.opacity < 1.0f || app.topmost || app.clickThrough || L.worstCase) {
+        const char* key = keyText(Action::ClickThrough);
+        if (!key) key = "Ctrl+T";
+        if (r.button("clickthrough", Icon::ClickThrough, key, kMonoLabel | (app.clickThrough ? kOn : 0),
+                     "Transparent to mouse: clicks go to the window below. To turn it off, bring this window to the "
+                     "front (Alt+Tab or the taskbar) and press the key again",
+                     key))
+            setClickThrough(!app.clickThrough);
+    }
     char pct[16];
     std::snprintf(pct, sizeof pct, "%d%%", L.worstCase ? 100 : int(std::lround(app.opacity * 100)));
     const bool open = ImGui::IsPopupOpen("opacity menu");
@@ -647,15 +658,6 @@ void rightGroup(Row& r, const TopLayout& L) {
                                "Window opacity", "Alt+Wheel"),
                       "opacity menu");
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
-    // Transparent to mouse: only for a see-through window, and always labelled with the key that brings the
-    // mouse back, since the button itself can't be clicked while it is on.
-    if (app.opacity < 1.0f || app.clickThrough || L.worstCase) {
-        const char* key = keyText(Action::ClickThrough);
-        if (!key) key = "Ctrl+T";
-        if (r.button("clickthrough", Icon::ClickThrough, key, kMonoLabel | (app.clickThrough ? kOn : 0),
-                     "Transparent to mouse: clicks go to the window below", key))
-            setClickThrough(!app.clickThrough);
-    }
     if (L.shows(Tool::Theme) && r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
                                          app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
         app.themeMode = app.darkTheme ? 1 : 0;
