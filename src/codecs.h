@@ -18,6 +18,10 @@ LoadResult loadKtx(const uint8_t* data, size_t size);
 // print resolution. Leaves the image as it is when the file has no layers it can read.
 void readPsdLayers(const uint8_t* data, size_t size, Image& image);
 
+// APNG: replaces the default image with every frame, composited as browsers show them. Leaves a plain PNG
+// as it is.
+void readApngFrames(const uint8_t* data, size_t size, Image& image);
+
 // Metadata for the Info panel (Image::metadata, and dpi): EXIF, ICC profile, resolution and text from JPEG,
 // PNG, WebP and PSD files. The pieces are public for loaders that get EXIF or ICC blocks from a library.
 void readMetadata(const uint8_t* data, size_t size, const std::string& extension, Image& image);

@@ -801,6 +801,7 @@ LoadResult decodeImage(const uint8_t* data, size_t size, const std::string& exte
     if (extension == "gif") return loadGif(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
     if (r.ok && extension == "psd") readPsdLayers(data, size, r.image);
+    if (r.ok && extension == "png") readApngFrames(data, size, r.image);
     return r;
 }
 

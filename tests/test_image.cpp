@@ -167,8 +167,9 @@ Bytes makeLayeredExr(int w, int h) {
 }
 
 #ifdef HTV_HAVE_JXL
-// Lossless JPEG XL: 8-bit sRGB from testPixels, or 32-bit float linear from hdrPixels.
-Bytes makeJxl(int w, int h, bool hdr) {
+// Lossless JPEG XL: 8-bit sRGB from testPixels, or 32-bit float linear from hdrPixels. With `frames` > 1, an
+// animation (1000 ticks a second, 3 loops) whose frame i lasts 40 * (i + 1) ms and has its first byte set to i.
+Bytes makeJxl(int w, int h, bool hdr, int frames = 1) {
     JxlEncoder* enc = JxlEncoderCreate(nullptr);
     JxlBasicInfo info;
     JxlEncoderInitBasicInfo(&info);
@@ -181,6 +182,12 @@ Bytes makeJxl(int w, int h, bool hdr) {
     info.bits_per_sample = hdr ? 32 : 8;
     info.exponent_bits_per_sample = hdr ? 8 : 0;
     info.uses_original_profile = JXL_TRUE;
+    if (frames > 1) {
+        info.have_animation = JXL_TRUE;
+        info.animation.tps_numerator = 1000;
+        info.animation.tps_denominator = 1;
+        info.animation.num_loops = 3;
+    }
     JxlEncoderSetBasicInfo(enc, &info);
     JxlColorEncoding color;
     if (hdr)
@@ -193,10 +200,19 @@ Bytes makeJxl(int w, int h, bool hdr) {
     std::vector<float> f = hdrPixels(w, h);
     std::vector<uint8_t> b = testPixels(w, h);
     JxlPixelFormat format{4, hdr ? JXL_TYPE_FLOAT : JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
-    if (hdr)
-        JxlEncoderAddImageFrame(settings, &format, f.data(), f.size() * sizeof(float));
-    else
-        JxlEncoderAddImageFrame(settings, &format, b.data(), b.size());
+    for (int i = 0; i < frames; ++i) {
+        if (frames > 1) {
+            JxlFrameHeader header;
+            JxlEncoderInitFrameHeader(&header);
+            header.duration = uint32_t(40 * (i + 1));
+            JxlEncoderSetFrameHeader(settings, &header);
+            b[0] = uint8_t(i);
+        }
+        if (hdr)
+            JxlEncoderAddImageFrame(settings, &format, f.data(), f.size() * sizeof(float));
+        else
+            JxlEncoderAddImageFrame(settings, &format, b.data(), b.size());
+    }
     JxlEncoderCloseInput(enc);
     Bytes out(1 << 16);
     uint8_t* next = out.data();
@@ -545,6 +561,15 @@ void testJxl() {
     float px[4];
     CHECK(readPixel(r.image, 31, 0, px));
     CHECK(std::fabs(px[0] - 1.0f) < 1e-3f && std::fabs(px[2] - 0.25f) < 1e-3f);
+
+    Bytes anim = makeJxl(16, 8, false, 3);
+    r = loadImage(anim.data(), anim.size(), "jxl");
+    CHECK(r.ok && r.image.frames.size() == 3);
+    if (r.image.frames.size() == 3) {
+        CHECK(r.image.frames[1].surface.data[0] == 1 && r.image.frames[2].surface.data[0] == 2);
+        CHECK(r.image.frames[0].delayMs == 40 && r.image.frames[2].delayMs == 120);
+        CHECK(r.image.loopCount == 3 && r.image.mips[0].data == r.image.frames[0].surface.data);
+    }
 #endif
 }
 
@@ -575,6 +600,13 @@ void testAvif() {
     r = load("colors_hdr_p3.avif");
     CHECK(r.image.format == GpuFormat::RGBA16F);
     CHECK(r.image.description.find("Display P3") != std::string::npos);
+
+    // An image sequence: every frame, each with its duration.
+    r = load("colors-animated-8bpc.avif");
+    CHECK(r.image.frames.size() > 1);
+    for (const Frame& f : r.image.frames) CHECK(f.delayMs > 0 && f.surface.width == r.image.width);
+    std::printf("  animated AVIF: %d frames, first %d ms\n", int(r.image.frames.size()),
+                r.image.frames.empty() ? 0 : r.image.frames[0].delayMs);
 #endif
 }
 
@@ -850,6 +882,93 @@ void testMetadata() {
     CHECK(metaValue(r.image, "Software") == "Substance Designer");
 }
 
+// The zlib stream of a PNG written by stb_image_write: its IDAT contents.
+Bytes idatOf(const Bytes& png) {
+    Bytes out;
+    for (size_t at = 8; at + 12 <= png.size();) {
+        const size_t n = size_t(png[at]) << 24 | size_t(png[at + 1]) << 16 | size_t(png[at + 2]) << 8 | png[at + 3];
+        if (std::memcmp(&png[at + 4], "IDAT", 4) == 0) out.insert(out.end(), png.begin() + long(at + 8), png.begin() + long(at + 8 + n));
+        at += 12 + n;
+    }
+    return out;
+}
+
+// APNG 4 x 4: frame 0 opaque red (100 ms); frame 1 a 2 x 2 half-transparent blue square at 1, 1 blended over
+// it (20/100 s), then cleared; frame 2 an empty 1 x 1 at 0, 0, plays twice.
+Bytes makeApng() {
+    auto solid = [](int w, int h, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        std::vector<uint8_t> px;
+        for (int i = 0; i < w * h; ++i) px.insert(px.end(), {r, g, b, a});
+        Bytes out;
+        stbi_write_png_to_func(appendBytes, &out, w, h, 4, px.data(), w * 4);
+        return out;
+    };
+    const Bytes red = solid(4, 4, 255, 0, 0, 255), blue = solid(2, 2, 0, 0, 255, 128), clear = solid(1, 1, 0, 0, 0, 0);
+    Bytes b(red.begin(), red.begin() + 33);  // signature and IHDR
+    auto chunk = [&](const char* type, const Bytes& data) {
+        const uint32_t n = uint32_t(data.size());
+        for (int i = 0; i < 4; ++i) b.push_back(uint8_t(n >> (24 - 8 * i)));
+        b.insert(b.end(), type, type + 4);
+        b.insert(b.end(), data.begin(), data.end());
+        b.insert(b.end(), 4, 0);
+    };
+    auto u32 = [](Bytes& d, uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(uint8_t(v >> (24 - 8 * i)));
+    };
+    auto fctl = [&](uint32_t seq, uint32_t w, uint32_t h, uint32_t x, uint32_t y, uint16_t num, uint16_t den, uint8_t dispose,
+                    uint8_t blend) {
+        Bytes d;
+        u32(d, seq);
+        u32(d, w);
+        u32(d, h);
+        u32(d, x);
+        u32(d, y);
+        d.insert(d.end(), {uint8_t(num >> 8), uint8_t(num), uint8_t(den >> 8), uint8_t(den), dispose, blend});
+        chunk("fcTL", d);
+    };
+    Bytes actl;
+    u32(actl, 3);
+    u32(actl, 2);
+    chunk("acTL", actl);
+    fctl(0, 4, 4, 0, 0, 1, 10, 0, 0);
+    chunk("IDAT", idatOf(red));
+    fctl(1, 2, 2, 1, 1, 20, 100, 1, 1);
+    Bytes fdat;
+    u32(fdat, 2);
+    const Bytes blueData = idatOf(blue);
+    fdat.insert(fdat.end(), blueData.begin(), blueData.end());
+    chunk("fdAT", fdat);
+    fctl(3, 1, 1, 0, 0, 0, 0, 0, 1);
+    Bytes fdat2;
+    u32(fdat2, 4);
+    const Bytes clearData = idatOf(clear);
+    fdat2.insert(fdat2.end(), clearData.begin(), clearData.end());
+    chunk("fdAT", fdat2);
+    chunk("IEND", {});
+    return b;
+}
+
+void testApng() {
+    Bytes apng = makeApng();
+    LoadResult r = loadImage(apng.data(), apng.size(), "png");
+    CHECK(r.ok && r.image.frames.size() == 3);
+    if (r.image.frames.size() != 3) return;
+    const Image& img = r.image;
+    CHECK(img.loopCount == 2 && img.format == GpuFormat::RGBA8Srgb);
+    CHECK(img.frames[0].delayMs == 100 && img.frames[1].delayMs == 200 && img.frames[2].delayMs == 0);
+    const uint8_t* f1 = img.frames[1].surface.data.data();
+    const uint8_t* p11 = f1 + (1 * 4 + 1) * 4;  // blue at half alpha over red
+    CHECK(p11[0] > 120 && p11[0] < 135 && p11[2] > 120 && p11[2] < 135 && p11[3] == 255);
+    CHECK(f1[0] == 255 && f1[2] == 0);
+    // Frame 1 was cleared after showing: its square is transparent in frame 2, the rest still red.
+    const uint8_t* f2 = img.frames[2].surface.data.data();
+    CHECK(f2[(1 * 4 + 1) * 4 + 3] == 0 && f2[(3 * 4 + 3) * 4] == 255);
+    // A plain PNG stays a single image.
+    Bytes png = makePng(4, 4);
+    r = loadImage(png.data(), png.size(), "png");
+    CHECK(r.ok && r.image.frames.empty());
+}
+
 void testGarbage() {
     const uint8_t junk[64] = {1, 2, 3};
     for (const char* ext : {"png", "exr", "dds", "hdr", "webp", "qoi", "jxl", "ktx2", "avif"}) CHECK(!loadImage(junk, sizeof(junk), ext).ok);
@@ -959,6 +1078,7 @@ int main(int argc, char** argv) {
     testDdsLayers();
     testPsdLayers();
     testMetadata();
+    testApng();
     testGarbage();
     testStats();
     std::printf(failures ? "%d check(s) failed\n" : "all checks passed\n", failures);

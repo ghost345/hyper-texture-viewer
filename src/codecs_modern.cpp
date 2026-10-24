@@ -136,46 +136,68 @@ LoadResult loadAvif(const uint8_t* data, size_t size) {
                                 : im->colorPrimaries == AVIF_COLOR_PRIMARIES_SMPTE432 ? Primaries::DisplayP3
                                                                                       : Primaries::Bt709;
 
-    avifRGBImage rgb;
-    avifRGBImageSetDefaults(&rgb, im);
-    rgb.format = AVIF_RGB_FORMAT_RGBA;
-    rgb.depth = im->depth > 8 ? 16 : 8;
-    rgb.rowBytes = 0;
-    rgb.pixels = nullptr;
-    std::vector<uint8_t> buffer(size_t(im->width) * im->height * 4 * (rgb.depth / 8));
-    rgb.pixels = buffer.data();
-    rgb.rowBytes = im->width * 4 * (rgb.depth / 8);
-    res = avifImageYUVToRGB(im, &rgb);
-    if (res != AVIF_RESULT_OK) {
-        r.error = std::string("cannot convert AVIF colours: ") + avifResultToString(res);
-        return r;
-    }
+    const bool wide = pq || hlg || linear || primaries != Primaries::Bt709;
+    // One decoded image to a surface: HDR or wide gamut as linear BT.709 half floats, the rest as stored.
+    auto convert = [&](const avifImage* frame, Surface& out, float& maxValue) {
+        avifRGBImage rgb;
+        avifRGBImageSetDefaults(&rgb, frame);
+        rgb.format = AVIF_RGB_FORMAT_RGBA;
+        rgb.depth = frame->depth > 8 ? 16 : 8;
+        std::vector<uint8_t> buffer(size_t(frame->width) * frame->height * 4 * (rgb.depth / 8));
+        rgb.pixels = buffer.data();
+        rgb.rowBytes = frame->width * 4 * (rgb.depth / 8);
+        res = avifImageYUVToRGB(frame, &rgb);
+        if (res != AVIF_RESULT_OK) return false;
+        const size_t pixels = size_t(frame->width) * frame->height;
+        if (wide) {
+            std::vector<float> encoded(pixels * 4);
+            const float scale = rgb.depth == 16 ? 1.0f / 65535.0f : 1.0f / 255.0f;
+            for (size_t i = 0; i < pixels * 4; ++i)
+                encoded[i] = (rgb.depth == 16 ? reinterpret_cast<const uint16_t*>(buffer.data())[i] : buffer[i]) * scale;
+            out = surfaceFor(GpuFormat::RGBA16F, frame->width, frame->height);
+            const Transfer transfer = pq ? Transfer::Pq : hlg ? Transfer::Hlg : linear ? Transfer::Linear : Transfer::Srgb;
+            maxValue = encodedToLinearHalf(encoded.data(), pixels, transfer, primaries,
+                                           reinterpret_cast<uint16_t*>(out.data.data()));
+        } else {
+            out = surfaceFor(rgb.depth == 16 ? GpuFormat::RGBA16Unorm : GpuFormat::RGBA8Srgb, frame->width, frame->height);
+            std::memcpy(out.data.data(), buffer.data(), out.data.size());
+            maxValue = 0.0f;
+        }
+        return true;
+    };
 
     Image& img = r.image;
     img.width = im->width;
     img.height = im->height;
-    const size_t pixels = size_t(im->width) * im->height;
-    if (pq || hlg || linear || primaries != Primaries::Bt709) {
-        // HDR or wide gamut: decode to linear BT.709 light and keep it as half floats.
-        std::vector<float> encoded(pixels * 4);
-        const float scale = rgb.depth == 16 ? 1.0f / 65535.0f : 1.0f / 255.0f;
-        for (size_t i = 0; i < pixels * 4; ++i)
-            encoded[i] = (rgb.depth == 16 ? reinterpret_cast<const uint16_t*>(buffer.data())[i] : buffer[i]) * scale;
-        img.format = GpuFormat::RGBA16F;
-        Surface s = surfaceFor(img.format, img.width, img.height);
-        const Transfer transfer = pq ? Transfer::Pq : hlg ? Transfer::Hlg : linear ? Transfer::Linear : Transfer::Srgb;
-        img.maxValue = encodedToLinearHalf(encoded.data(), pixels, transfer, primaries,
-                                           reinterpret_cast<uint16_t*>(s.data.data()));
-        img.mips.push_back(std::move(s));
-    } else {
-        img.format = rgb.depth == 16 ? GpuFormat::RGBA16Unorm : GpuFormat::RGBA8Srgb;
-        Surface s = surfaceFor(img.format, img.width, img.height);
-        std::memcpy(s.data.data(), buffer.data(), s.data.size());
-        img.mips.push_back(std::move(s));
+    img.format = wide ? GpuFormat::RGBA16F : im->depth > 8 ? GpuFormat::RGBA16Unorm : GpuFormat::RGBA8Srgb;
+    Surface first;
+    if (!convert(im, first, img.maxValue)) {
+        r.error = std::string("cannot convert AVIF colours: ") + avifResultToString(res);
+        return r;
     }
+    // An image sequence: every frame, as long as they fit in memory. (decoder->image, and `im`, now changes
+    // with each frame; its colour properties and metadata stay those of the sequence.)
+    if (decoder->imageCount > 1) {
+        img.frames.push_back({first, int(std::lround(decoder->imageTiming.duration * 1000.0))});
+        const size_t frameBytes = first.data.size();
+        while (img.frames.size() < 4096 && frameBytes * (img.frames.size() + 1) < (size_t(1) << 31) &&
+               avifDecoderNextImage(decoder) == AVIF_RESULT_OK) {
+            const avifImage* frame = decoder->image;
+            Frame f;
+            float m = 0.0f;
+            if (frame->width != img.width || frame->height != img.height || !convert(frame, f.surface, m)) break;
+            f.delayMs = int(std::lround(decoder->imageTiming.duration * 1000.0));
+            img.maxValue = std::max(img.maxValue, m);
+            img.frames.push_back(std::move(f));
+        }
+        img.loopCount = decoder->repetitionCount >= 0 ? decoder->repetitionCount + 1 : 0;
+        if (img.frames.size() < size_t(decoder->imageCount))
+            img.note = std::to_string(img.frames.size()) + " of " + std::to_string(decoder->imageCount) + " frames read";
+        if (img.frames.size() == 1) img.frames.clear();
+    }
+    img.mips.push_back(std::move(first));
     img.description = "AVIF, " + std::to_string(im->depth) + " bit" + (pq ? ", PQ HDR" : hlg ? ", HLG HDR" : "") +
                       primariesName(primaries) + (im->alphaPlane ? ", alpha" : "");
-    if (decoder->imageCount > 1) img.note = "sequence: frame 1 of " + std::to_string(decoder->imageCount) + " shown";
     if (im->icc.size) {
         const std::string profile = iccDescription(im->icc.data, im->icc.size);
         if (!profile.empty()) img.metadata.push_back({"Color profile", profile});
@@ -206,7 +228,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
         }
     } guard{dec, runner};
     if (!dec || !runner || JxlDecoderSetParallelRunner(dec, JxlResizableParallelRunner, runner) != JXL_DEC_SUCCESS ||
-        JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FULL_IMAGE) !=
+        JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE) !=
             JXL_DEC_SUCCESS ||
         JxlDecoderSetInput(dec, data, size) != JXL_DEC_SUCCESS) {
         r.error = "cannot start the JPEG XL decoder";
@@ -222,6 +244,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
     std::vector<float> floats;
     Image& img = r.image;
     Surface s;
+    int delayMs = 0;
 
     for (;;) {
         const JxlDecoderStatus status = JxlDecoderProcessInput(dec);
@@ -307,27 +330,53 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
                     return r;
                 }
             }
-        } else if (status == JXL_DEC_FULL_IMAGE || status == JXL_DEC_SUCCESS) {
-            break;  // the first frame is enough
+        } else if (status == JXL_DEC_FRAME) {
+            JxlFrameHeader header;
+            if (info.have_animation && JxlDecoderGetFrameHeader(dec, &header) == JXL_DEC_SUCCESS &&
+                info.animation.tps_numerator)
+                delayMs = int(std::lround(double(header.duration) * 1000.0 * info.animation.tps_denominator /
+                                          info.animation.tps_numerator));
+        } else if (status == JXL_DEC_FULL_IMAGE) {
+            // The frame just decoded, as a surface: HDR as linear half floats, the rest as stored.
+            Surface frame;
+            float m = 0.0f;
+            if (hdr) {
+                frame = surfaceFor(GpuFormat::RGBA16F, img.width, img.height);
+                m = encodedToLinearHalf(floats.data(), size_t(img.width) * img.height, transfer, primaries,
+                                        reinterpret_cast<uint16_t*>(frame.data.data()));
+            } else {
+                frame = s;
+            }
+            img.maxValue = std::max(img.maxValue, m);
+            if (!info.have_animation) {
+                img.mips.push_back(std::move(frame));
+                break;
+            }
+            // An animation: every frame, as long as they fit in memory.
+            img.frames.push_back({std::move(frame), delayMs});
+            if (img.frames.size() >= 4096 || img.frames[0].surface.data.size() * (img.frames.size() + 1) >= (size_t(1) << 31)) {
+                img.note = std::to_string(img.frames.size()) + " frames read: the rest do not fit in memory";
+                break;
+            }
+        } else if (status == JXL_DEC_SUCCESS) {
+            break;
         }
     }
-    if (img.width == 0) {
+    if (img.width == 0 || (img.mips.empty() && img.frames.empty())) {
         r.error = "JPEG XL file has no image";
         return r;
     }
-    if (hdr) {
-        img.format = GpuFormat::RGBA16F;
-        s = surfaceFor(img.format, img.width, img.height);
-        img.maxValue = encodedToLinearHalf(floats.data(), size_t(img.width) * img.height, transfer, primaries,
-                                           reinterpret_cast<uint16_t*>(s.data.data()));
+    if (hdr) img.format = GpuFormat::RGBA16F;
+    if (!img.frames.empty()) {
+        img.mips.push_back(img.frames[0].surface);
+        img.loopCount = int(info.animation.num_loops);
+        if (img.frames.size() == 1) img.frames.clear();
     }
-    img.mips.push_back(std::move(s));
     img.description = "JPEG XL, " + std::to_string(info.bits_per_sample) + " bit" +
                       (info.exponent_bits_per_sample ? " float" : "") +
                       (transfer == Transfer::Pq ? ", PQ HDR" : transfer == Transfer::Hlg ? ", HLG HDR" : "") +
                       (info.uses_original_profile ? ", lossless/original colours" : ", lossy") +
                       (info.alpha_bits ? ", alpha" : "");
-    if (info.have_animation) img.note = "animation: first frame shown";
     r.ok = true;
     return r;
 #endif

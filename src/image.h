@@ -64,7 +64,8 @@ struct Surface {
     std::vector<uint8_t> data;
 };
 
-// One frame of an animation (GIF, animated WebP): a full-canvas RGBA8 image and how long it stays.
+// One frame of an animation (GIF, APNG, animated WebP, AVIF or JPEG XL): a full-canvas image in the image's
+// format and how long it stays.
 struct Frame {
     Surface surface;
     int delayMs = 0;

@@ -1,4 +1,5 @@
-// Frames (L on an animation): step or play through a GIF or animated WebP's frames.
+// Frames (L on an animation): step or play through the frames of a GIF, APNG, or animated WebP, AVIF or
+// JPEG XL.
 // Layers (L on a file with layers): cube faces, array and volume slices, TIFF pages and EXR layers, one at a
 // time; or PSD layers, each with its own eye. Files with neither have no panel.
 
@@ -258,7 +259,7 @@ void framesPanel() {
     panelHeader(dl, p, width, hh, title, 12, 9);
     // The format (and how many layers) next to the title.
     char tag[48];
-    if (anim) std::snprintf(tag, sizeof tag, "%s", app.image.description.compare(0, 3, "GIF") == 0 ? "GIF" : "WebP");
+    if (anim) std::snprintf(tag, sizeof tag, "%s", app.image.description.substr(0, app.image.description.find(',')).c_str());
     else std::snprintf(tag, sizeof tag, "%s \xC2\xB7 %d", htv::layerKindName(app.image.layerKind), int(app.image.layers.size()));
     const float titleW = textSize(fontSemibold, 12, title).x;
     drawText(dl, fontRegular, 12, p.x + S(9) + titleW + S(8), p.y + (hh - line()) * 0.5f, t.tx3, tag);
