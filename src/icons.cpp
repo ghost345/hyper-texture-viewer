@@ -58,7 +58,7 @@ const IconDef kIcons[int(Icon::Count)] = {
     /* Search */ {{{"M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM15.5 15.5L20 20", false}}},
     /* Clip */ {{{"M4 4h16v16H4z", false}, {"M4 12l8-8M4 20L20 4M12 20l8-8", false}}},
     /* Dismiss */ {{{"M6 6l12 12M18 6L6 18", false}}},
-    /* ClickThrough: a pointer with arrows going through it */ {{{"M7 3.5l10.5 6.2-4.6 1.2-2.3 4.4z", false}, {"M13.5 14.5l3 3M3.5 19.5l3-3", false}, {"M17 20.5h3.5V17", false}}},
+    /* ClickThrough: drawn by dashedPointer */ {{{nullptr, false}}},
 };
 
 // Minimal SVG path interpreter: M L H V A C Z and their relative forms, which is all the icon set uses.
@@ -207,10 +207,36 @@ private:
     int pts_ = 0;
 };
 
+// ClickThrough: an arrow pointer outlined with dashes, a cursor that is not really there.
+void dashedPointer(ImDrawList* dl, ImVec2 pos, float scale, ImU32 color, float thickness) {
+    static const ImVec2 kOutline[] = {{5, 2.5f}, {5, 20}, {9.6f, 15.8f}, {12.7f, 22.2f}, {15.6f, 21}, {12.6f, 14.6f}, {18.6f, 14.6f}};
+    const int n = int(sizeof kOutline / sizeof kOutline[0]);
+    const float dash = 3.2f, gap = 2.2f;
+    float phase = 0;  // distance into the current dash + gap period, carried around the corners
+    for (int i = 0; i < n; ++i) {
+        const ImVec2 a = kOutline[i], b = kOutline[(i + 1) % n];
+        const float len = std::hypot(b.x - a.x, b.y - a.y);
+        float t = 0;
+        while (t < len) {
+            const bool on = phase < dash;
+            const float step = std::min(len - t, on ? dash - phase : dash + gap - phase);
+            if (on) {
+                const float u0 = t / len, u1 = (t + step) / len;
+                dl->AddLine(ImVec2(pos.x + (a.x + (b.x - a.x) * u0) * scale, pos.y + (a.y + (b.y - a.y) * u0) * scale),
+                            ImVec2(pos.x + (a.x + (b.x - a.x) * u1) * scale, pos.y + (a.y + (b.y - a.y) * u1) * scale), color,
+                            thickness);
+            }
+            t += step;
+            phase = std::fmod(phase + step, dash + gap);
+        }
+    }
+}
+
 }  // namespace
 
 void drawIcon(ImDrawList* dl, Icon icon, ImVec2 pos, float size, ImU32 color, float stroke) {
     const float scale = size / 24.0f;
+    if (icon == Icon::ClickThrough) return dashedPointer(dl, pos, scale, color, stroke * scale);
     for (const Part& part : kIcons[int(icon)].parts) {
         if (!part.d) break;
         PathRenderer(dl, pos, scale, color, stroke * scale, part.fill).run(part.d);

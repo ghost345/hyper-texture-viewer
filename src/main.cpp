@@ -607,20 +607,22 @@ void setOpacity(float opacity) {
 
 void setClickThrough(bool on) {
     if (on == app.clickThrough) return;
-    const bool wasLayered = app.opacity < 1.0f || app.clickThrough;
-    app.clickThrough = on;
-    applyLayering(wasLayered);
-    // The window gets no mouse input while on, so a system-wide hotkey turns it off.
+    // Only a see-through window may let clicks pass: an opaque one would just stop answering.
+    if (on && app.opacity >= 1.0f) return;
+    // The window gets no mouse input while on, so a system-wide hotkey turns it off; without one, stay off.
     if (on) {
-        // Its key in Settings, or Ctrl+Shift+T when it has none: there has to be a way back.
+        // Its key in Settings, or Ctrl+T when it has none: there has to be a way back.
         KeyBinding k = binding(Action::ClickThrough, 0);
-        if (k.empty()) k = KeyBinding{'T', kModCtrl | kModShift};
+        if (k.empty()) k = KeyBinding{'T', kModCtrl};
         const UINT mods = (k.mods & kModCtrl ? MOD_CONTROL : 0) | (k.mods & kModShift ? MOD_SHIFT : 0) |
                           (k.mods & kModAlt ? MOD_ALT : 0) | MOD_NOREPEAT;
-        RegisterHotKey(app.hwnd, kClickThroughHotkey, mods, k.vk);
+        if (!RegisterHotKey(app.hwnd, kClickThroughHotkey, mods, k.vk)) return;
     } else {
         UnregisterHotKey(app.hwnd, kClickThroughHotkey);
     }
+    const bool wasLayered = app.opacity < 1.0f || app.clickThrough;
+    app.clickThrough = on;
+    applyLayering(wasLayered);
     redraw = true;
 }
 

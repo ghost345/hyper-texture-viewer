@@ -559,9 +559,15 @@ void rightGroup(Row& r, const TopLayout& L) {
                                "Window opacity", "Alt+Wheel"),
                       "opacity menu");
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
-    if (r.button("clickthrough", Icon::ClickThrough, nullptr, app.clickThrough ? kOn : 0,
-                 "Transparent to mouse: clicks go to the window below", keyText(Action::ClickThrough)))
-        setClickThrough(!app.clickThrough);
+    // Transparent to mouse: only for a see-through window, and always labelled with the key that brings the
+    // mouse back, since the button itself can't be clicked while it is on.
+    if (app.opacity < 1.0f || app.clickThrough) {
+        const char* key = keyText(Action::ClickThrough);
+        if (!key) key = "Ctrl+T";
+        if (r.button("clickthrough", Icon::ClickThrough, key, kMonoLabel | (app.clickThrough ? kOn : 0),
+                     "Transparent to mouse: clicks go to the window below", key))
+            setClickThrough(!app.clickThrough);
+    }
     if (!L.compact) {
         if (r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
                      app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {

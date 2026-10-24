@@ -70,8 +70,8 @@ const ActionInfo kActions[int(Action::Count)] = {
     {"layers", "Layers", {key('L')}},
     {"compare", "Compare", {key('K', C)}},
 
-    {"always_on_top", "Always on top", {key('T', C)}},
-    {"click_through", "Transparent to mouse", {key('T', C | S)}},
+    {"always_on_top", "Always on top", {key('T', C | S)}},
+    {"click_through", "Transparent to mouse", {key('T', C)}},
     {"settings", "Settings", {key(VK_OEM_COMMA, C)}},
     {"help", "Keyboard shortcuts", {key(VK_F1)}},
     {"quit", "Close", {key('W', C)}},
