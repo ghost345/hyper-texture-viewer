@@ -96,6 +96,7 @@ struct App {
     Com<ID3D11Texture2D> layer;
     bool rtvOnLayer = false;
     bool layeredStyle = false;  // WS_EX_LAYERED is set
+    std::string layerError;     // why the window couldn't be made translucent, shown under the opacity slider
     Com<ID3D11VertexShader> vs;
     Com<ID3D11PixelShader> ps;
     Com<ID3D11PixelShader> psRead;  // copies texels into a float target for the pixel readout

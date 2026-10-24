@@ -476,9 +476,10 @@ bool createDevice() {
     return false;
 }
 
-// Flip model where available (Windows 10, then 8), the classic blt model on Windows 7. A translucent
-// (layered) window doesn't present through it at all: see presentLayered.
-bool createSwapChain(bool allowFlip) {
+// The classic blt model on every Windows version. Flip-model swap chains present around the window's
+// redirection surface, and a window that has one can't be layered (translucent or click-through) and still
+// show what UpdateLayeredWindow gives it; the blt model leaves that surface alone.
+bool createSwapChain() {
     Com<IDXGIDevice> dxgiDevice;
     Com<IDXGIAdapter> adapter;
     Com<IDXGIFactory> factory;
@@ -486,39 +487,16 @@ bool createSwapChain(bool allowFlip) {
         FAILED(dxgiDevice->GetAdapter(adapter.put())) ||
         FAILED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(factory.put()))))
         return false;
-
-    Com<IDXGIFactory2> factory2;
-    if (allowFlip &&
-        SUCCEEDED(factory->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(factory2.put())))) {
-        const std::pair<DXGI_SWAP_EFFECT, const char*> effects[] = {{DXGI_SWAP_EFFECT(4), "flip-discard"},
-                                                                    {DXGI_SWAP_EFFECT(3), "flip-sequential"}};
-        for (auto [effect, name] : effects) {
-            DXGI_SWAP_CHAIN_DESC1 d{};
-            d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            d.SampleDesc.Count = 1;
-            d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-            d.BufferCount = 2;
-            d.SwapEffect = effect;
-            Com<IDXGISwapChain1> sc1;
-            if (SUCCEEDED(factory2->CreateSwapChainForHwnd(app.device.get(), app.hwnd, &d, nullptr, nullptr, sc1.put()))) {
-                sc1->QueryInterface(__uuidof(IDXGISwapChain), reinterpret_cast<void**>(app.swapChain.put()));
-                app.swapEffect = name;
-                break;
-            }
-        }
-    }
-    if (!app.swapChain) {
-        DXGI_SWAP_CHAIN_DESC d{};
-        d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        d.SampleDesc.Count = 1;
-        d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        d.BufferCount = 1;
-        d.OutputWindow = app.hwnd;
-        d.Windowed = TRUE;
-        d.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        if (FAILED(factory->CreateSwapChain(app.device.get(), &d, app.swapChain.put()))) return false;
-        app.swapEffect = "discard";
-    }
+    DXGI_SWAP_CHAIN_DESC d{};
+    d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1;
+    d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    d.BufferCount = 1;
+    d.OutputWindow = app.hwnd;
+    d.Windowed = TRUE;
+    d.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    if (FAILED(factory->CreateSwapChain(app.device.get(), &d, app.swapChain.put()))) return false;
+    app.swapEffect = "discard";
     factory->MakeWindowAssociation(app.hwnd, DXGI_MWA_NO_ALT_ENTER);
     return true;
 }
@@ -879,7 +857,8 @@ namespace {
 // Window opacity and click-through need WS_EX_LAYERED, and a layered window shows only what
 // UpdateLayeredWindow gives it, whatever a swap chain presents. So while layered, frames are drawn into a
 // GDI-compatible texture of the window's size and handed over through its DC with the opacity as the
-// constant alpha. This works the same from Windows 7 to 11.
+// constant alpha. If Windows refuses, the window goes back to opaque and normal: a layered window without
+// content would be invisible to the mouse.
 bool useLayer(bool layered) {
     if (layered != app.layeredStyle) {
         const LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
@@ -921,16 +900,36 @@ bool useLayer(bool layered) {
     return true;
 }
 
-void presentLayered() {
+std::string hexCode(uint32_t v) {
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%08X", v);
+    return buf;
+}
+
+bool presentLayered() {
     app.context->OMSetRenderTargets(0, nullptr, nullptr);  // GetDC wants the texture unbound
     Com<IDXGISurface1> surface;
-    if (FAILED(app.layer->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(surface.put())))) return;
+    HRESULT hr = app.layer->QueryInterface(__uuidof(IDXGISurface1), reinterpret_cast<void**>(surface.put()));
     HDC dc = nullptr;
-    if (FAILED(surface->GetDC(FALSE, &dc))) return;
+    if (SUCCEEDED(hr)) hr = surface->GetDC(FALSE, &dc);
+    if (FAILED(hr)) {
+        app.layerError = "GetDC failed (0x" + hexCode(uint32_t(hr)) + ")";
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    app.layer->GetDesc(&d);
     POINT origin{0, 0};
+    SIZE size{LONG(d.Width), LONG(d.Height)};
     BLENDFUNCTION blend{AC_SRC_OVER, 0, BYTE(std::lround(app.opacity * 255)), 0};  // constant alpha only
-    UpdateLayeredWindow(app.hwnd, nullptr, nullptr, nullptr, dc, &origin, 0, &blend, ULW_ALPHA);  // size: the window's
+    const BOOL ok = UpdateLayeredWindow(app.hwnd, nullptr, nullptr, &size, dc, &origin, 0, &blend, ULW_ALPHA);
+    const DWORD err = ok ? 0 : GetLastError();
     surface->ReleaseDC(nullptr);
+    if (!ok) {
+        app.layerError = "UpdateLayeredWindow failed (error " + std::to_string(err) + ")";
+        return false;
+    }
+    app.layerError.clear();
+    return true;
 }
 
 }  // namespace
@@ -968,8 +967,17 @@ void render() {
     ID3D11RenderTargetView* rtv = app.rtv.get();
     app.context->OMSetRenderTargets(1, &rtv, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    if (layered && app.rtvOnLayer) presentLayered();
-    else app.swapChain->Present(1, 0);
+    if (layered && app.rtvOnLayer) {
+        if (!presentLayered()) {
+            app.opacity = 1.0f;
+            app.clickThrough = false;
+            const LONG_PTR ex = GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(app.hwnd, GWL_EXSTYLE, ex & ~LONG_PTR(WS_EX_TRANSPARENT));
+            InvalidateRect(app.hwnd, nullptr, FALSE);  // the next frame drops the layered style and presents
+        }
+    } else {
+        app.swapChain->Present(1, 0);
+    }
     inRender = false;
 
     if (!app.firstFrameDone) {

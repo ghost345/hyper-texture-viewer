@@ -22,7 +22,7 @@ double msSinceProcessStart();
 
 // render.cpp
 bool createDevice();
-bool createSwapChain(bool allowFlip);
+bool createSwapChain();
 bool createRenderTarget();
 bool createPipeline(std::string& error);
 bool uploadImage(const htv::Image& img, std::string& error);

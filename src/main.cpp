@@ -720,7 +720,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     std::string error;
     const double tDevice0 = nowMs();
     if (!createDevice()) return failStartup("no Direct3D 11 device, not even WARP");
-    if (!createSwapChain(true)) return failStartup("cannot create the swap chain");
+    if (!createSwapChain()) return failStartup("cannot create the swap chain");
     if (!createRenderTarget()) return failStartup("cannot create the render target");
     if (!createPipeline(error)) return failStartup(error);
 

@@ -763,6 +763,12 @@ void opacityPopup(ImVec2 anchor) {
     y += S(5) + S(8) + S(9);
     const float kw = kbdChip(dl, p.x, y, "Alt");
     drawText(dl, fontRegular, 11, p.x + kw + S(6), y, t.tx3, "+ wheel anywhere");
+    if (!app.layerError.empty()) {
+        // Windows refused the translucent window; say why instead of failing silently.
+        ImGui::Dummy(ImVec2(w, S(18)));
+        drawText(dl, fontRegular, 11, p.x, y + S(18), t.err, ellipsize(fontRegular, 11, app.layerError, w).c_str());
+        requestTip(ImRect(ImVec2(p.x, y + S(10)), ImVec2(p.x + w, y + S(26))), app.layerError.c_str(), nullptr, true);
+    }
     endMenu();
 }
 
