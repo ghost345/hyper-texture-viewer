@@ -60,7 +60,7 @@ void histogramPanel() {
     const float hh = S(26);
     panelHeader(dl, p, width, hh, "Histogram", 12, 9);
     if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(3) - S(20), std::round(p.y + (hh - line() - S(20)) * 0.5f)),
-                    20, 14, "Close", "Ctrl+H"))
+                    20, 14, "Close", keyText(Action::Histogram)))
         app.showHistogram = false;
 
     const ImageStats& st = app.stats;

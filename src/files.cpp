@@ -10,15 +10,18 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <thread>
 
 #include "imgui.h"
+#include "keys.h"
 #include "wic_loader.h"
 
 namespace fs = std::filesystem;
@@ -184,9 +187,29 @@ void listFolder(const fs::path& file) {
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(file.parent_path(), ec))
         if (e.is_regular_file(ec) && isSupported(e.path())) app.folder.push_back(e.path());
-    std::sort(app.folder.begin(), app.folder.end(), [](const fs::path& a, const fs::path& b) {
+    // Explorer's order (numbers in names by value) unless Settings asks for another; ties by that order.
+    auto natural = [](const fs::path& a, const fs::path& b) {
         return StrCmpLogicalW(a.filename().c_str(), b.filename().c_str()) < 0;
-    });
+    };
+    std::sort(app.folder.begin(), app.folder.end(), natural);
+    if (app.folderSort == 1) {
+        std::stable_sort(app.folder.begin(), app.folder.end(), [](const fs::path& a, const fs::path& b) {
+            return _wcsicmp(a.filename().c_str(), b.filename().c_str()) < 0;
+        });
+    } else if (app.folderSort == 2 || app.folderSort == 3) {
+        std::vector<std::pair<uint64_t, fs::path>> keyed;
+        for (const fs::path& f : app.folder) {
+            const FileStamp st = stampOf(f);
+            keyed.emplace_back(app.folderSort == 2 ? st.writeTime : st.size, f);
+        }
+        // Newest and largest first, as Explorer shows them after one click on the column.
+        std::stable_sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (size_t i = 0; i < keyed.size(); ++i) app.folder[i] = std::move(keyed[i].second);
+    } else if (app.folderSort == 4) {
+        std::stable_sort(app.folder.begin(), app.folder.end(), [](const fs::path& a, const fs::path& b) {
+            return _wcsicmp(a.extension().c_str(), b.extension().c_str()) < 0;
+        });
+    }
     auto it = std::find(app.folder.begin(), app.folder.end(), file);
     if (it != app.folder.end()) app.folderIndex = int(it - app.folder.begin());
 }
@@ -241,7 +264,22 @@ fs::path folderIn(const wchar_t* variable) {
     return dir;
 }
 
+fs::path exeFolder() {
+    wchar_t buf[MAX_PATH * 4];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
+    return n ? fs::path(std::wstring(buf, n)).parent_path() : fs::path();
+}
+
+fs::path portableSettingsFile() {
+    const fs::path dir = exeFolder();
+    return dir.empty() ? fs::path() : dir / L"settings.ini";
+}
+
+// Portable mode is a settings.ini next to the exe; otherwise the settings live in %APPDATA%.
 fs::path settingsFile() {
+    std::error_code ec;
+    const fs::path portable = portableSettingsFile();
+    if (!portable.empty() && fs::exists(portable, ec)) return portable;
     const fs::path dir = folderIn(L"APPDATA");
     return dir.empty() ? fs::path() : dir / L"settings.ini";
 }
@@ -347,8 +385,14 @@ void finishLoad(LoadedFile* raw) {
         app.lockedX = std::min(app.lockedX, int(app.image.width) - 1);
         app.lockedY = std::min(app.lockedY, int(app.image.height) - 1);
     }
-    // A reload keeps zoom and position; a new file is fitted when Fit is on.
+    // A reload keeps zoom and position; a new file is fitted when Fit is on, or always when Settings says so.
+    if (f->mode != OpenMode::Reload && !app.keepView) app.fit = true;
     if (app.fit && !(f->mode == OpenMode::Reload && sameSize)) fitToWindow();
+    if (f->mode != OpenMode::Reload && !app.keepExposure) {
+        app.exposure = 0.0f;
+        app.blackPoint = 0.0f;
+        app.whitePoint = 1.0f;
+    }
     if (f->mode == OpenMode::Reload) {
         app.toastUntilMs = nowMs() + 4000.0;
         app.toastName = narrow(f->path.filename().wstring());
@@ -410,7 +454,7 @@ void checkFileChanged() {
         app.loadingProgress = decoding || !app.loadingSize ? -1.0f : float(bytesRead) / float(app.loadingSize);
         return;
     }
-    if (app.fromClipboard || app.path.empty()) return;
+    if (app.fromClipboard || app.path.empty() || !app.autoReload) return;
     const FileStamp now = stampOf(app.path);
     if (!now.exists || now == watchedStamp) {
         reloadPending = false;
@@ -509,19 +553,23 @@ ID3D11ShaderResourceView* recentThumbnail(int index) {
     return r.thumbnail.get();
 }
 
-void chooseCustomBackground() {
+bool pickColor(float rgb[3]) {
     static COLORREF custom[16] = {};
     CHOOSECOLORW cc{};
     cc.lStructSize = sizeof(cc);
     cc.hwndOwner = app.hwnd;
     cc.lpCustColors = custom;
-    cc.rgbResult = RGB(int(app.customBackground[0] * 255), int(app.customBackground[1] * 255),
-                       int(app.customBackground[2] * 255));
+    cc.rgbResult = RGB(int(std::round(rgb[0] * 255)), int(std::round(rgb[1] * 255)), int(std::round(rgb[2] * 255)));
     cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-    if (!ChooseColorW(&cc)) return;
-    app.customBackground[0] = GetRValue(cc.rgbResult) / 255.0f;
-    app.customBackground[1] = GetGValue(cc.rgbResult) / 255.0f;
-    app.customBackground[2] = GetBValue(cc.rgbResult) / 255.0f;
+    if (!ChooseColorW(&cc)) return false;
+    rgb[0] = GetRValue(cc.rgbResult) / 255.0f;
+    rgb[1] = GetGValue(cc.rgbResult) / 255.0f;
+    rgb[2] = GetBValue(cc.rgbResult) / 255.0f;
+    return true;
+}
+
+void chooseCustomBackground() {
+    if (!pickColor(app.customBackground)) return;
     app.alphaBackground = AlphaBackground::Custom;
     app.ignoreAlpha = false;
 }
@@ -578,8 +626,30 @@ void loadSettings() {
         const size_t eq = s.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = s.substr(0, eq), value = s.substr(eq + 1);
+        auto flag = [&](const char* name, bool& out) {
+            if (key == name) out = value == "1";
+            return key == name;
+        };
         if (key == "theme") {
-            app.darkTheme = value != "light";
+            app.themeMode = value == "light" ? 1 : value == "system" ? 2 : 0;
+        } else if (key == "scale") {
+            const float v = std::strtof(value.c_str(), nullptr);
+            app.interfaceScale = v >= 1.0f && v <= 2.0f ? v : 0.0f;
+        } else if (key == "viewport") {
+            unsigned rgb = 0;
+            app.customViewport = std::sscanf(value.c_str(), "%x", &rgb) == 1;
+            for (int i = 0; i < 3; ++i) app.viewportColor[i] = float((rgb >> (16 - 8 * i)) & 0xff) / 255.0f;
+        } else if (key == "checker") {
+            app.checkerSize = std::clamp(std::atoi(value.c_str()), 0, 2);
+        } else if (flag("keep_view", app.keepView) || flag("keep_exposure", app.keepExposure) ||
+                   flag("auto_reload", app.autoReload) || flag("single_instance", app.singleInstance)) {
+        } else if (key == "sort") {
+            app.folderSort = std::clamp(std::atoi(value.c_str()), 0, 4);
+        } else if (key == "cache_mb") {
+            app.cacheMB = std::clamp(std::atoi(value.c_str()), 0, 65536);
+        } else if (key == "prefetch") {
+            app.prefetch = std::clamp(std::atoi(value.c_str()), 0, 2);
+        } else if (htv::bindingFromSettings(key, value)) {
         } else if (key == "recent" && app.recent.size() < kMaxRecent) {
             const size_t tab = value.find('\t');
             if (tab == std::string::npos) continue;
@@ -592,12 +662,50 @@ void loadSettings() {
     std::fclose(f);
 }
 
+bool portableMode() {
+    std::error_code ec;
+    const fs::path portable = portableSettingsFile();
+    return !portable.empty() && fs::exists(portable, ec);
+}
+
+bool setPortableMode(bool on) {
+    if (on == portableMode()) return true;
+    const fs::path portable = portableSettingsFile();
+    std::error_code ec;
+    if (on) {
+        // Creating the file is what makes the mode; Program Files is not writable without elevation.
+        FILE* f = portable.empty() ? nullptr : _wfopen(portable.c_str(), L"wb");
+        if (!f) return false;
+        std::fclose(f);
+    } else if (!fs::remove(portable, ec)) {
+        return false;
+    }
+    saveSettings();
+    return true;
+}
+
+void relistFolder() {
+    if (app.path.empty() || app.fromClipboard) return;
+    listFolder(app.path);
+}
+
 void saveSettings() {
     if (!app.benchPath.empty()) return;
     const fs::path file = settingsFile();
     FILE* f = file.empty() ? nullptr : _wfopen(file.c_str(), L"wb");
     if (!f) return;
-    std::fprintf(f, "theme=%s\n", app.darkTheme ? "dark" : "light");
+    static const char* themes[] = {"dark", "light", "system"};
+    std::fprintf(f, "theme=%s\n", themes[std::clamp(app.themeMode, 0, 2)]);
+    if (app.interfaceScale > 0) std::fprintf(f, "scale=%.2f\n", double(app.interfaceScale));
+    if (app.customViewport) {
+        int rgb = 0;
+        for (int i = 0; i < 3; ++i) rgb = rgb << 8 | int(std::round(std::clamp(app.viewportColor[i], 0.0f, 1.0f) * 255));
+        std::fprintf(f, "viewport=%06X\n", rgb);
+    }
+    std::fprintf(f, "checker=%d\nkeep_view=%d\nkeep_exposure=%d\nauto_reload=%d\nsort=%d\nsingle_instance=%d\n",
+                 app.checkerSize, app.keepView, app.keepExposure, app.autoReload, app.folderSort, app.singleInstance);
+    std::fprintf(f, "cache_mb=%d\nprefetch=%d\n", app.cacheMB, app.prefetch);
+    std::fputs(htv::bindingsToSettings().c_str(), f);
     for (const RecentFile& r : app.recent)
         std::fprintf(f, "recent=%lld\t%s\n", static_cast<long long>(r.openedAt), narrow(r.path.wstring()).c_str());
     std::fclose(f);

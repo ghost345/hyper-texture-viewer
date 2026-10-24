@@ -16,6 +16,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_dx11.h"
 #include "backends/imgui_impl_win32.h"
+#include "keys.h"
 #include "ui.h"
 #include "wic_loader.h"
 
@@ -99,9 +100,8 @@ bool inViewport(int x, int y) {
 }
 
 void applyDpi(float scale) {
-    app.scale = scale;
-    uiSetScale(scale);
-    layout();
+    app.dpiScale = scale;
+    applyInterfaceScale();
 }
 
 int resizeBorder() { return int(std::round(5 * app.scale)); }
@@ -204,6 +204,21 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_HOTKEY:
             if (wp == kClickThroughHotkey) setClickThrough(false);
             return 0;
+        case WM_SETTINGCHANGE:
+            // Windows switched between light and dark apps.
+            if (app.themeMode == 2 && lp && std::wstring(reinterpret_cast<const wchar_t*>(lp)) == L"ImmersiveColorSet")
+                applyTheme();
+            break;
+        case WM_COPYDATA: {
+            // A second start with single instance on hands its file over.
+            const auto* cd = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+            if (!cd || cd->dwData != kOpenFileMessage) return FALSE;
+            const std::wstring path(static_cast<const wchar_t*>(cd->lpData), cd->cbData / sizeof(wchar_t));
+            if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            if (!path.empty()) openPath(path);
+            return TRUE;
+        }
         case WM_TIMER:
             if (wp == kWatchTimer) {
                 if (app.toastUntilMs > 0 && nowMs() > app.toastUntilMs) {
@@ -525,8 +540,36 @@ void setClickThrough(bool on) {
     app.clickThrough = on;
     applyLayering(wasLayered);
     // The window gets no mouse input while on, so a system-wide hotkey turns it off.
-    if (on) RegisterHotKey(app.hwnd, kClickThroughHotkey, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 'T');
-    else UnregisterHotKey(app.hwnd, kClickThroughHotkey);
+    if (on) {
+        // Its key in Settings, or Ctrl+Shift+T when it has none: there has to be a way back.
+        KeyBinding k = binding(Action::ClickThrough, 0);
+        if (k.empty()) k = KeyBinding{'T', kModCtrl | kModShift};
+        const UINT mods = (k.mods & kModCtrl ? MOD_CONTROL : 0) | (k.mods & kModShift ? MOD_SHIFT : 0) |
+                          (k.mods & kModAlt ? MOD_ALT : 0) | MOD_NOREPEAT;
+        RegisterHotKey(app.hwnd, kClickThroughHotkey, mods, k.vk);
+    } else {
+        UnregisterHotKey(app.hwnd, kClickThroughHotkey);
+    }
+    redraw = true;
+}
+
+void applyInterfaceScale() {
+    app.scale = app.interfaceScale > 0 ? app.interfaceScale : app.dpiScale;
+    uiSetScale(app.scale);
+    layout();
+    if (app.fit && app.hasImage) fitToWindow();
+    redraw = true;
+}
+
+void applyTheme() {
+    bool dark = app.themeMode != 1;
+    if (app.themeMode == 2) {
+        DWORD light = 0, size = sizeof(light);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                         L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS)
+            dark = light == 0;
+    }
+    app.darkTheme = dark;
     redraw = true;
 }
 
@@ -561,6 +604,26 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     LocalFree(argv);
     app.path = file;
     if (app.benchPath.empty()) loadSettings();
+    applyTheme();
+
+    // Single instance: a file opened while a viewer runs goes to that window, which comes to the front.
+    HANDLE instanceMutex = nullptr;
+    if (app.benchPath.empty() && app.singleInstance) {
+        instanceMutex = CreateMutexW(nullptr, FALSE, L"HyperTextureViewer.SingleInstance");
+        if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (HWND other = FindWindowW(L"HyperTextureViewer", nullptr)) {
+                std::error_code ec;
+                const std::wstring path = file.empty() ? std::wstring() : fs::absolute(file, ec).wstring();
+                COPYDATASTRUCT cd{kOpenFileMessage, DWORD(path.size() * sizeof(wchar_t)), const_cast<wchar_t*>(path.c_str())};
+                DWORD_PTR result = 0;
+                AllowSetForegroundWindow(ASFW_ANY);
+                if (SendMessageTimeoutW(other, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cd), SMTO_ABORTIFHUNG, 3000,
+                                        &result) &&
+                    result)
+                    return 0;
+            }
+        }
+    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);

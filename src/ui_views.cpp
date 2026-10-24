@@ -594,7 +594,7 @@ void infoPanel() {
     if (smallButton(dl, "copyall", Icon::Copy, ImVec2(p.x + width - S(3) - S(20) - S(6) - S(20), hcy), 20, 14,
                     "Copy all as text", nullptr))
         ImGui::SetClipboardText(infoText(sections).c_str());
-    if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(3) - S(20), hcy), 20, 14, "Close", "I"))
+    if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(3) - S(20), hcy), 20, 14, "Close", keyText(Action::Info)))
         app.showInfo = false;
 
     static bool open[8] = {true, true, true, true, true, true, true, true};
@@ -658,9 +658,11 @@ void infoPanel() {
 
 namespace {
 
+// A row lists fixed keys (mouse input, Esc), or actions whose current keys it shows.
 struct HelpRow {
     const char* label;
-    const char* keys[4];
+    std::vector<const char*> keys;
+    std::vector<Action> actions;
 };
 struct HelpGroup {
     const char* title;
@@ -668,57 +670,70 @@ struct HelpGroup {
 };
 
 const std::vector<HelpGroup>& helpColumn(int c) {
+    using A = Action;
     static const std::vector<HelpGroup> columns[3] = {
         {{"Files",
-          {{"Open", {"Ctrl+O"}},
-           {"Previous / next file", {"\xE2\x86\x90", "\xE2\x86\x92"}},
-           {"Previous / next file", {"PgUp", "PgDn"}},
-           {"First / last in folder", {"Home", "End"}},
-           {"Paste image from clipboard", {"Ctrl+V"}},
-           {"Copy file path", {"Ctrl+Alt+C"}},
-           {"Reload", {"F5"}},
-           {"Recent files", {"Ctrl+1\xE2\x80\xA6" "9"}}}},
+          {{"Open", {}, {A::Open}},
+           {"Previous / next file", {}, {A::PrevFile, A::NextFile}},
+           {"First / last in folder", {}, {A::FirstFile, A::LastFile}},
+           {"Paste image from clipboard", {}, {A::Paste}},
+           {"Copy file path", {}, {A::CopyPath}},
+           {"Reload", {}, {A::Reload}},
+           {"Recent files", {"Ctrl+1\xE2\x80\xA6" "9"}, {}}}},
          {"View",
-          {{"Fit", {"F"}},
-           {"Actual size 100%", {"1"}},
-           {"Zoom to cursor", {"Wheel"}},
-           {"Pan", {"Space+drag", "MMB"}},
-           {"Rotate left / right", {"Ctrl+L", "Ctrl+R"}},
-           {"Flip horizontal / vertical", {"H", "V"}},
-           {"Hide panels", {"Tab"}}}}},
+          {{"Fit", {"Dbl-click"}, {A::Fit}},
+           {"Actual size 100%", {}, {A::ActualSize}},
+           {"Zoom to cursor", {"Wheel"}, {}},
+           {"Pan", {"Space+drag", "MMB"}, {}},
+           {"Rotate left / right", {}, {A::RotateLeft, A::RotateRight}},
+           {"Flip horizontal / vertical", {}, {A::FlipH, A::FlipV}},
+           {"Hide panels", {}, {A::HidePanels}}}}},
         {{"Channels and modes",
-          {{"Red / green / blue / alpha", {"R", "G", "B", "A"}},
-           {"All channels", {"C"}},
-           {"Luminance", {"Y"}},
-           {"sRGB / Linear", {"Shift+L"}},
-           {"Normal map mode", {"N"}},
-           {"Mip level \xE2\x88\x92 / +", {"[", "]"}},
-           {"Alpha background", {"Shift+A"}},
-           {"Tiling", {"T"}}}},
+          {{"Red / green / blue / alpha", {}, {A::Red, A::Green, A::Blue, A::Alpha}},
+           {"All channels", {}, {A::AllChannels}},
+           {"Luminance", {}, {A::Luminance}},
+           {"sRGB / Linear", {}, {A::SrgbLinear}},
+           {"Normal map mode", {}, {A::NormalMode}},
+           {"Mip level \xE2\x88\x92 / +", {}, {A::MipDown, A::MipUp}},
+           {"Alpha background", {}, {A::AlphaBackground}},
+           {"Tiling", {}, {A::Tiling}}}},
          {"HDR",
-          {{"Exposure", {"Ctrl+Wheel"}},
-           {"Exposure \xE2\x88\x92 / + 0.5 EV", {"-", "="}},
-           {"Reset exposure", {"0"}},
-           {"Auto range", {"Ctrl+A"}},
-           {"Show clipping", {"Z"}}}}},
+          {{"Exposure", {"Ctrl+Wheel"}, {}},
+           {"Exposure \xE2\x88\x92 / + 0.5 EV", {}, {A::ExposureDown, A::ExposureUp}},
+           {"Reset exposure", {}, {A::ResetExposure}},
+           {"Auto range", {}, {A::AutoRange}},
+           {"Show clipping", {}, {A::Clipping}}}}},
         {{"Analysis",
-          {{"Grid / ruler", {"Ctrl+G", "Ctrl+U"}},
-           {"Pixel outline", {"P"}},
-           {"Lock pixel", {"Ctrl+Click"}},
-           {"Copy pixel value", {"Ctrl+C"}},
-           {"Color match", {"M"}},
-           {"Histogram / Info / Layers", {"Ctrl+H", "I", "L"}},
-           {"Compare", {"Ctrl+K"}}}},
+          {{"Pixel grid", {}, {A::Grid}},
+           {"Pixel outline", {}, {A::PixelOutline}},
+           {"Lock pixel", {"Ctrl+Click"}, {A::LockPixel}},
+           {"Copy pixel value", {}, {A::CopyValue}},
+           {"Color match", {}, {A::ColorMatch}},
+           {"Histogram / Info / Layers", {}, {A::Histogram, A::Info, A::Layers}},
+           {"Compare", {}, {A::Compare}}}},
          {"Window",
-          {{"Always on top", {"Ctrl+T"}},
-           {"Opacity", {"Alt+Wheel"}},
-           {"Transparent to mouse", {"Ctrl+Shift+T"}},
-           {"Move window", {"Right drag", "Alt+drag"}},
-           {"Settings", {"Ctrl+,"}},
-           {"Keyboard shortcuts", {"F1"}},
-           {"Close", {"Esc", "Ctrl+W"}}}}},
+          {{"Always on top", {}, {A::AlwaysOnTop}},
+           {"Opacity", {"Alt+Wheel"}, {}},
+           {"Transparent to mouse", {}, {A::ClickThrough}},
+           {"Move window", {"Right drag", "Alt+drag"}, {}},
+           {"Settings", {}, {A::Settings}},
+           {"Keyboard shortcuts", {}, {A::Help}},
+           {"Close", {"Esc"}, {A::Quit}}}}},
     };
     return columns[c];
+}
+
+// The keys a row shows: each action's primary key, the secondary keys while there is room, then fixed keys.
+std::vector<std::string> rowKeys(const HelpRow& r) {
+    std::vector<std::string> out;
+    for (int slot = 0; slot < 2; ++slot)
+        for (Action a : r.actions) {
+            const std::string k = keyName(binding(a, slot));
+            if (!k.empty() && (slot == 0 || out.size() + r.keys.size() < 4)) out.push_back(k);
+        }
+    for (const char* k : r.keys) out.push_back(k);
+    if (out.size() > 4) out.resize(4);
+    return out;
 }
 
 bool matches(const HelpRow& r, const std::string& filter) {
@@ -729,8 +744,8 @@ bool matches(const HelpRow& r, const std::string& filter) {
     };
     const std::string f = lower(filter);
     if (lower(r.label).find(f) != std::string::npos) return true;
-    for (const char* k : r.keys)
-        if (k && lower(k).find(f) != std::string::npos) return true;
+    for (const std::string& k : rowKeys(r))
+        if (lower(k).find(f) != std::string::npos) return true;
     return false;
 }
 
@@ -790,7 +805,7 @@ void helpPanel() {
     const char* hint = "Esc or F1 to close";
     drawText(dl, fontRegular, 11, p.x + width - S(4) - S(20) - S(8) - textSize(fontRegular, 11, hint).x, hcy, t.tx3, hint);
     if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(4) - S(20), std::round(hcy - S(10))), 20, 14, "Close",
-                    "F1"))
+                    keyText(Action::Help)))
         app.showHelp = false;
 
     // Three columns of groups.
@@ -816,10 +831,10 @@ void helpPanel() {
                 if (!matches(r, f)) continue;
                 const float cy = y + S(12);
                 float kx = cx + colW;
-                for (int k = 3; k >= 0; --k) {
-                    if (!r.keys[k]) continue;
-                    kx -= kbdChip(dl, 0, 0, r.keys[k], false, true);
-                    kbdChip(dl, kx, cy, r.keys[k], true, true);
+                const std::vector<std::string> keys = rowKeys(r);
+                for (int k = int(keys.size()) - 1; k >= 0; --k) {
+                    kx -= kbdChip(dl, 0, 0, keys[size_t(k)].c_str(), false, true);
+                    kbdChip(dl, kx, cy, keys[size_t(k)].c_str(), true, true);
                     kx -= S(4);
                 }
                 drawText(dl, fontRegular, 12, cx, cy, t.tx2,
@@ -843,7 +858,10 @@ void helpPanel() {
     const float bw = r.x;
     r.measure = false;
     r.x = p.x + width - padX - bw;
-    r.button("keys", Icon::Count, "Open Keys settings", kBordered | kDisabled, "Settings come in a later version", nullptr);
+    if (r.button("keys", Icon::Count, "Open Keys settings", kBordered, "Reassign keys in Settings", keyText(Action::Settings))) {
+        app.showHelp = false;
+        app.showSettings = true;
+    }
     ImGui::End();
 }
 

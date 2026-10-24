@@ -176,7 +176,7 @@ ImU32 swatchColor(const float display[4]) {
 const char* kCheckerNames[3] = {"small", "medium", "large"};
 
 void zoomMenuItems() {
-    if (menuItem({"Fit to window", "F", app.fit, true, true})) {
+    if (menuItem({"Fit to window", keyText(Action::Fit), app.fit, true, true})) {
         app.fit = true;
         fitToWindow();
     }
@@ -195,7 +195,7 @@ void textureMenuItems() {
     if (menuItem({"Linear", "Shift+L", app.dataIsLinear, true, true})) app.dataIsLinear = true;
     menuSeparator();
     menuHeading("Normal map");
-    if (menuItem({"Reconstruct Z", "N", app.normalZ, true, true})) app.normalZ = !app.normalZ;
+    if (menuItem({"Reconstruct Z", keyText(Action::NormalMode), app.normalZ, true, true})) app.normalZ = !app.normalZ;
     if (menuItem({"Flip green (DirectX / OpenGL)", nullptr, app.flipGreen, true, true})) app.flipGreen = !app.flipGreen;
     menuSeparator();
     menuHeading("Mip level");
@@ -288,9 +288,9 @@ void alphaMenuItems() {
 
 void tilingMenuItems() {
     menuHeading("Tiling");
-    if (menuItem({"Off", "T", app.tiling == Tiling::Off, true, true})) setTiling(Tiling::Off);
-    if (menuItem({"3\xC3\x97" "3 seamless", "T", app.tiling == Tiling::Seamless, true, true})) setTiling(Tiling::Seamless);
-    if (menuItem({"3\xC3\x97" "3 with borders", "T", app.tiling == Tiling::Bordered, true, true}))
+    if (menuItem({"Off", keyText(Action::Tiling), app.tiling == Tiling::Off, true, true})) setTiling(Tiling::Off);
+    if (menuItem({"3\xC3\x97" "3 seamless", keyText(Action::Tiling), app.tiling == Tiling::Seamless, true, true})) setTiling(Tiling::Seamless);
+    if (menuItem({"3\xC3\x97" "3 with borders", keyText(Action::Tiling), app.tiling == Tiling::Bordered, true, true}))
         setTiling(Tiling::Bordered);
     menuSeparator();
     menuNote("T cycles through the modes");
@@ -298,11 +298,13 @@ void tilingMenuItems() {
 
 void themeMenuItems() {
     if (menuItem({"Dark", nullptr, app.darkTheme, true, true}) && !app.darkTheme) {
-        app.darkTheme = true;
+        app.themeMode = 0;
+        applyTheme();
         saveSettings();
     }
     if (menuItem({"Light", nullptr, !app.darkTheme, true, true}) && app.darkTheme) {
-        app.darkTheme = false;
+        app.themeMode = 1;
+        applyTheme();
         saveSettings();
     }
 }
@@ -321,7 +323,7 @@ struct TopLayout {
 
 void fileGroup(Row& r, const TopLayout& L) {
     const Theme& t = T();
-    if (r.button("open", Icon::Open, nullptr, 0, "Open", "Ctrl+O")) showOpenDialog();
+    if (r.button("open", Icon::Open, nullptr, 0, "Open", keyText(Action::Open))) showOpenDialog();
     const int prevNext = app.folder.size() > 1 ? 0 : kDisabled;
     if (r.button("prev", Icon::Prev, nullptr, prevNext, "Previous file", "Left")) step(-1);
     if (r.button("next", Icon::Next, nullptr, prevNext, "Next file", "Right")) step(+1);
@@ -340,7 +342,7 @@ void fileGroup(Row& r, const TopLayout& L) {
             r.hole(ImRect(a, b));
             const std::string full = app.fromClipboard && app.error.empty() ? "Pasted from the clipboard"
                                                                              : utf8(app.path.wstring());
-            requestTip(ImRect(ImVec2(a.x, r.cy - S(12)), b), full.c_str(), "Ctrl+Alt+C");
+            requestTip(ImRect(ImVec2(a.x, r.cy - S(12)), b), full.c_str(), keyText(Action::CopyPath));
             if (ImGui::IsItemClicked()) copyFilePath();
         }
     }
@@ -364,11 +366,11 @@ void fileGroup(Row& r, const TopLayout& L) {
 void viewGroup(Row& r, const TopLayout& L) {
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
-    if (r.button("fit", Icon::Fit, nullptr, (app.fit && !off ? kOn : 0) | off, "Fit to window", "F")) {
+    if (r.button("fit", Icon::Fit, nullptr, (app.fit && !off ? kOn : 0) | off, "Fit to window", keyText(Action::Fit))) {
         app.fit = true;
         fitToWindow();
     }
-    if (r.button("actual", Icon::Count, "1:1", (!app.fit && app.zoom == 1.0f && !off ? kOn : 0) | off, "Actual size", "1"))
+    if (r.button("actual", Icon::Count, "1:1", (!app.fit && app.zoom == 1.0f && !off ? kOn : 0) | off, "Actual size", keyText(Action::ActualSize)))
         zoomCentered(1.0f);
     const std::string zoom = off ? std::string("\xE2\x80\x94") : formatZoom(app.zoom);
     ImRect zr;
@@ -378,17 +380,18 @@ void viewGroup(Row& r, const TopLayout& L) {
         endMenu();
     }
     if (L.compact) return;
-    if (r.button("rotl", Icon::RotateLeft, nullptr, off, "Rotate left", "Ctrl+L")) rotate(-1);
-    if (r.button("rotr", Icon::RotateRight, nullptr, off, "Rotate right", "Ctrl+R")) rotate(+1);
-    if (r.button("fliph", Icon::FlipH, nullptr, (app.flipH ? kOn : 0) | off, "Flip horizontal", "H")) app.flipH = !app.flipH;
-    if (r.button("flipv", Icon::FlipV, nullptr, (app.flipV ? kOn : 0) | off, "Flip vertical", "V")) app.flipV = !app.flipV;
+    if (r.button("rotl", Icon::RotateLeft, nullptr, off, "Rotate left", keyText(Action::RotateLeft))) rotate(-1);
+    if (r.button("rotr", Icon::RotateRight, nullptr, off, "Rotate right", keyText(Action::RotateRight))) rotate(+1);
+    if (r.button("fliph", Icon::FlipH, nullptr, (app.flipH ? kOn : 0) | off, "Flip horizontal", keyText(Action::FlipH))) app.flipH = !app.flipH;
+    if (r.button("flipv", Icon::FlipV, nullptr, (app.flipV ? kOn : 0) | off, "Flip vertical", keyText(Action::FlipV))) app.flipV = !app.flipV;
 }
 
 // The channel switch (.seg): RGB R G B A L.
 void channelSwitch(Row& row) {
     static const char* labels[] = {"RGB", "R", "G", "B", "A", "L"};
     static const char* tips[] = {"All channels", "Red channel", "Green channel", "Blue channel", "Alpha channel", "Luminance"};
-    static const char* keys[] = {"C", "R", "G", "B", "A", "Y"};
+    const char* keys[] = {keyText(Action::AllChannels), keyText(Action::Red),   keyText(Action::Green),
+                          keyText(Action::Blue),        keyText(Action::Alpha), keyText(Action::Luminance)};
     float widths[6], total = 2 * line();
     for (int i = 0; i < 6; ++i) {
         widths[i] = std::max(S(22), S(6) * 2 + textSize(fontMedium, 12, labels[i]).x) + (i ? line() : 0.0f);
@@ -459,7 +462,7 @@ void backgroundGroup(Row& r) {
     const bool alphaOpen = ImGui::IsPopupOpen("alpha menu");
     toggleMenuOnPress(r.button("alphabg", Icon::AlphaBackground, nullptr,
                                kChevron | (checker && !off ? kOn : 0) | (alphaOpen ? kOpen : 0) | off,
-                               "Alpha background", "Shift+A"),
+                               "Alpha background", keyText(Action::AlphaBackground)),
                       "alpha menu");
     if (!r.measure && beginMenu("alpha menu", ImVec2(x0, r.cy + S(16)), ImVec2(0, 0), S(196))) {
         alphaMenuItems();
@@ -469,7 +472,7 @@ void backgroundGroup(Row& r) {
     const bool tilingOpen = ImGui::IsPopupOpen("tiling menu");
     toggleMenuOnPress(r.button("tiling", Icon::Tiling, nullptr,
                                kChevron | (app.tiling != Tiling::Off && !off ? kOn : 0) | (tilingOpen ? kOpen : 0) | off,
-                               "Tiling", "T"),
+                               "Tiling", keyText(Action::Tiling)),
                       "tiling menu");
     if (!r.measure && beginMenu("tiling menu", ImVec2(x1, r.cy + S(16)), ImVec2(0, 0), S(236))) {
         tilingMenuItems();
@@ -480,9 +483,9 @@ void backgroundGroup(Row& r) {
 void overlaysGroup(Row& r) {
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
-    if (r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", "Ctrl+G")) app.grid = !app.grid;
+    if (r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", keyText(Action::Grid))) app.grid = !app.grid;
     r.button("ruler", Icon::Ruler, nullptr, kDisabled, "Ruler (coming soon)", "Ctrl+U");
-    if (r.button("outline", Icon::PixelOutline, nullptr, (app.pixelOutline && !off ? kOn : 0) | off, "Pixel outline", "P"))
+    if (r.button("outline", Icon::PixelOutline, nullptr, (app.pixelOutline && !off ? kOn : 0) | off, "Pixel outline", keyText(Action::PixelOutline)))
         app.pixelOutline = !app.pixelOutline;
 }
 
@@ -490,10 +493,10 @@ void analysisGroup(Row& r) {
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     r.button("match", Icon::ColorMatch, nullptr, kDisabled, "Color match (coming soon)", "M");
-    if (r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", "Ctrl+H"))
+    if (r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", keyText(Action::Histogram)))
         app.showHistogram = !app.showHistogram;
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
-    if (r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", "I"))
+    if (r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
         app.showInfo = !app.showInfo;
     r.button("layers", Icon::Layers, nullptr, kDisabled, "Layers (coming soon)", "L");
 }
@@ -502,8 +505,8 @@ void moreMenuItems() {
     const bool off = noImage();
     if (menuItem({"Rotate left", "Ctrl+L", false, !off, false, Icon::RotateLeft})) rotate(-1);
     if (menuItem({"Rotate right", "Ctrl+R", false, !off, false, Icon::RotateRight})) rotate(+1);
-    if (menuItem({"Flip horizontal", "H", false, !off, false, Icon::FlipH})) app.flipH = !app.flipH;
-    if (menuItem({"Flip vertical", "V", false, !off, false, Icon::FlipV})) app.flipV = !app.flipV;
+    if (menuItem({"Flip horizontal", keyText(Action::FlipH), false, !off, false, Icon::FlipH})) app.flipH = !app.flipH;
+    if (menuItem({"Flip vertical", keyText(Action::FlipV), false, !off, false, Icon::FlipV})) app.flipV = !app.flipV;
     menuSeparator();
     if (submenu("more alpha", "Alpha background", Icon::AlphaBackground)) {
         alphaMenuItems();
@@ -516,7 +519,7 @@ void moreMenuItems() {
     menuSeparator();
     if (menuItem({"Grid", "Ctrl+G", false, !off, false, Icon::Grid})) app.grid = !app.grid;
     menuItem({"Ruler", "Ctrl+U", false, false, false, Icon::Ruler});
-    if (menuItem({"Pixel outline", "P", false, !off, false, Icon::PixelOutline})) app.pixelOutline = !app.pixelOutline;
+    if (menuItem({"Pixel outline", keyText(Action::PixelOutline), false, !off, false, Icon::PixelOutline})) app.pixelOutline = !app.pixelOutline;
     menuSeparator();
     if (submenu("more theme", "Theme", app.darkTheme ? Icon::Theme : Icon::Sun)) {
         themeMenuItems();
@@ -540,7 +543,7 @@ void compareGroup(Row& r, const TopLayout& L) {
 }
 
 void rightGroup(Row& r, const TopLayout& L) {
-    if (r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", "Ctrl+T")) setTopmost(!app.topmost);
+    if (r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", keyText(Action::AlwaysOnTop))) setTopmost(!app.topmost);
     char pct[16];
     std::snprintf(pct, sizeof pct, "%d%%", int(std::lround(app.opacity * 100)));
     const bool open = ImGui::IsPopupOpen("opacity menu");
@@ -549,16 +552,18 @@ void rightGroup(Row& r, const TopLayout& L) {
                       "opacity menu");
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
     if (r.button("clickthrough", Icon::ClickThrough, nullptr, app.clickThrough ? kOn : 0,
-                 "Transparent to mouse: clicks go to the window below", "Ctrl+Shift+T"))
+                 "Transparent to mouse: clicks go to the window below", keyText(Action::ClickThrough)))
         setClickThrough(!app.clickThrough);
     if (!L.compact) {
         if (r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
                      app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
-            app.darkTheme = !app.darkTheme;
+            app.themeMode = app.darkTheme ? 1 : 0;
+            applyTheme();
             saveSettings();
         }
-        r.button("settings", Icon::Settings, nullptr, kDisabled, "Settings (coming soon)", "Ctrl+,");
-        if (r.button("help", Icon::Help, nullptr, app.showHelp ? kOn : 0, "Keyboard shortcuts", "F1"))
+        if (r.button("settings", Icon::Settings, nullptr, app.showSettings ? kOn : 0, "Settings", keyText(Action::Settings)))
+            app.showSettings = !app.showSettings;
+        if (r.button("help", Icon::Help, nullptr, app.showHelp ? kOn : 0, "Keyboard shortcuts", keyText(Action::Help)))
             app.showHelp = !app.showHelp;
     }
     r.separator(16, 5);
@@ -614,6 +619,8 @@ void cycleAlphaBackground() {
 
 // The original stays where it is and the copies appear around it.
 void setTiling(Tiling t) { app.tiling = t; }
+
+void toggleLockPixel() { toggleLock(lastReadout); }
 
 void copyColorValue() {
     if (!lastReadout.readable) return;
@@ -946,7 +953,7 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     r.gap = gap;
     r.x = x;
     if (r.button("auto", Icon::Count, "Auto", kBordered | (app.stats.valid ? 0 : kDisabled), "Auto range from percentiles",
-                 "Ctrl+A", 16, 22))
+                 keyText(Action::AutoRange), 16, 22))
         autoRange();
     x = r.x;
     vs2(dl, x, cy, gap);
@@ -979,7 +986,7 @@ void hdrRow(ImDrawList* dl, float y0, float W) {
     vs2(dl, x, cy, gap);
 
     r.x = x;
-    if (r.button("clip", Icon::Clip, "Clip", app.showClipping ? kOn : 0, "Show clipping and NaN", "Z")) app.showClipping = !app.showClipping;
+    if (r.button("clip", Icon::Clip, "Clip", app.showClipping ? kOn : 0, "Show clipping and NaN", keyText(Action::Clipping))) app.showClipping = !app.showClipping;
     x = r.x;
     const float sw = S(12);
     const float nanX = x;
@@ -1112,7 +1119,7 @@ void statusRow(ImDrawList* dl, float y0, float W) {
         if (ImGui::InvisibleButton("value", ImVec2(vw, S(20))) && px.readable) copyColorValue();
         const bool hovered = ImGui::IsItemHovered() && px.readable;
         std::snprintf(buf, sizeof buf, "%s \xC2\xB7 click to copy", kColorFormatTips[int(app.colorFormat)]);
-        requestTip(ImRect(va, ImVec2(r.x + vw, r.cy + S(10))), buf, "Ctrl+C", true);
+        requestTip(ImRect(va, ImVec2(r.x + vw, r.cy + S(10))), buf, keyText(Action::CopyValue), true);
         if (px.readable && copiedRecently(copyId)) {
             drawText(dl, fontMono, 12, r.x, r.cy, t.ok, "Copied");
         } else {
@@ -1177,7 +1184,7 @@ void statusRow(ImDrawList* dl, float y0, float W) {
             r.field("float alpha", px.readable ? ("\xCE\xB1 " + formatFloat(px.raw[3])).c_str() : "\xCE\xB1 -", fontMono, 12,
                     t.tx3, "Alpha, stored value", "\xCE\xB1 0.0000");
     }
-    if (r.button("copy", Icon::Copy, nullptr, px.readable ? 0 : kDisabled, "Copy value", "Ctrl+C", 14, 20)) copyColorValue();
+    if (r.button("copy", Icon::Copy, nullptr, px.readable ? 0 : kDisabled, "Copy value", keyText(Action::CopyValue), 14, 20)) copyColorValue();
     if (r.button("lock", Icon::Pin, nullptr, app.pixelLocked ? kOn : (px.valid ? 0 : kDisabled),
                  app.pixelLocked ? "Unlock pixel" : "Lock pixel", "Ctrl+Click", 14, 20))
         toggleLock(px);

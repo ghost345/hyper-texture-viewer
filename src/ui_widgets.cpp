@@ -610,7 +610,7 @@ bool segmented(ImDrawList* dl, const char* id, float x, float cy, const char* co
 
 bool checkbox(ImDrawList* dl, const char* id, float x, float cy, const char* label, bool& value, const char* tip) {
     const Theme& t = T();
-    const float box = S(14), tw = label ? textSize(fontRegular, 13, label).x : 0.0f;
+    const float box = S(14), tw = label ? textSize(fontRegular, 12, label).x : 0.0f;
     const ImVec2 a(x, std::round(cy - box * 0.5f)), b(a.x + box, a.y + box);
     ImGui::SetCursorScreenPos(ImVec2(x, std::round(cy - S(10))));
     const bool pressed = ImGui::InvisibleButton(id, ImVec2(box + (label ? S(8) + tw : 0.0f), S(20)));
@@ -626,7 +626,7 @@ bool checkbox(ImDrawList* dl, const char* id, float x, float cy, const char* lab
         dl->AddRectFilled(a, b, t.bar2, S(2));
         dl->AddRect(a, b, hovered ? t.tx3 : t.bd2, S(2), 0, line());
     }
-    if (label) drawText(dl, fontRegular, 13, b.x + S(8), cy, t.tx, label);
+    if (label) drawText(dl, fontRegular, 12, b.x + S(8), cy, t.tx, label);
     if (tip) requestTip(ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()), tip, nullptr, true);
     return pressed;
 }

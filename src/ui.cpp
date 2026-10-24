@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "keys.h"
 #include "ui_internal.h"
 #include "viewer.h"
 
@@ -67,6 +68,8 @@ UiColors uiColors() {
     };
     UiColors c;
     rgb(t.vp, c.viewport);
+    if (app.customViewport)
+        for (int i = 0; i < 3; ++i) c.viewport[i] = app.viewportColor[i];
     rgb(t.ck1, c.checker1);
     rgb(t.ck2, c.checker2);
     return c;
@@ -108,118 +111,116 @@ void uiFrame() {
     }
     infoPanel();
     histogramPanel();
+    settingsPanel();
     helpPanel();
     notices();
     drawTooltip();
     finishMenuFrame();
 }
 
-bool uiKeyDown(int vk) {
-    if (ImGui::GetIO().WantTextInput) return false;
-    const bool ctrl = GetKeyState(VK_CONTROL) & 0x8000, shift = GetKeyState(VK_SHIFT) & 0x8000,
-               alt = GetKeyState(VK_MENU) & 0x8000;
-    const bool image = app.hasImage, hdr = image && isHighPrecision(app.image);
+namespace {
+
+void runAction(Action a) {
+    const bool hdr = app.hasImage && isHighPrecision(app.image);
     auto channel = [](Channel c) { app.channel = app.channel == c ? Channel::RGB : c; };
     auto exposure = [](float delta) { app.exposure = std::clamp(app.exposure + delta, -10.0f, 10.0f); };
+    switch (a) {
+        case Action::Open: showOpenDialog(); break;
+        case Action::PrevFile: step(-1); break;
+        case Action::NextFile: step(+1); break;
+        case Action::FirstFile: stepTo(0); break;
+        case Action::LastFile: stepTo(-1); break;
+        case Action::Paste: pasteFromClipboard(); break;
+        case Action::CopyPath: copyFilePath(); break;
+        case Action::Reload: reloadFile(); break;
 
-    if (ctrl && vk >= '1' && vk <= '9') {
-        openRecent(vk - '1');
-        return true;
-    }
-    switch (vk) {
-        // Files
-        case 'O': if (ctrl) showOpenDialog(); else return false; break;
-        case VK_LEFT:
-        case VK_PRIOR:
-        case VK_BACK: step(-1); break;
-        case VK_RIGHT:
-        case VK_NEXT: step(+1); break;
-        case VK_HOME: stepTo(0); break;
-        case VK_END: stepTo(-1); break;
-        case VK_F5: reloadFile(); break;
-
-        // View
-        case 'F': app.fit = true; fitToWindow(); break;
-        case '1': zoomCentered(1.0f); break;
-        case '2': zoomCentered(2.0f); break;
-        case '4': zoomCentered(4.0f); break;
-        case '8': zoomCentered(8.0f); break;
-        case VK_ADD: zoomCentered(app.zoom * 1.25f); break;
-        case VK_SUBTRACT: zoomCentered(app.zoom / 1.25f); break;
-        case 'L':
-            if (ctrl) rotate(-1);
-            else if (shift) app.dataIsLinear = !app.dataIsLinear;
-            else return false;
-            break;
-        case 'R': if (ctrl) rotate(+1); else channel(Channel::R); break;
-        case 'H':
-            if (ctrl) app.showHistogram = !app.showHistogram;
-            else app.flipH = !app.flipH;
-            break;
-        case 'V':
-            if (ctrl) pasteFromClipboard();
-            else app.flipV = !app.flipV;
-            break;
-        case VK_TAB:
+        case Action::Fit: app.fit = true; fitToWindow(); break;
+        case Action::ActualSize: zoomCentered(1.0f); break;
+        case Action::Zoom200: zoomCentered(2.0f); break;
+        case Action::Zoom400: zoomCentered(4.0f); break;
+        case Action::Zoom800: zoomCentered(8.0f); break;
+        case Action::ZoomIn: zoomCentered(app.zoom * 1.25f); break;
+        case Action::ZoomOut: zoomCentered(app.zoom / 1.25f); break;
+        case Action::RotateLeft: rotate(-1); break;
+        case Action::RotateRight: rotate(+1); break;
+        case Action::FlipH: app.flipH = !app.flipH; break;
+        case Action::FlipV: app.flipV = !app.flipV; break;
+        case Action::HidePanels:
             toggleBars();
             if (!app.showBars) cleanHintUntil = ImGui::GetTime() + 1.4;
             break;
 
-        // Channels and modes
-        case 'G': if (ctrl) app.grid = !app.grid; else channel(Channel::G); break;
-        case 'B': channel(Channel::B); break;
-        case 'A':
-            if (ctrl) { if (hdr) autoRange(); }
-            else if (shift) cycleAlphaBackground();
-            else channel(Channel::A);
-            break;
-        case 'Y': channel(Channel::Luminance); break;
-        case 'N':  // off, reconstruct Z, reconstruct Z with green flipped
+        case Action::AllChannels: app.channel = Channel::RGB; break;
+        case Action::Red: channel(Channel::R); break;
+        case Action::Green: channel(Channel::G); break;
+        case Action::Blue: channel(Channel::B); break;
+        case Action::Alpha: channel(Channel::A); break;
+        case Action::Luminance: channel(Channel::Luminance); break;
+        case Action::SrgbLinear: app.dataIsLinear = !app.dataIsLinear; break;
+        case Action::NormalMode:  // off, reconstruct Z, reconstruct Z with green flipped
             if (!app.normalZ) app.normalZ = true;
             else if (!app.flipGreen) app.flipGreen = true;
             else app.normalZ = app.flipGreen = false;
             break;
-        case VK_OEM_4:  // [
-            app.forcedMip = app.forcedMip <= 0 ? -1 : app.forcedMip - 1;
-            break;
-        case VK_OEM_6:  // ]
-            app.forcedMip = std::min(app.forcedMip + 1, std::max(app.textureMips - 1, 0));
-            break;
-        case 'T':
-            if (ctrl && shift) setClickThrough(!app.clickThrough);
-            else if (ctrl) setTopmost(!app.topmost);
-            else setTiling(Tiling((int(app.tiling) + 1) % 3));
-            break;
+        case Action::MipDown: app.forcedMip = app.forcedMip <= 0 ? -1 : app.forcedMip - 1; break;
+        case Action::MipUp: app.forcedMip = std::min(app.forcedMip + 1, std::max(app.textureMips - 1, 0)); break;
+        case Action::AlphaBackground: cycleAlphaBackground(); break;
+        case Action::Tiling: setTiling(Tiling((int(app.tiling) + 1) % 3)); break;
 
-        // HDR
-        case VK_OEM_MINUS: if (hdr) exposure(-0.5f); break;
-        case VK_OEM_PLUS: if (hdr) exposure(+0.5f); break;
-        case '0': app.exposure = 0.0f; break;
-        case 'Z': app.showClipping = !app.showClipping; break;
+        case Action::ExposureDown: if (hdr) exposure(-0.5f); break;
+        case Action::ExposureUp: if (hdr) exposure(+0.5f); break;
+        case Action::ResetExposure: app.exposure = 0.0f; break;
+        case Action::AutoRange: if (hdr) autoRange(); break;
+        case Action::Clipping: app.showClipping = !app.showClipping; break;
 
-        // Analysis
-        case 'P': app.pixelOutline = !app.pixelOutline; break;
-        case 'C':
-            if (ctrl && alt) copyFilePath();
-            else if (ctrl && shift) copyAllColorFormats();
-            else if (ctrl) copyColorValue();
-            else app.channel = Channel::RGB;
-            break;
-        case 'I': app.showInfo = !app.showInfo; break;
+        case Action::Grid: app.grid = !app.grid; break;
+        case Action::PixelOutline: app.pixelOutline = !app.pixelOutline; break;
+        case Action::LockPixel: toggleLockPixel(); break;
+        case Action::CopyValue: copyColorValue(); break;
+        case Action::CopyAllFormats: copyAllColorFormats(); break;
+        case Action::ColorMatch: break;
+        case Action::Histogram: app.showHistogram = !app.showHistogram; break;
+        case Action::Info: app.showInfo = !app.showInfo; break;
+        case Action::Layers: break;
+        case Action::Compare: break;
 
-        // Window
-        case VK_F1: app.showHelp = !app.showHelp; break;
-        case 'W': if (ctrl) DestroyWindow(app.hwnd); else return false; break;
-        case VK_ESCAPE:
-            if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return false;  // ImGui closes the menu
-            if (app.loading) cancelLoading();
-            else if (app.showHelp) app.showHelp = false;
-            else if (app.showInfo) app.showInfo = false;
-            else if (app.showHistogram) app.showHistogram = false;
-            else DestroyWindow(app.hwnd);
-            break;
-        default: return false;
+        case Action::AlwaysOnTop: setTopmost(!app.topmost); break;
+        case Action::ClickThrough: setClickThrough(!app.clickThrough); break;
+        case Action::Settings: app.showSettings = !app.showSettings; break;
+        case Action::Help: app.showHelp = !app.showHelp; break;
+        case Action::Quit: DestroyWindow(app.hwnd); break;
+        case Action::Count: break;
     }
+}
+
+}  // namespace
+
+bool uiKeyDown(int vk) {
+    if (ImGui::GetIO().WantTextInput) return false;
+    const bool ctrl = GetKeyState(VK_CONTROL) & 0x8000, shift = GetKeyState(VK_SHIFT) & 0x8000,
+               alt = GetKeyState(VK_MENU) & 0x8000;
+    if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN) return false;
+    const KeyBinding pressed{uint16_t(vk), uint8_t((ctrl ? kModCtrl : 0) | (shift ? kModShift : 0) | (alt ? kModAlt : 0))};
+    if (settingsKeyDown(pressed)) return true;  // Settings is waiting for a new key
+
+    // Fixed keys: recent files and Esc.
+    if (pressed.mods == kModCtrl && vk >= '1' && vk <= '9') {
+        openRecent(vk - '1');
+        return true;
+    }
+    if (vk == VK_ESCAPE) {
+        if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return false;  // ImGui closes the menu
+        if (app.loading) cancelLoading();
+        else if (app.showSettings) app.showSettings = false;
+        else if (app.showHelp) app.showHelp = false;
+        else if (app.showInfo) app.showInfo = false;
+        else if (app.showHistogram) app.showHistogram = false;
+        else DestroyWindow(app.hwnd);
+        return true;
+    }
+    const Action a = actionFor(pressed);
+    if (a == Action::Count) return false;
+    runAction(a);
     return true;
 }
 

@@ -13,6 +13,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Alpha over a checkerboard (three sizes), black, grey, white or a custom colour.
 - Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid and outline.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
+- Settings (Ctrl+,): theme (dark, light or as Windows), interface scale, viewport colour, checker size, what stays when switching files, folder order, automatic reload, single instance, portable mode, and every key reassignable (the F1 screen shows the current keys).
 - Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top and window opacity, borderless window that hides its bars with Tab.
 - Files load in the background with progress; the open file reloads when it changes on disk, a broken file shows what went wrong without stopping browsing. Recent files with thumbnails, paste from the clipboard.
 - One exe, static runtime, no installer. Windows 10/11 x64; Direct3D 11 on any GPU, with a software fallback (WARP).
@@ -34,7 +35,7 @@ All shortcuts are listed in the app under F1. The most used:
 | Ctrl + click, Ctrl+C | Lock the readout to a pixel, copy its value |
 | `T`, Shift+A, Shift+L, `N` | Tiling, alpha background, sRGB/linear, normal map mode |
 | Right drag, Alt + drag | Move the window |
-| Tab, `I`, Ctrl+H, F1 | Hide bars, info panel, histogram, shortcuts |
+| Tab, `I`, Ctrl+H, F1, Ctrl+, | Hide bars, info panel, histogram, shortcuts, settings |
 | Ctrl+O, Ctrl+V, F5 | Open, paste from clipboard, reload |
 | Esc | Close a panel or quit |
 

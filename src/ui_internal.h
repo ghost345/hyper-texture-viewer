@@ -9,6 +9,7 @@
 
 #include "app.h"
 #include "icons.h"
+#include "keys.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -186,11 +187,15 @@ void viewportOverlays();  // grid, tile borders, pixel outline, and the empty, e
 void notices();           // "Reloaded", the clean-mode hint
 void infoPanel();
 void histogramPanel();  // ui_panels.cpp
+void settingsPanel();   // ui_settings.cpp
+// While Settings waits for a new key, takes the key press. False when it is not waiting.
+bool settingsKeyDown(KeyBinding k);
 void helpPanel();
 void opacityPopup(ImVec2 anchorRightBottom);
 bool isLoadingVisible();  // a load has run long enough to show its progress
 
 void copyColorValue();
+void toggleLockPixel();  // the pixel under the cursor
 void copyAllColorFormats();
 void cycleAlphaBackground();
 void setTiling(Tiling t);

@@ -11,7 +11,8 @@ constexpr UINT WM_APP_LOADED = WM_APP + 1;  // a background load finished; lPara
 constexpr UINT_PTR kWatchTimer = 1;         // checks the shown file for changes on disk
 constexpr UINT_PTR kLoadingTimer = 2;       // keeps frames coming while a load runs
 constexpr UINT_PTR kZebraTimer = 3;         // moves the clipping stripes
-constexpr int kClickThroughHotkey = 1;      // Ctrl+Shift+T, registered while the window lets clicks through
+constexpr int kClickThroughHotkey = 1;
+constexpr ULONG_PTR kOpenFileMessage = 0x48545631;  // WM_COPYDATA from a second start: a path to open      // Ctrl+Shift+T, registered while the window lets clicks through
 
 std::wstring widen(const std::string& s);
 std::string narrow(const std::wstring& w);

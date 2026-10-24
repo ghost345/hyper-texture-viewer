@@ -152,8 +152,23 @@ struct App {
     bool showInfo = false;
     bool showHelp = false;
     bool showHistogram = false;
+    bool showSettings = false;
     int histogramMode = 0;       // RGB, R, G, B, luminance, parade
     bool histogramLog = false;   // pixel counts on a log scale
+
+    // Settings (Ctrl+,), kept in settings.ini.
+    int themeMode = 0;            // 0 dark, 1 light, 2 as Windows apps
+    float interfaceScale = 0.0f;  // 0 follows the monitor's DPI
+    float dpiScale = 1.0f;        // the monitor's
+    bool customViewport = false;  // the viewport colour differs from the theme's
+    float viewportColor[3] = {0.106f, 0.106f, 0.106f};
+    bool keepView = true;         // keep zoom and position when switching files (else fit each file)
+    bool keepExposure = true;     // keep exposure and range when switching files
+    bool autoReload = true;       // reload the shown file when it changes on disk
+    int folderSort = 0;           // name (natural), name, date modified, size, type
+    bool singleInstance = true;   // files opened from Explorer go to the running window
+    int cacheMB = 1024;           // decoded images kept for going back and forth
+    int prefetch = 1;             // neighbours decoded ahead on each side: 0, 1 or 2
 
     // Panning.
     bool dragging = false;
@@ -181,10 +196,17 @@ void showInExplorer();
 void openRecent(int index);
 ID3D11ShaderResourceView* recentThumbnail(int index);
 void chooseCustomBackground();
+bool pickColor(float rgb[3]);  // the Windows colour dialog; false when cancelled
 void autoRange();
 // Per-channel statistics of the shown image for the Histogram panel, computed once when first needed.
 void ensureChannelStats();
 void saveSettings();
+// settings.ini next to the exe instead of in %APPDATA%.
+bool portableMode();
+bool setPortableMode(bool on);  // false when the exe's folder is not writable
+void applyTheme();              // after themeMode changes, or Windows switches its theme
+void applyInterfaceScale();     // after interfaceScale changes
+void relistFolder();            // after folderSort changes
 void relayout();  // after the bars change height
 void fitToWindow();
 void zoomAt(float newZoom, float x, float y);
