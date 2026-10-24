@@ -16,6 +16,12 @@
 #include "stats.h"
 #include "stb_image_write.h"
 #include "qoi.h"
+// tinyexr writes the EXR test files; the viewer reads them with OpenEXR.
+#define TINYEXR_IMPLEMENTATION
+#define TINYEXR_USE_MINIZ 0
+#define TINYEXR_USE_STB_ZLIB 1
+#define TINYEXR_USE_OPENMP 0
+#define TINYEXR_USE_THREAD 1
 #include "tinyexr.h"
 
 #include <webp/encode.h>
@@ -691,6 +697,49 @@ void testExr() {
     CHECK(r.image.maxValue == 7.0f);
 }
 
+std::string propertyValue(const std::vector<Property>& list, const char* key) {
+    for (const Property& p : list)
+        if (p.key == key) return p.value;
+    return {};
+}
+
+// Files tinyexr cannot write: DWAB with an offset data window, and a multipart file with a tiled PIZ part and a
+// DWAA part (tests/data, made with the OpenEXR Python bindings).
+void testExrFiles() {
+    auto load = [](const char* name) {
+        std::ifstream f(std::filesystem::path(HTV_TEST_DATA) / name, std::ios::binary);
+        const Bytes bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        CHECK(!bytes.empty());
+        LoadResult r = loadImage(bytes.data(), bytes.size(), "exr");
+        if (!r.ok) std::printf("  %s: %s\n", name, r.error.c_str());
+        CHECK(r.ok);
+        return r;
+    };
+    LoadResult r = load("dwab_offset.exr");
+    CHECK(r.image.width == 64 && r.image.height == 48 && r.image.format == GpuFormat::RGBA16F);
+    CHECK(r.image.description.find("DWAB") != std::string::npos);
+    float px[4];
+    CHECK(readPixel(r.image, 63, 47, px) && std::fabs(px[0] - 4.0f) < 0.1f && std::fabs(px[1] - 1.0f) < 0.05f &&
+          std::fabs(px[2] - 0.25f) < 0.02f && px[3] == 1.0f);
+    CHECK(readPixel(r.image, 0, 0, px) && std::fabs(px[0]) < 0.05f && std::fabs(px[1]) < 0.05f);
+    CHECK(propertyValue(r.image.exr, "Data window") == "64 \xC3\x97 48 at 10, 20");
+    CHECK(propertyValue(r.image.exr, "Display window") == "100 \xC3\x97 100 at 0, 0");
+    CHECK(propertyValue(r.image.exr, "owner") == "htv tests");
+
+    r = load("multipart_tiled.exr");
+    CHECK(r.image.layerKind == LayerKind::ExrLayers && r.image.layers.size() == 2);
+    if (r.image.layers.size() != 2) return;
+    CHECK(r.image.layers[0].name == "beauty" && r.image.layers[1].name == "depth");
+    CHECK(r.image.layers[1].detail == "Z (grey)");
+    CHECK(r.image.format == GpuFormat::RGBA32F);  // the depth part is 32-bit float
+    CHECK(readPixel(r.image, 63, 0, px) && px[0] == 4.0f && px[2] == 0.25f && px[3] == 1.0f);
+    CHECK(propertyValue(r.image.exr, "Tiles").rfind("16 \xC3\x97 16", 0) == 0);
+    CHECK(propertyValue(r.image.exr, "Compression") == "PIZ (beauty), DWAA (depth)");
+    r.image.shownLayer = 0;
+    CHECK(showLayer(r.image, 1) && readPixel(r.image, 10, 5, px) && px[0] == 15.0f && px[2] == 15.0f);
+    CHECK(r.image.maxValue == 63.0f + 47.0f);
+}
+
 void testDds() {
     Bytes bc1 = makeDds(256, 128, false);
     LoadResult r = loadImage(bc1.data(), bc1.size(), "dds");
@@ -806,11 +855,7 @@ void testPsdLayers() {
     CHECK(r.image.layers.empty());
 }
 
-std::string metaValue(const Image& img, const char* key) {
-    for (const Property& p : img.metadata)
-        if (p.key == key) return p.value;
-    return {};
-}
+std::string metaValue(const Image& img, const char* key) { return propertyValue(img.metadata, key); }
 
 void testMetadata() {
     // An ICC v2 profile whose description is "Test RGB".
@@ -1074,6 +1119,7 @@ int main(int argc, char** argv) {
     testHdrTransfer();
     testHdr();
     testExr();
+    testExrFiles();
     testDds();
     testDdsLayers();
     testPsdLayers();

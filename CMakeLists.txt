@@ -147,15 +147,36 @@ if(HTV_WITH_AVIF)
     FetchContent_MakeAvailable(libavif)
 endif()
 
+# OpenEXR: only the Core C library is linked (EXCLUDE_FROM_ALL keeps the C++ libraries out of the build). It reads
+# every compression, DWAA/DWAB and HTJ2K included, with its own vendored libdeflate and OpenJPH; Imath is fetched.
+set(OPENEXR_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(OPENEXR_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL_PKG_CONFIG OFF CACHE BOOL "" FORCE)
+set(OPENEXR_TEST_LIBRARIES OFF CACHE BOOL "" FORCE)
+set(OPENEXR_TEST_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_TEST_PYTHON OFF CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_DEFLATE ON CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_OPENJPH ON CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_IMATH ON CACHE BOOL "" FORCE)
+FetchContent_Declare(openexr
+    GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/openexr.git
+    GIT_TAG v3.4.9
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(openexr)
+
 unset(BUILD_TESTING)
 
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
 find_package(Threads REQUIRED)
-add_library(htv_image STATIC src/image.cpp src/psd.cpp src/apng.cpp src/metadata.cpp src/stats.cpp)
+add_library(htv_image STATIC src/image.cpp src/psd.cpp src/apng.cpp src/metadata.cpp src/exr.cpp src/stats.cpp)
 target_compile_options(htv_image PRIVATE ${htv_options})
 target_include_directories(htv_image PUBLIC src third_party)
 target_sources(htv_image PRIVATE src/codecs_modern.cpp)
-target_link_libraries(htv_image PUBLIC Threads::Threads PRIVATE webpdemux webp)
+target_link_libraries(htv_image PUBLIC Threads::Threads PRIVATE webpdemux webp OpenEXR::OpenEXRCore)
 if(HTV_WITH_JXL)
     target_compile_definitions(htv_image PRIVATE HTV_HAVE_JXL)
     target_link_libraries(htv_image PRIVATE jxl jxl_threads)
@@ -207,6 +228,7 @@ if(BUILD_TESTING)
     endif()
     # The tests encode WebP samples, so they link libwebp's encoder too.
     target_link_libraries(htv_tests PRIVATE htv_image webp)
+    target_compile_definitions(htv_tests PRIVATE HTV_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
     if(HTV_WITH_JXL)
         target_compile_definitions(htv_tests PRIVATE HTV_HAVE_JXL)
         target_link_libraries(htv_tests PRIVATE jxl)

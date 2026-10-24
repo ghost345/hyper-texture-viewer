@@ -13,6 +13,7 @@ namespace htv {
 LoadResult loadAvif(const uint8_t* data, size_t size);
 LoadResult loadJxl(const uint8_t* data, size_t size);
 LoadResult loadKtx(const uint8_t* data, size_t size);
+LoadResult loadExr(const uint8_t* data, size_t size);  // exr.cpp, through OpenEXR Core
 
 // Adds a PSD's layers (8 and 16 bit, RGB and greyscale) to `image`, which holds the file's composite, and its
 // print resolution. Leaves the image as it is when the file has no layers it can read.

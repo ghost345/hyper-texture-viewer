@@ -4,7 +4,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 
 ## What works
 
-- Formats: EXR (half and float, scanline, ZIP/PIZ/RLE, layers), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains, cubemaps, arrays and volumes), Radiance HDR, PNG (8 and 16 bit; APNG: all frames), JPEG, WebP (animations: all frames), AVIF and JPEG XL (8-16 bit, float, HDR in PQ/HLG, BT.2020 and Display P3 converted for display; sequences and animations: all frames), KTX/KTX2 (mip chains, cubemaps, arrays and volumes, Basis Universal transcoded to BC7), QOI, TGA, BMP, PSD (composite and layers, 8 and 16 bit), GIF (all frames).
+- Formats: EXR (half, float and uint; scanline and tiled; every compression including DWAA/DWAB, B44, PXR24 and HTJ2K; layers and multipart), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains, cubemaps, arrays and volumes), Radiance HDR, PNG (8 and 16 bit; APNG: all frames), JPEG, WebP (animations: all frames), AVIF and JPEG XL (8-16 bit, float, HDR in PQ/HLG, BT.2020 and Display P3 converted for display; sequences and animations: all frames), KTX/KTX2 (mip chains, cubemaps, arrays and volumes, Basis Universal transcoded to BC7), QOI, TGA, BMP, PSD (composite and layers, 8 and 16 bit), GIF (all frames).
 - Anything else goes through the codecs installed in Windows (WIC): TIFF, JPEG XR, ICO, camera RAW, and HEIC/HEIF when the Microsoft Store HEIF extension is installed.
 - Compressed DDS goes to the GPU as is, so BC textures look exactly as in a game.
 - Pixels stay sharp when zoomed in (no filtering at 100% and above). Below 100% the mip chain averages the source pixels, so detail does not flicker or alias.
@@ -62,12 +62,13 @@ MinGW-w64 works too and produces a static exe. GitHub Actions builds every push,
 
 | Library | Use | License |
 | --- | --- | --- |
-| [stb_image, stb_image_write](https://github.com/nothings/stb) | PNG, JPEG, TGA, BMP, PSD, GIF, HDR; zlib for EXR | Public domain / MIT |
+| [stb_image, stb_image_write](https://github.com/nothings/stb) | PNG, JPEG, TGA, BMP, PSD, GIF, HDR | Public domain / MIT |
 | [libwebp 1.5.0](https://github.com/webmproject/libwebp) | WebP, fetched by CMake | BSD-3-Clause |
 | [libavif 1.4.2](https://github.com/AOMediaCodec/libavif) with [dav1d 1.5.3](https://code.videolan.org/videolan/dav1d) | AVIF, fetched by CMake | BSD-2-Clause |
 | [libjxl 0.11.1](https://github.com/libjxl/libjxl) (with brotli, highway, lcms2) | JPEG XL, fetched by CMake | BSD-3-Clause (lcms2: MIT) |
 | [KTX-Software 4.4.2](https://github.com/KhronosGroup/KTX-Software) | KTX/KTX2 and Basis Universal, fetched by CMake | Apache-2.0 |
 | [qoi](https://github.com/phoboslab/qoi) | QOI | MIT |
-| [tinyexr 1.0.9](https://github.com/syoyo/tinyexr) | EXR in the prototype; to be replaced by OpenEXR for DWAA/DWAB, layers and multipart | BSD-3-Clause |
+| [OpenEXR 3.4.9](https://github.com/AcademySoftwareFoundation/openexr) Core (with Imath, libdeflate, OpenJPH) | EXR, fetched by CMake | BSD-3-Clause (libdeflate: MIT, OpenJPH: BSD-2-Clause) |
+| [tinyexr 1.0.9](https://github.com/syoyo/tinyexr) | Writes the EXR files the tests read | BSD-3-Clause |
 
 Licenses are in the header files under `third_party/`; the fetched libraries carry theirs in their source trees.
