@@ -194,6 +194,8 @@ void stepMatchRegion(int delta);
 void comparePanel();  // ui_compare.cpp
 void compareOverlay();
 void toggleCompare();
+void framesPanel();  // ui_frames.cpp
+void toggleFramesOrLayers();
 void settingsPanel();   // ui_settings.cpp
 // While Settings waits for a new key, takes the key press. False when it is not waiting.
 bool settingsKeyDown(KeyBinding k);

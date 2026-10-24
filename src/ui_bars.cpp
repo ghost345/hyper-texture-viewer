@@ -500,7 +500,10 @@ void analysisGroup(Row& r) {
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
     if (r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
         app.showInfo = !app.showInfo;
-    r.button("layers", Icon::Layers, nullptr, kDisabled, "Layers (coming soon)", "L");
+    const bool anim = isAnimation();
+    if (r.button("layers", Icon::Layers, nullptr, (app.showFrames && anim ? kOn : 0) | (noImage() ? kDisabled : 0),
+                 anim ? "Frames" : "Layers", keyText(Action::Layers)))
+        toggleFramesOrLayers();
 }
 
 void moreMenuItems() {

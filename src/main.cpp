@@ -231,6 +231,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 redraw = true;
             } else if (wp == kZebraTimer) {
                 redraw = true;
+            } else if (wp == kFrameTimer) {
+                advanceFrame();
             }
             return 0;
         case WM_APP_LOADED:
@@ -357,6 +359,11 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
             if (wp == VK_SPACE && !(ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput)) {
+                // Space plays or pauses an animation while the Frames panel is open, otherwise it pans.
+                if (app.showFrames && isAnimation()) {
+                    if (!spaceDown) { app.framePlaying = !app.framePlaying; app.frameShownMs = nowMs(); requestRedraw(); }
+                    return 0;
+                }
                 spaceDown = true;
                 return 0;
             }
@@ -764,7 +771,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     // Frames are drawn while something changes and for a moment after the last input, then the loop sleeps.
     MSG msg{};
     int exitCode = 0;
-    bool zebraTimer = false;
+    bool zebraTimer = false, frameTimer = false;
     for (;;) {
         // The clipping stripes move, so they need frames while they are on screen (15 a second is plenty).
         const bool zebra = app.showClipping && app.hasImage && isHighPrecision(app.image) && app.benchPath.empty();
@@ -772,6 +779,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
             if (zebra) SetTimer(app.hwnd, kZebraTimer, 66, nullptr);
             else KillTimer(app.hwnd, kZebraTimer);
             zebraTimer = zebra;
+        }
+        // An animation playing needs a steady beat; the frame's own delay decides when the next goes up.
+        const bool playing = isAnimation() && app.framePlaying && app.benchPath.empty();
+        if (playing != frameTimer) {
+            if (playing) SetTimer(app.hwnd, kFrameTimer, 15, nullptr);
+            else KillTimer(app.hwnd, kFrameTimer);
+            frameTimer = playing;
         }
         const bool active = nowMs() - lastInputMs < 1500.0 || app.dragging || app.loading;
         if (!active || IsIconic(app.hwnd)) WaitMessage();

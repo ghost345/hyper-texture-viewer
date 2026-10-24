@@ -565,6 +565,9 @@ void finishLoad(LoadedFile* raw) {
     app.stats = std::move(f->stats);
     app.imageAlpha = f->alpha;
     app.hasImage = true;
+    app.frameIndex = 0;
+    app.frameShownMs = nowMs();
+    if (app.image.frames.size() <= 1) app.showFrames = false;
     app.fromClipboard = f->clipboard;
     app.shownPath = f->path;
     app.fileSize = f->fileSize;
@@ -654,6 +657,27 @@ void compareSlotLoaded(LoadedFile* raw) {
     s.generation = ++compareGeneration[slot];
     if (f->path != app.shownPath) cacheInsert(std::move(f));
     requestRedraw();
+}
+
+bool isAnimation() { return app.hasImage && app.image.frames.size() > 1; }
+
+void showFrame(int index) {
+    if (!isAnimation()) return;
+    const int n = int(app.image.frames.size());
+    index = ((index % n) + n) % n;
+    std::string error;
+    if (!uploadSurface(app.image.frames[size_t(index)].surface, app.image.format, error)) return;
+    app.frameIndex = index;
+    app.frameShownMs = nowMs();
+    if (app.pixelLocked) app.imageAlpha = app.imageAlpha;  // readouts refresh on the new generation
+    requestRedraw();
+}
+
+void advanceFrame() {
+    if (!isAnimation() || !app.framePlaying) return;
+    const int delay = std::max(app.image.frames[size_t(app.frameIndex)].delayMs, 20);  // 0 ms frames would spin
+    if (nowMs() - app.frameShownMs + 1.0 < double(delay)) return;
+    showFrame(app.frameIndex + 1);
 }
 
 void openStartupFile(const fs::path& path) { requestOpen(path, OpenMode::New); }

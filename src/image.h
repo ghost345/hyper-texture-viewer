@@ -64,6 +64,12 @@ struct Surface {
     std::vector<uint8_t> data;
 };
 
+// One frame of an animation (GIF, animated WebP): a full-canvas RGBA8 image and how long it stays.
+struct Frame {
+    Surface surface;
+    int delayMs = 0;
+};
+
 struct Image {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -72,6 +78,8 @@ struct Image {
     std::string description;     // e.g. "EXR, half RGBA, PIZ"
     std::string note;            // what the prototype left out, e.g. "cubemap: face 0 of 6 shown"
     float maxValue = 0.0f;       // brightest RGB value for float images, 0 otherwise
+    std::vector<Frame> frames;   // more than one: an animation. frame 0's pixels equal mips[0].
+    int loopCount = 0;           // 0 loops forever
 };
 
 struct LoadResult {

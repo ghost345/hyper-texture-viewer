@@ -335,11 +335,20 @@ LoadResult loadWebp(const uint8_t* data, size_t size) {
         }
         img.width = anim.canvas_width;
         img.height = anim.canvas_height;
-        Surface s = makeSurface(info, img.width, img.height);
-        std::memcpy(s.data.data(), frame, s.data.size());
+        img.loopCount = int(anim.loop_count);
+        int prev = 0;
+        do {
+            Frame f;
+            f.surface = makeSurface(info, img.width, img.height);
+            std::memcpy(f.surface.data.data(), frame, f.surface.data.size());
+            f.delayMs = std::max(timestamp - prev, 0);
+            prev = timestamp;
+            img.frames.push_back(std::move(f));
+        } while (WebPAnimDecoderGetNext(decoder, &frame, &timestamp));
         WebPAnimDecoderDelete(decoder);
-        img.mips.push_back(std::move(s));
-        if (anim.frame_count > 1) img.note = "animation: frame 1 of " + std::to_string(anim.frame_count) + " shown";
+        img.mips.push_back(img.frames[0].surface);
+        if (img.frames.size() > 1) img.description = "";  // frame count goes in the description below
+        else img.frames.clear();
     } else {
         img.width = uint32_t(features.width);
         img.height = uint32_t(features.height);
@@ -352,6 +361,7 @@ LoadResult loadWebp(const uint8_t* data, size_t size) {
     }
     const char* kind = features.format == 2 ? "lossless" : features.format == 1 ? "lossy" : "mixed";
     img.description = std::string("WebP, ") + kind + (features.has_alpha ? " RGBA" : " RGB");
+    if (img.frames.size() > 1) img.description += ", " + std::to_string(img.frames.size()) + " frames";
     r.ok = true;
     return r;
 }
@@ -573,6 +583,41 @@ const std::vector<std::string>& supportedExtensions() {
     return list;
 }
 
+// ---- GIF: every frame, through stb_image's animation API ----
+
+LoadResult loadGif(const uint8_t* data, size_t size) {
+    LoadResult r;
+    int w = 0, h = 0, count = 0, comp = 0;
+    int* delays = nullptr;
+    stbi_uc* px = stbi_load_gif_from_memory(data, int(size), &delays, &w, &h, &count, &comp, 4);
+    if (!px || count < 1) {
+        if (px) stbi_image_free(px);
+        if (delays) STBI_FREE(delays);
+        r.error = std::string("cannot decode GIF: ") + stbi_failure_reason();
+        return r;
+    }
+    Image& img = r.image;
+    img.width = uint32_t(w);
+    img.height = uint32_t(h);
+    img.format = GpuFormat::RGBA8Srgb;
+    const FormatInfo& info = formatInfo(img.format);
+    const size_t frameBytes = size_t(w) * h * 4;
+    for (int i = 0; i < count; ++i) {
+        Frame f;
+        f.surface = makeSurface(info, img.width, img.height);
+        std::memcpy(f.surface.data.data(), px + size_t(i) * frameBytes, f.surface.data.size());
+        f.delayMs = delays ? std::max(delays[i], 0) : 0;
+        img.frames.push_back(std::move(f));
+    }
+    stbi_image_free(px);
+    if (delays) STBI_FREE(delays);
+    img.mips.push_back(img.frames[0].surface);
+    img.description = count > 1 ? "GIF, 8 bit RGBA, " + std::to_string(count) + " frames" : "GIF, 8 bit RGBA";
+    if (count == 1) img.frames.clear();
+    r.ok = true;
+    return r;
+}
+
 LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extension) {
     LoadResult r;
     if (!data || size == 0) {
@@ -590,6 +635,7 @@ LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extens
     if (extension == "avif") return loadAvif(data, size);
     if (extension == "jxl") return loadJxl(data, size);
     if (extension == "ktx" || extension == "ktx2") return loadKtx(data, size);
+    if (extension == "gif") return loadGif(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
     return r;
 }

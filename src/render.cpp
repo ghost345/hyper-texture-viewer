@@ -672,6 +672,21 @@ bool uploadImage(const htv::Image& img, std::string& error) {
     return true;
 }
 
+bool uploadSurface(const htv::Surface& surface, htv::GpuFormat format, std::string& error) {
+    htv::Image one;
+    one.width = surface.width;
+    one.height = surface.height;
+    one.format = format;
+    one.mips.push_back(surface);
+    Com<ID3D11ShaderResourceView> srv;
+    int mips = 1;
+    if (!createImageTexture(one, srv, mips, error)) return false;
+    app.srv = std::move(srv);
+    app.textureMips = mips;
+    ++app.imageGeneration;
+    return true;
+}
+
 void releaseImage() {
     app.srv.reset();
     app.hasImage = false;

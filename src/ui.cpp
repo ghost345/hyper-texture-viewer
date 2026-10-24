@@ -113,6 +113,7 @@ void uiFrame() {
     histogramPanel();
     colorMatchPanel();
     comparePanel();
+    framesPanel();
     settingsPanel();
     helpPanel();
     notices();
@@ -181,11 +182,17 @@ void runAction(Action a) {
         case Action::CopyValue: copyColorValue(); break;
         case Action::CopyAllFormats: copyAllColorFormats(); break;
         case Action::ColorMatch: toggleColorMatch(); break;
-        case Action::MatchPrevRegion: stepMatchRegion(-1); break;
-        case Action::MatchNextRegion: stepMatchRegion(+1); break;
+        case Action::MatchPrevRegion:
+            if (app.showFrames && isAnimation()) { app.framePlaying = false; showFrame(app.frameIndex - 1); }
+            else stepMatchRegion(-1);
+            break;
+        case Action::MatchNextRegion:
+            if (app.showFrames && isAnimation()) { app.framePlaying = false; showFrame(app.frameIndex + 1); }
+            else stepMatchRegion(+1);
+            break;
         case Action::Histogram: app.showHistogram = !app.showHistogram; break;
         case Action::Info: app.showInfo = !app.showInfo; break;
-        case Action::Layers: break;
+        case Action::Layers: toggleFramesOrLayers(); break;
         case Action::Compare: toggleCompare(); break;
 
         case Action::AlwaysOnTop: setTopmost(!app.topmost); break;
@@ -220,6 +227,7 @@ bool uiKeyDown(int vk) {
         else if (app.matchPicking) app.matchPicking = false;
         else if (app.colorMatch) app.colorMatch = false;
         else if (app.compare) app.compare = false;
+        else if (app.showFrames) app.showFrames = false;
         else if (app.showInfo) app.showInfo = false;
         else if (app.showHistogram) app.showHistogram = false;
         else DestroyWindow(app.hwnd);

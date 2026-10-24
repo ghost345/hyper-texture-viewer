@@ -199,6 +199,12 @@ struct App {
     CompareStats compareStats;
     std::filesystem::path previousPath;  // the image shown before this one: the first guess for B
 
+    // Layers / Frames (L).
+    bool showFrames = false;      // the Frames panel, for animations
+    int frameIndex = 0;
+    bool framePlaying = true;
+    double frameShownMs = 0;      // when the current frame went up
+
     bool showInfo = false;
     bool showHelp = false;
     bool showHistogram = false;
@@ -287,6 +293,10 @@ bool readPixelsGpu(int x, int y, int n, float* rgba);
 bool setMatchTarget(int x, int y);
 void updateColorMatch();  // rebuilds the mask when the image, target, mode or tolerance changed
 void showMatchRegion(int index);  // centres the view on a region, zooming out when it does not fit
+// Animations: the current image has more than one frame.
+bool isAnimation();
+void showFrame(int index);  // uploads a frame of the animation; wraps around
+void advanceFrame();        // the next frame, for the playback timer
 // Compare: slot 0 is B, 1 is C. Loads in the background; an empty path clears the slot.
 void loadCompareSlot(int slot, const std::filesystem::path& path);
 bool pickImageFile(std::filesystem::path& out);  // the Open dialog; false when cancelled

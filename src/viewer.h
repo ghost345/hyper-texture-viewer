@@ -13,6 +13,7 @@ constexpr UINT WM_APP_COMPARE_LOADED = WM_APP + 3;  // a Compare slot's file was
 constexpr UINT_PTR kWatchTimer = 1;         // checks the shown file for changes on disk
 constexpr UINT_PTR kLoadingTimer = 2;       // keeps frames coming while a load runs
 constexpr UINT_PTR kZebraTimer = 3;         // moves the clipping stripes
+constexpr UINT_PTR kFrameTimer = 4;         // advances an animation's frames
 constexpr int kClickThroughHotkey = 1;
 constexpr ULONG_PTR kOpenFileMessage = 0x48545631;  // WM_COPYDATA from a second start: a path to open      // Ctrl+Shift+T, registered while the window lets clicks through
 
@@ -28,6 +29,8 @@ bool createPipeline(std::string& error);
 bool uploadImage(const htv::Image& img, std::string& error);
 // Creates a texture with mips for an image; uploadImage puts the shown image's in app.srv.
 bool createImageTexture(const htv::Image& img, Com<ID3D11ShaderResourceView>& srv, int& mips, std::string& error);
+// Uploads one surface (an animation frame) as the shown texture, replacing app.srv.
+bool uploadSurface(const htv::Surface& surface, htv::GpuFormat format, std::string& error);
 void releaseImage();
 void resizeBuffers();
 void render();
