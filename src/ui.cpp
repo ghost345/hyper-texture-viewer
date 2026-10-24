@@ -107,6 +107,7 @@ void uiFrame() {
     clearMenuState();
     viewportOverlays();
     if (app.showBars) {
+        rulers();
         topBar();
         bottomBar();
     }
@@ -190,6 +191,7 @@ void runAction(Action a) {
         case Action::Layers: toggleFramesOrLayers(); break;
         case Action::Compare: toggleCompare(); break;
 
+        case Action::Ruler: toggleRuler(); break;
         case Action::AlwaysOnTop: setTopmost(!app.topmost); break;
         case Action::ClickThrough: setClickThrough(!app.clickThrough); break;
         case Action::Settings: app.showSettings = !app.showSettings; break;

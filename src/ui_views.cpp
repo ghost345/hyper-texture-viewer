@@ -368,6 +368,164 @@ void loadingProgress() {
 
 }  // namespace
 
+namespace {
+
+const char* kRulerUnits[3] = {"px", "cm", "in"};
+
+// The resolution the ruler converts with: the file's own, or the one set by hand.
+float rulerDpi() { return app.image.dpi > 0 ? app.image.dpi : app.rulerDpi; }
+
+// "12", "2.5", "0.25": as few decimals as the step needs.
+std::string rulerLabel(double v, double step) {
+    char buf[32];
+    int decimals = 0;
+    for (double s = step; decimals < 4 && std::fabs(s - std::round(s)) > 1e-6; s *= 10) ++decimals;
+    std::snprintf(buf, sizeof buf, "%.*f", decimals, std::fabs(v) < step * 1e-6 ? 0.0 : v);
+    return buf;
+}
+
+// One ruler. `along` is the screen coordinate where the image's shown edge starts, `from`..`to` the strip's
+// extent on screen, `cross` the strip's other coordinate; ticks grow from the edge next to the image.
+void rulerAxis(ImDrawList* dl, bool horizontal, float origin, float from, float to, float a, float b, float mouse) {
+    const Theme& t = T();
+    const double unitPx = app.rulerUnit == 0 ? 1.0 : rulerDpi() / (app.rulerUnit == 1 ? 2.54 : 1.0);
+    const double ppu = double(app.zoom) * unitPx;  // screen pixels per unit
+    // Major ticks at least 64 px apart, on 1, 2 or 5 times a power of ten (whole pixels at least).
+    double step = 1;
+    for (double p = std::pow(10.0, std::floor(std::log10(S(64) / ppu))); ; p *= 10) {
+        if (p * ppu >= S(64)) { step = p; break; }
+        if (2 * p * ppu >= S(64)) { step = 2 * p; break; }
+        if (5 * p * ppu >= S(64)) { step = 5 * p; break; }
+    }
+    if (app.rulerUnit == 0) step = std::max(step, 1.0);
+    int sub = 1;
+    for (int n : {10, 5, 4, 2}) {
+        const double minor = step / n;
+        if (minor * ppu >= S(5) && (app.rulerUnit != 0 || std::fabs(minor - std::round(minor)) < 1e-9)) {
+            sub = n;
+            break;
+        }
+    }
+    const double first = std::floor((from - origin) / ppu / step) * step;
+    const double minorStep = step / sub;
+    for (int i = 0;; ++i) {
+        const double v = first + i * minorStep;
+        const float p = std::round(float(origin + v * ppu));
+        if (p > to) break;
+        if (p < from) continue;
+        const bool major = i % sub == 0;
+        const float len = major ? (b - a) : (sub % 2 == 0 && i % (sub / 2) == 0 ? S(7) : S(4));
+        if (horizontal) dl->AddRectFilled(ImVec2(p, b - len), ImVec2(p + line(), b), major ? t.tx3 : t.bd2);
+        else dl->AddRectFilled(ImVec2(b - len, p), ImVec2(b, p + line()), major ? t.tx3 : t.bd2);
+        if (!major) continue;
+        const std::string label = rulerLabel(v, step);
+        if (horizontal) {
+            drawText(dl, fontMono, 10, p + S(3), a + S(6), t.tx3, label.c_str());
+        } else {
+            // Stacked characters read top to bottom in the narrow strip.
+            float y = p + S(3);
+            for (char c : label) {
+                const char s[2] = {c, 0};
+                drawText(dl, fontMono, 10, a + std::round((b - a - textSize(fontMono, 10, s).x) * 0.5f), y + S(5), t.tx3, s);
+                y += S(9);
+            }
+        }
+    }
+    // Where the cursor is.
+    if (mouse >= from && mouse <= to) {
+        const float m = std::round(mouse);
+        if (horizontal) dl->AddRectFilled(ImVec2(m, a), ImVec2(m + line(), b), t.ac);
+        else dl->AddRectFilled(ImVec2(a, m), ImVec2(b, m + line()), t.ac);
+    }
+}
+
+void rulerMenuItems() {
+    for (int u = 0; u < 3; ++u) {
+        static const char* names[3] = {"Pixels", "Centimetres", "Inches"};
+        if (menuItem({names[u], kRulerUnits[u], app.rulerUnit == u, true, true}) && app.rulerUnit != u) {
+            app.rulerUnit = u;
+            saveSettings();
+        }
+    }
+    menuSeparator();
+    if (app.image.dpi > 0) {
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "%g dpi", double(app.image.dpi));
+        MenuItem m{"Resolution from the file", nullptr, false, false, true};
+        m.value = buf;
+        menuItem(m);
+        return;
+    }
+    menuHeading("Resolution (the file states none)");
+    for (float dpi : {72.0f, 96.0f, 150.0f, 300.0f, 600.0f}) {
+        char label[32];
+        std::snprintf(label, sizeof label, "%g dpi", double(dpi));
+        if (menuItem({label, nullptr, app.rulerDpi == dpi, true, true}) && app.rulerDpi != dpi) {
+            app.rulerDpi = dpi;
+            saveSettings();
+        }
+    }
+    // Any other value, typed.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = S(28);
+    ImGui::Dummy(ImVec2(S(180), h));
+    const float cy = p.y + h * 0.5f;
+    drawText(dl, fontRegular, 12, p.x + S(8) + S(14) + S(8), cy, T().tx2, "Other");
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%g", double(app.rulerDpi));
+    float v = app.rulerDpi;
+    if (numberField(dl, "ruler dpi", p.x + S(90), cy, 70, buf, v, "Click to type a resolution in dpi") && v >= 1.0f &&
+        v <= 100000.0f) {
+        app.rulerDpi = v;
+        saveSettings();
+    }
+}
+
+}  // namespace
+
+void rulers() {
+    if (!app.ruler) return;
+    const Theme& t = T();
+    const float r = app.vpX;  // the strip width layout() set aside
+    if (r <= 0) return;
+    const float top = app.vpY - r, right = app.vpX + app.vpW, bottom = app.vpY + app.vpH;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    dl->AddRectFilled(ImVec2(0, top), ImVec2(right, app.vpY), t.bar);
+    dl->AddRectFilled(ImVec2(0, app.vpY), ImVec2(r, bottom), t.bar);
+    dl->AddRectFilled(ImVec2(r, app.vpY - line()), ImVec2(right, app.vpY), t.bd);
+    dl->AddRectFilled(ImVec2(r - line(), top), ImVec2(r, bottom), t.bd);
+    const bool inside = app.mouseX >= 0 && app.mouseY >= top && app.mouseX < right && app.mouseY < bottom;
+    if (app.hasImage) {
+        dl->PushClipRect(ImVec2(r, top), ImVec2(right, app.vpY));
+        rulerAxis(dl, true, app.originX, r, right, top, app.vpY - line(), inside ? float(app.mouseX) : -1e9f);
+        dl->PopClipRect();
+        dl->PushClipRect(ImVec2(0, app.vpY), ImVec2(r, bottom));
+        rulerAxis(dl, false, app.originY, app.vpY, bottom, 0, r - line(), inside ? float(app.mouseY) : -1e9f);
+        dl->PopClipRect();
+    }
+    // The corner names the unit and opens the unit and resolution menu.
+    const ImVec2 a(0, top), b(r - line(), app.vpY - line());
+    beginArea("##rulercorner", a, b);
+    ImGui::SetCursorScreenPos(a);
+    const bool open = ImGui::IsPopupOpen("ruler menu");
+    toggleMenuOnPress(ImGui::InvisibleButton("unit", ImVec2(b.x - a.x, b.y - a.y)), "ruler menu");
+    ImDrawList* cl = ImGui::GetWindowDrawList();
+    if (ImGui::IsItemHovered() || open) cl->AddRectFilled(a, b, t.ctlh);
+    const char* unit = kRulerUnits[app.rulerUnit];
+    drawText(cl, fontMono, 10, std::round((a.x + b.x - textSize(fontMono, 10, unit).x) * 0.5f), (a.y + b.y) * 0.5f,
+             open ? t.tx : t.tx2, unit);
+    char tip[96];
+    std::snprintf(tip, sizeof tip, "Ruler in %s \xC2\xB7 %g dpi%s", app.rulerUnit == 0 ? "pixels" : app.rulerUnit == 1 ? "centimetres" : "inches",
+                  double(rulerDpi()), app.image.dpi > 0 ? " from the file" : "");
+    requestTip(ImRect(a, b), tip, nullptr);
+    if (beginMenu("ruler menu", ImVec2(a.x, b.y + S(2)), ImVec2(0, 0), S(220))) {
+        rulerMenuItems();
+        endMenu();
+    }
+    ImGui::End();
+}
+
 bool isLoadingVisible() { return app.loading && nowMs() - app.loadingSinceMs > 150.0; }
 
 void viewportOverlays() {
@@ -756,6 +914,7 @@ const std::vector<HelpGroup>& helpColumn(int c) {
            {"Show clipping", {}, {A::Clipping}}}}},
         {{"Analysis",
           {{"Pixel grid", {}, {A::Grid}},
+           {"Ruler", {}, {A::Ruler}},
            {"Lock pixel", {"Ctrl+Click"}, {A::LockPixel}},
            {"Copy pixel value", {}, {A::CopyValue}},
            {"Color match", {}, {A::ColorMatch}},

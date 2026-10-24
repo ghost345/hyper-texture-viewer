@@ -301,7 +301,7 @@ enum class Tool { ActualSize, Zoom, RotL, RotR, FlipH, FlipV, Channels, TexMode,
                   Match, Histogram, Info, Layers, Compare, OnTop, Settings, Help, Count };
 
 // Which goes first: the least used, keeping the tools that read the image and the channel switch for last.
-const Tool kHideOrder[] = {Tool::Ruler,     Tool::Help,  Tool::Settings, Tool::Grid,       Tool::FlipV,
+const Tool kHideOrder[] = {Tool::Help,      Tool::Settings, Tool::Ruler, Tool::Grid,       Tool::FlipV,
                            Tool::FlipH,     Tool::RotR,  Tool::RotL,     Tool::Tiling,     Tool::AlphaBg,
                            Tool::OnTop,     Tool::Layers, Tool::Histogram, Tool::Info,     Tool::Match,
                            Tool::Compare,   Tool::ActualSize, Tool::Zoom, Tool::TexMode,   Tool::Channels};
@@ -500,7 +500,9 @@ void overlaysGroup(Row& r, const TopLayout& L) {
     if (L.shows(Tool::Grid) &&
         r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", keyText(Action::Grid)))
         app.grid = !app.grid;
-    if (L.shows(Tool::Ruler)) r.button("ruler", Icon::Ruler, nullptr, kDisabled, "Ruler (coming soon)", "Ctrl+U");
+    if (L.shows(Tool::Ruler) &&
+        r.button("ruler", Icon::Ruler, nullptr, (app.ruler && !off ? kOn : 0) | off, "Ruler", keyText(Action::Ruler)))
+        toggleRuler();
 }
 
 void analysisGroup(Row& r, const TopLayout& L) {
@@ -564,7 +566,7 @@ void moreMenuItems(const TopLayout& L) {
         endSubmenu();
     }
     if (item(Tool::Grid, 3) && menuItem({"Pixel grid", keyText(Action::Grid), app.grid, !off, false, Icon::Grid})) app.grid = !app.grid;
-    if (item(Tool::Ruler, 3)) menuItem({"Ruler (coming soon)", "Ctrl+U", false, false, false, Icon::Ruler});
+    if (item(Tool::Ruler, 3) && menuItem({"Ruler", keyText(Action::Ruler), app.ruler, !off, false, Icon::Ruler})) toggleRuler();
     if (item(Tool::Match, 4) && menuItem({"Color match", keyText(Action::ColorMatch), app.colorMatch, !off, false, Icon::ColorMatch}))
         toggleColorMatch();
     if (item(Tool::Histogram, 4) &&

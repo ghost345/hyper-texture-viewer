@@ -78,6 +78,7 @@ struct Image {
     std::string description;     // e.g. "EXR, half RGBA, PIZ"
     std::string note;            // what the prototype left out, e.g. "cubemap: face 0 of 6 shown"
     float maxValue = 0.0f;       // brightest RGB value for float images, 0 otherwise
+    float dpi = 0.0f;            // print resolution the file states, 0 when it states none
     std::vector<Frame> frames;   // more than one: an animation. frame 0's pixels equal mips[0].
     int loopCount = 0;           // 0 loops forever
 };

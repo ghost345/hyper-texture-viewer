@@ -182,6 +182,7 @@ constexpr ImGuiWindowFlags kBarFlags = ImGuiWindowFlags_NoDecoration | ImGuiWind
 
 float sliderRowHeight();  // 44 for HDR and 16-bit images (the HDR row), else 0
 void topBar();
+void rulers();  // along the top and left of the image area when the Ruler is on
 float topBarMinWidth();  // the bar at its tightest, as of the last frame; 0 before the first
 void bottomBar();
 void viewportOverlays();  // grid, tile borders, pixel outline, and the empty, error and loading states

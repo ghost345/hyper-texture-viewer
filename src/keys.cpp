@@ -57,6 +57,7 @@ const ActionInfo kActions[int(Action::Count)] = {
     {"clipping", "Show clipping", {key('Z')}},
 
     {"grid", "Pixel grid", {key('G', C)}},
+    {"ruler", "Ruler", {key('U', C)}},
     {"lock_pixel", "Lock pixel under the cursor", {}},
     {"copy_value", "Copy pixel value", {key('C', C)}},
     {"copy_all_formats", "Copy pixel value in all formats", {key('C', C | S)}},

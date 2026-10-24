@@ -934,6 +934,11 @@ void loadSettings() {
                    flag("auto_reload", app.autoReload) || flag("single_instance", app.singleInstance)) {
         } else if (key == "sort") {
             app.folderSort = std::clamp(std::atoi(value.c_str()), 0, 4);
+        } else if (key == "ruler_unit") {
+            app.rulerUnit = std::clamp(std::atoi(value.c_str()), 0, 2);
+        } else if (key == "ruler_dpi") {
+            const float v = std::strtof(value.c_str(), nullptr);
+            if (v >= 1.0f && v <= 100000.0f) app.rulerDpi = v;
         } else if (key == "cache_mb") {
             app.cacheMB = std::clamp(std::atoi(value.c_str()), 0, 65536);
         } else if (key == "prefetch") {
@@ -1011,6 +1016,7 @@ void saveSettings() {
     std::fprintf(f, "checker=%d\nkeep_view=%d\nkeep_exposure=%d\nauto_reload=%d\nsort=%d\nsingle_instance=%d\n",
                  app.checkerSize, app.keepView, app.keepExposure, app.autoReload, app.folderSort, app.singleInstance);
     std::fprintf(f, "cache_mb=%d\nprefetch=%d\n", app.cacheMB, app.prefetch);
+    std::fprintf(f, "ruler_unit=%d\nruler_dpi=%g\n", app.rulerUnit, double(app.rulerDpi));
     std::fputs(htv::bindingsToSettings().c_str(), f);
     for (const RecentFile& r : app.recent)
         std::fprintf(f, "recent=%lld\t%s\n", static_cast<long long>(r.openedAt), narrow(r.path.wstring()).c_str());

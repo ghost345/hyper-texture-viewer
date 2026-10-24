@@ -11,7 +11,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - HDR: exposure, black and white points on a log scale over the image's histogram (Auto picks them from the image), tone mapping (linear clip, Reinhard, ACES, AgX), zebra stripes above the white point, NaN/Inf counted and shown in magenta.
 - Single channels, luminance, sRGB or linear interpretation, forced mip level, 3x3 tiling preview. A normal map that seems to have left Z out (two-channel formats such as BC5, or empty blue with red and green around 0.5) gets a warning.
 - Alpha over a checkerboard (three sizes), black, grey, white or a custom colour.
-- Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid; a dashed outline always marks the pixels the readout reads.
+- Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid, rulers (Ctrl+U) in pixels, centimetres or inches at the file's resolution or one set by hand; a dashed outline always marks the pixels the readout reads.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
 - Color match (`M`): dashed outline around every pixel within ± N of a target colour, compared by whole colour, one channel, luminance, hue or saturation; pixel count, share of the image and regions, with `,` / `.` to step the view through the regions. Alt+click or the eyedropper picks the target.
 - Compare (`Ctrl+K`): up to three images (A is the shown one, B and C are other files) as split shutters you drag on the image, a blend slider, or a difference through a heat ramp with adjustable gain and Max Δ / Mean Δ / Pixels Δ>2 / PSNR.

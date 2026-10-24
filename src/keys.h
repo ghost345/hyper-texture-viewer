@@ -17,7 +17,7 @@ enum class Action : int {
     // HDR
     ExposureDown, ExposureUp, ResetExposure, AutoRange, Clipping,
     // Analysis
-    Grid, LockPixel, CopyValue, CopyAllFormats, ColorMatch, MatchPrevRegion, MatchNextRegion, Histogram, Info, Layers, Compare,
+    Grid, Ruler, LockPixel, CopyValue, CopyAllFormats, ColorMatch, MatchPrevRegion, MatchNextRegion, Histogram, Info, Layers, Compare,
     // Window
     AlwaysOnTop, ClickThrough, Settings, Help, Quit,
     Count

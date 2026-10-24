@@ -89,10 +89,12 @@ bool spaceDown = false;  // Space + drag pans, like the left button alone
 void layout() {
     const float top = app.showBars ? uiTopBarHeight() : 0.0f;
     const float bottom = app.showBars ? uiBottomBarHeight() : 0.0f;
-    app.vpX = 0;
-    app.vpY = top;
-    app.vpW = float(app.winW);
-    app.vpH = std::max(1.0f, float(app.winH) - top - bottom);
+    // The rulers take a strip off the top and left of the image area.
+    const float ruler = app.ruler && app.showBars ? std::round(18 * app.scale) : 0.0f;
+    app.vpX = ruler;
+    app.vpY = top + ruler;
+    app.vpW = std::max(1.0f, float(app.winW) - ruler);
+    app.vpH = std::max(1.0f, float(app.winH) - top - bottom - ruler);
 }
 
 bool inViewport(int x, int y) {
@@ -405,6 +407,11 @@ void requestRedraw() { redraw = true; }
 void relayout() {
     layout();
     if (app.fit) fitToWindow();
+}
+
+void toggleRuler() {
+    app.ruler = !app.ruler;
+    relayout();
 }
 
 // ---- actions ----

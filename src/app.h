@@ -172,6 +172,9 @@ struct App {
     Tiling tiling = Tiling::Off;
     bool grid = false;
     int gridStep = 1;
+    bool ruler = false;     // rulers along the top and left of the image area
+    int rulerUnit = 0;      // 0 pixels, 1 centimetres, 2 inches
+    float rulerDpi = 72.0f;  // for files that state no resolution
 
     // Pixel readout.
     int mouseX = -1, mouseY = -1;
@@ -275,6 +278,7 @@ void zoomAt(float newZoom, float x, float y);
 void zoomCentered(float newZoom);
 void rotate(int quarterTurns);
 void setTopmost(bool on);
+void toggleRuler();
 void setOpacity(float opacity);
 // Clicks go through the window to whatever is below; Ctrl+Shift+T anywhere turns it off again.
 void setClickThrough(bool on);
