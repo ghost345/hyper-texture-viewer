@@ -99,6 +99,7 @@ enum class LayerKind {
     ArraySlices,
     VolumeSlices,
     Pages,
+    IconSizes,
     ExrLayers,
     PsdLayers,     // composited: each has its own eye
 };
@@ -153,7 +154,7 @@ bool compositeLayers(Image& image);
 // Whether a PSD layer shows: it and every group around it are visible.
 bool layerShows(const Image& image, int index);
 
-// "Cubemap", "Array", "Volume", "Pages", "EXR", "PSD".
+// "Cubemap", "Array", "Volume", "Pages", "Sizes", "EXR", "PSD".
 const char* layerKindName(LayerKind kind);
 
 uint16_t floatToHalf(float value);

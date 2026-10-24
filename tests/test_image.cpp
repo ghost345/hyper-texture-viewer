@@ -126,6 +126,46 @@ Bytes makeExr(int w, int h, bool half) {
     return out;
 }
 
+// A half EXR with layers: R G B A (0.5), diffuse.R G B (2.0) and depth.Z (7.0), w x h.
+Bytes makeLayeredExr(int w, int h) {
+    const char* names[] = {"A", "B", "G", "R", "depth.Z", "diffuse.B", "diffuse.G", "diffuse.R"};
+    const float values[] = {1.0f, 0.5f, 0.5f, 0.5f, 7.0f, 2.0f, 2.0f, 2.0f};
+    const int n = 8;
+    std::vector<std::vector<uint16_t>> planes(n);
+    std::vector<unsigned char*> pointers(n);
+    for (int i = 0; i < n; ++i) {
+        planes[size_t(i)].assign(size_t(w) * h, floatToHalf(values[i]));
+        pointers[size_t(i)] = reinterpret_cast<unsigned char*>(planes[size_t(i)].data());
+    }
+    EXRHeader header;
+    InitEXRHeader(&header);
+    std::vector<EXRChannelInfo> channels(n);
+    std::vector<int> types(n, TINYEXR_PIXELTYPE_HALF);
+    for (int i = 0; i < n; ++i) {
+        std::memset(&channels[size_t(i)], 0, sizeof(EXRChannelInfo));
+        std::strncpy(channels[size_t(i)].name, names[i], 255);
+    }
+    header.num_channels = n;
+    header.channels = channels.data();
+    header.pixel_types = types.data();
+    header.requested_pixel_types = types.data();
+    header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+    EXRImage image;
+    InitEXRImage(&image);
+    image.num_channels = n;
+    image.images = pointers.data();
+    image.width = w;
+    image.height = h;
+    unsigned char* buf = nullptr;
+    const char* err = nullptr;
+    const size_t size = SaveEXRImageToMemory(&image, &header, &buf, &err);
+    Bytes out;
+    if (size > 0) out.assign(buf, buf + size);
+    free(buf);
+    if (err) FreeEXRErrorMessage(err);
+    return out;
+}
+
 #ifdef HTV_HAVE_JXL
 // Lossless JPEG XL: 8-bit sRGB from testPixels, or 32-bit float linear from hdrPixels.
 Bytes makeJxl(int w, int h, bool hdr) {
@@ -601,7 +641,22 @@ void testExr() {
         CHECK(readPixel(r.image, 39, 0, px));
         CHECK(std::fabs(px[0] - 1.0f) < 1e-3f && std::fabs(px[2] - 0.25f) < 1e-3f);
         CHECK(r.image.description.find("ZIP") != std::string::npos);
+        CHECK(r.image.layers.empty());
     }
+
+    Bytes layered = makeLayeredExr(8, 4);
+    LoadResult r = loadImage(layered.data(), layered.size(), "exr");
+    CHECK(r.ok && r.image.layerKind == LayerKind::ExrLayers && r.image.layers.size() == 3);
+    if (r.image.layers.size() != 3) return;
+    const Image& img = r.image;
+    CHECK(img.layers[0].name == "Main" && img.layers[0].detail == "A B G R");
+    CHECK(img.layers[1].name == "depth" && img.layers[1].detail == "Z (grey)" && img.layers[1].maxValue == 7.0f);
+    CHECK(img.layers[2].name == "diffuse" && img.layers[2].maxValue == 2.0f);
+    float px[4];
+    CHECK(readPixel(img, 1, 1, px) && px[0] == 0.5f && px[3] == 1.0f);
+    r.image.shownLayer = 0;
+    CHECK(showLayer(r.image, 1) && readPixel(r.image, 1, 1, px) && px[0] == 7.0f && px[2] == 7.0f && px[3] == 1.0f);
+    CHECK(r.image.maxValue == 7.0f);
 }
 
 void testDds() {

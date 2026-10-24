@@ -109,7 +109,7 @@ std::string layerDetail(const htv::Layer& l, bool psd) {
         std::snprintf(t, sizeof t, "%d%%", int(std::lround(l.opacity * 100.0f)));
         return t;
     }
-    if (!l.detail.empty()) return l.detail;
+    if (!l.detail.empty() || app.image.layerKind == htv::LayerKind::IconSizes) return l.detail;
     if (l.width != app.image.layers[0].width || l.height != app.image.layers[0].height) {
         char t[32];
         std::snprintf(t, sizeof t, "%u \xC3\x97 %u", l.width, l.height);

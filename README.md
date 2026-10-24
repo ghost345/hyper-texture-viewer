@@ -4,7 +4,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 
 ## What works
 
-- Formats: EXR (half and float, scanline, ZIP/PIZ/RLE), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains), Radiance HDR, PNG (8 and 16 bit), JPEG, WebP (animations: all frames), AVIF and JPEG XL (8-16 bit, float, HDR in PQ/HLG, BT.2020 and Display P3 converted for display), KTX/KTX2 (mip chains, Basis Universal transcoded to BC7), QOI, TGA, BMP, PSD (flattened image), GIF (all frames).
+- Formats: EXR (half and float, scanline, ZIP/PIZ/RLE, layers), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains, cubemaps, arrays and volumes), Radiance HDR, PNG (8 and 16 bit), JPEG, WebP (animations: all frames), AVIF and JPEG XL (8-16 bit, float, HDR in PQ/HLG, BT.2020 and Display P3 converted for display), KTX/KTX2 (mip chains, cubemaps, arrays and volumes, Basis Universal transcoded to BC7), QOI, TGA, BMP, PSD (composite and layers, 8 and 16 bit), GIF (all frames).
 - Anything else goes through the codecs installed in Windows (WIC): TIFF, JPEG XR, ICO, camera RAW, and HEIC/HEIF when the Microsoft Store HEIF extension is installed.
 - Compressed DDS goes to the GPU as is, so BC textures look exactly as in a game.
 - Pixels stay sharp when zoomed in (no filtering at 100% and above). Below 100% the mip chain averages the source pixels, so detail does not flicker or alias.
@@ -15,7 +15,8 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
 - Color match (`M`): dashed outline around every pixel within ± N of a target colour, compared by whole colour, one channel, luminance, hue or saturation; pixel count, share of the image and regions, with `,` / `.` to step the view through the regions. Alt+click or the eyedropper picks the target.
 - Compare (`Ctrl+K`): up to three images (A is the shown one, B and C are other files) as split shutters you drag on the image, a blend slider, or a difference through a heat ramp with adjustable gain and Max Δ / Mean Δ / Pixels Δ>2 / PSNR.
-- Frames (`L` on a GIF or animated WebP): play, pause (Space), step (`,` / `.`) and scrub the frames, with the frame delay and loop count; delays play as in browsers (0 or 10 ms as 100 ms). PSD and EXR layer lists are planned.
+- Frames (`L` on a GIF or animated WebP): play, pause (Space), step (`,` / `.`) and scrub the frames, with the frame delay and loop count; delays play as in browsers (0 or 10 ms as 100 ms).
+- Layers (`L` on a file with layers): cube faces, array and volume slices (DDS, KTX), TIFF pages, icon sizes and EXR layers are listed with thumbnails and shown one at a time (`,` / `.` step). PSD layers and groups each have an eye: hiding one composites the rest again (blend modes as Normal), Alt+click shows a layer alone, and with every eye as saved the file's own composite is back.
 - Settings (Ctrl+,): theme (dark, light or as Windows), interface scale, viewport colour, checker size, what stays when switching files, folder order, automatic reload, single instance, portable mode, and every key reassignable (the F1 screen shows the current keys).
 - Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top (Ctrl+Shift+T), window opacity and, when on top or below 100%, transparent to mouse (Ctrl+T while the window has the focus), borderless window that hides its bars with Tab.
 - The top bar folds its tools into a "..." menu one at a time as the window narrows; the window stops shrinking before anything would overlap.

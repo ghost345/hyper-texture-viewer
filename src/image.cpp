@@ -160,24 +160,12 @@ LoadResult loadStb(const uint8_t* data, size_t size, const char* label) {
     return r;
 }
 
-// ---- OpenEXR via tinyexr (prototype; OpenEXR proper adds DWAA/DWAB and layers) ----
+// ---- OpenEXR via tinyexr (prototype; OpenEXR proper adds DWAA/DWAB) ----
 
 // Compression ids from the OpenEXR file format; tinyexr 1.0 decodes 0-4 only.
 const char* exrCompressionName(int c) {
     static const char* names[] = {"uncompressed", "RLE", "ZIPS", "ZIP", "PIZ", "PXR24", "B44", "B44A", "DWAA", "DWAB"};
     return c >= 0 && c < 10 ? names[c] : "unknown compression";
-}
-
-// Picks the channel for one of R, G, B, A: an exact name first, then the first layer's "<layer>.R".
-int findExrChannel(const EXRHeader& header, char name) {
-    for (int i = 0; i < header.num_channels; ++i)
-        if (header.channels[i].name[0] == name && header.channels[i].name[1] == 0) return i;
-    for (int i = 0; i < header.num_channels; ++i) {
-        const char* n = header.channels[i].name;
-        const size_t len = std::strlen(n);
-        if (len >= 2 && n[len - 2] == '.' && n[len - 1] == name) return i;
-    }
-    return -1;
 }
 
 LoadResult loadExr(const uint8_t* data, size_t size) {
@@ -246,62 +234,127 @@ LoadResult loadExr(const uint8_t* data, size_t size) {
         ~ImageGuard() { FreeEXRImage(i); }
     } imageGuard{&exr};
 
-    int src[4] = {findExrChannel(header, 'R'), findExrChannel(header, 'G'), findExrChannel(header, 'B'),
-                  findExrChannel(header, 'A')};
-    bool gray = false;
-    if (src[0] < 0 && src[1] < 0 && src[2] < 0) {
-        // No colour channels (Y, Z, a single mask...): show the first channel as grey.
-        src[0] = src[1] = src[2] = 0;
-        gray = true;
+    // Channels group into layers by the name before the last dot: "R", "G", "B", "A" are the main layer,
+    // "diffuse.R" ... another, "depth.Z" one more.
+    struct ExrLayer {
+        std::string name;
+        std::vector<int> channels;
+    };
+    std::vector<ExrLayer> groups;
+    for (int i = 0; i < header.num_channels; ++i) {
+        const std::string n = header.channels[i].name;
+        const size_t dot = n.rfind('.');
+        const std::string prefix = dot == std::string::npos ? std::string() : n.substr(0, dot);
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const ExrLayer& g) { return g.name == prefix; });
+        if (it == groups.end()) {
+            groups.push_back({prefix, {}});
+            it = groups.end() - 1;
+        }
+        it->channels.push_back(i);
     }
+    std::stable_partition(groups.begin(), groups.end(), [](const ExrLayer& g) { return g.name.empty(); });
+    auto suffix = [&](int ch) {
+        const char* n = header.channels[ch].name;
+        const char* dot = std::strrchr(n, '.');
+        return std::string(dot ? dot + 1 : n);
+    };
+
+    const size_t pixels = size_t(exr.width) * exr.height;
+    const GpuFormat format = anyFloat ? GpuFormat::RGBA32F : GpuFormat::RGBA16F;
+    // One layer's channels as RGBA: R, G, B, A by name (or X, Y, Z), a lone channel as grey, otherwise the
+    // first three. `detail` names what went where.
+    auto build = [&](const ExrLayer& g, float& maxValue, std::string& detail) {
+        int src[4] = {-1, -1, -1, -1};
+        auto find = [&](const char* names) {
+            for (int c : g.channels) {
+                const std::string sfx = suffix(c);
+                if (sfx.size() == 1 && std::toupper(static_cast<unsigned char>(sfx[0])) == names[0]) return c;
+            }
+            return -1;
+        };
+        const bool gray = g.channels.size() == 1 ||
+                          (g.channels.size() == 2 && find("A") >= 0 && find("R") < 0 && find("G") < 0 && find("B") < 0);
+        if (gray) {
+            src[0] = src[1] = src[2] = g.channels[0] == find("A") ? g.channels[1] : g.channels[0];
+            src[3] = g.channels.size() == 2 ? find("A") : -1;
+        } else {
+            for (int c = 0; c < 4; ++c) src[c] = find(&"RGBA"[c]);
+            if (src[0] < 0 && src[1] < 0 && src[2] < 0)
+                for (int c = 0; c < 3; ++c) src[c] = find(&"XYZ"[c]);
+            if (src[0] < 0 && src[1] < 0 && src[2] < 0)
+                for (size_t c = 0; c < 3 && c < g.channels.size(); ++c) src[c] = g.channels[c];
+        }
+        detail.clear();
+        for (int c : g.channels) detail += (detail.empty() ? "" : " ") + suffix(c);
+        if (gray) detail += " (grey)";
+
+        Surface s = makeSurface(formatInfo(format), uint32_t(exr.width), uint32_t(exr.height));
+        maxValue = 0.0f;
+        if (anyFloat) {
+            auto* out = reinterpret_cast<float*>(s.data.data());
+            for (int c = 0; c < 4; ++c) {
+                const int ch = src[c];
+                if (ch < 0) {
+                    for (size_t i = 0; i < pixels; ++i) out[i * 4 + c] = c == 3 ? 1.0f : 0.0f;
+                    continue;
+                }
+                const bool isUint = header.requested_pixel_types[ch] == TINYEXR_PIXELTYPE_UINT;
+                const auto* f = reinterpret_cast<const float*>(exr.images[ch]);
+                const auto* u = reinterpret_cast<const uint32_t*>(exr.images[ch]);
+                for (size_t i = 0; i < pixels; ++i) {
+                    const float v = isUint ? float(u[i]) : f[i];
+                    out[i * 4 + c] = v;
+                    if (c < 3 && std::isfinite(v)) maxValue = std::max(maxValue, v);
+                }
+            }
+        } else {
+            auto* out = reinterpret_cast<uint16_t*>(s.data.data());
+            for (int c = 0; c < 4; ++c) {
+                const int ch = src[c];
+                if (ch < 0) {
+                    for (size_t i = 0; i < pixels; ++i) out[i * 4 + c] = c == 3 ? 0x3c00 : 0;
+                    continue;
+                }
+                const auto* hsrc = reinterpret_cast<const uint16_t*>(exr.images[ch]);
+                uint16_t brightest = 0;  // for positive finite halves, the bit pattern orders like the value
+                for (size_t i = 0; i < pixels; ++i) {
+                    const uint16_t v = hsrc[i];
+                    out[i * 4 + c] = v;
+                    if (c < 3 && v < 0x7c00 && v > brightest) brightest = v;
+                }
+                if (c < 3) maxValue = std::max(maxValue, halfToFloat(brightest));
+            }
+        }
+        return s;
+    };
 
     Image& img = r.image;
     img.width = uint32_t(exr.width);
     img.height = uint32_t(exr.height);
-    img.format = anyFloat ? GpuFormat::RGBA32F : GpuFormat::RGBA16F;
-    Surface s = makeSurface(formatInfo(img.format), img.width, img.height);
-    const size_t pixels = size_t(exr.width) * exr.height;
-    float maxValue = 0.0f;
-    if (anyFloat) {
-        auto* out = reinterpret_cast<float*>(s.data.data());
-        for (int c = 0; c < 4; ++c) {
-            const int ch = src[c];
-            if (ch < 0) {
-                for (size_t i = 0; i < pixels; ++i) out[i * 4 + c] = c == 3 ? 1.0f : 0.0f;
-                continue;
+    img.format = format;
+    std::string detail;
+    img.mips.push_back(build(groups[0], img.maxValue, detail));
+    if (groups.size() > 1) {
+        img.layerKind = LayerKind::ExrLayers;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            Layer l;
+            l.width = img.width;
+            l.height = img.height;
+            l.format = format;
+            if (i == 0) {
+                l.maxValue = img.maxValue;
+                l.detail = detail;
+            } else {
+                l.mips.push_back(build(groups[i], l.maxValue, l.detail));
             }
-            const bool isUint = header.requested_pixel_types[ch] == TINYEXR_PIXELTYPE_UINT;
-            const auto* f = reinterpret_cast<const float*>(exr.images[ch]);
-            const auto* u = reinterpret_cast<const uint32_t*>(exr.images[ch]);
-            for (size_t i = 0; i < pixels; ++i) {
-                const float v = isUint ? float(u[i]) : f[i];
-                out[i * 4 + c] = v;
-                if (c < 3 && std::isfinite(v)) maxValue = std::max(maxValue, v);
-            }
-        }
-    } else {
-        auto* out = reinterpret_cast<uint16_t*>(s.data.data());
-        for (int c = 0; c < 4; ++c) {
-            const int ch = src[c];
-            if (ch < 0) {
-                for (size_t i = 0; i < pixels; ++i) out[i * 4 + c] = c == 3 ? 0x3c00 : 0;
-                continue;
-            }
-            const auto* hsrc = reinterpret_cast<const uint16_t*>(exr.images[ch]);
-            uint16_t brightest = 0;  // for positive finite halves, the bit pattern orders like the value
-            for (size_t i = 0; i < pixels; ++i) {
-                const uint16_t v = hsrc[i];
-                out[i * 4 + c] = v;
-                if (c < 3 && v < 0x7c00 && v > brightest) brightest = v;
-            }
-            if (c < 3) maxValue = std::max(maxValue, halfToFloat(brightest));
+            l.name = groups[i].name.empty() ? "Main" : groups[i].name;
+            img.layers.push_back(std::move(l));
         }
     }
-    img.maxValue = maxValue;
-    img.mips.push_back(std::move(s));
     img.description = std::string("EXR, ") + (anyFloat ? (anyHalf ? "half/float " : "float ") : "half ") +
                       channelList + ", " + exrCompressionName(compression);
-    if (gray) img.note = "no RGB channels: first channel shown as grey";
+    if (groups.size() == 1 && detail.find("(grey)") != std::string::npos)
+        img.note = "no RGB channels: the channel is shown as grey";
     r.ok = true;
     return r;
 }
@@ -861,6 +914,7 @@ const char* layerKindName(LayerKind kind) {
         case LayerKind::ArraySlices: return "Array";
         case LayerKind::VolumeSlices: return "Volume";
         case LayerKind::Pages: return "Pages";
+        case LayerKind::IconSizes: return "Sizes";
         case LayerKind::ExrLayers: return "EXR";
         case LayerKind::PsdLayers: return "PSD";
         case LayerKind::None: break;
