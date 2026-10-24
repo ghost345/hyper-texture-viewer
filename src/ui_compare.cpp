@@ -151,53 +151,45 @@ void compareOverlay() {
     const float top = std::max(app.vpY, app.originY), bottom = std::min(app.vpY + app.vpH, app.originY + h * app.zoom);
 
     if (app.compareMode == CompareMode::Split) {
-        // Drag a shutter: anywhere on its line, or its handle in the middle.
+        // Each shutter has a handle straddling its line, lettered with the images on either side. Two shutters
+        // put their handles at different heights, so they never cover each other even where the lines meet.
         for (int k = 0; k + 1 < n; ++k) {
             const float x = std::round(app.originX + app.compareShutters[k] * span);
             if (x > app.vpX && x < app.vpX + app.vpW) dashedLine(dl, ImVec2(x, top), ImVec2(x, bottom));
-            const float my = std::round((top + bottom) * 0.5f);
-            const ImVec2 ha(x - S(5), my - S(12)), hb(x + S(5), my + S(12));
+            const float at = n > 2 ? (k == 0 ? 0.3f : 0.7f) : 0.5f;
+            const float hh = S(22), half = S(20);
+            const float my = std::round(std::clamp(top + (bottom - top) * at, app.vpY + hh, app.vpY + app.vpH - hh));
+            const ImVec2 ha(x - half, my - hh * 0.5f), hb(x + half, my + hh * 0.5f);
             ImGui::PushID(k);
-            compareArea("##shutter", ImVec2(ha.x - S(6), ha.y), ImVec2(hb.x + S(6), hb.y));
-            ImGui::SetCursorScreenPos(ImVec2(ha.x - S(6), ha.y));
-            ImGui::InvisibleButton("handle", ImVec2(hb.x - ha.x + S(12), hb.y - ha.y));
-            const bool active = ImGui::IsItemActive();
+            compareArea(k == 0 ? "##shutter0" : "##shutter1", ha, hb);
+            ImGui::SetCursorScreenPos(ha);
+            ImGui::InvisibleButton("handle", ImVec2(hb.x - ha.x, hb.y - ha.y));
+            const bool active = ImGui::IsItemActive(), hovered = ImGui::IsItemHovered();
             ImDrawList* hdl = ImGui::GetWindowDrawList();
-            hdl->AddRectFilled(ha, hb, active || ImGui::IsItemHovered() ? kWhite : fade(kWhite, 0.85f), S(2));
-            hdl->AddRect(ha, hb, IM_COL32(0, 0, 0, 120), S(2), 0, line());
+            hdl->AddRectFilled(ha, hb, active ? IM_COL32(70, 70, 70, 235) : hovered ? IM_COL32(50, 50, 50, 230)
+                                                                                   : IM_COL32(24, 24, 24, 220),
+                               S(4));
+            hdl->AddRect(ha, hb, active || hovered ? kWhite : IM_COL32(255, 255, 255, 150), S(4), 0, line());
+            hdl->AddRectFilled(ImVec2(x, ha.y), ImVec2(x + line(), hb.y), IM_COL32(255, 255, 255, 150));
+            const char* left = kSlotNames[ids[k]];
+            const char* right = kSlotNames[ids[k + 1]];
+            const float cy = my;
+            drawText(hdl, fontMedium, 12, std::round(x - half * 0.5f - textSize(fontMedium, 12, left).x * 0.5f), cy,
+                     kWhite, left);
+            drawText(hdl, fontMedium, 12, std::round(x + half * 0.5f - textSize(fontMedium, 12, right).x * 0.5f), cy,
+                     kWhite, right);
             ImGui::End();
             ImGui::PopID();
+            const std::string tip = std::string(left) + "  " + slotName(ids[k]) + "\n" + right + "  " + slotName(ids[k + 1]);
+            requestTip(ImRect(ha, hb), tip.c_str(), nullptr);
             if (active && span > 1.0f) {
-                const float v = (ImGui::GetIO().MousePos.x - app.originX) / span;
-                app.compareShutters[k] = std::clamp(v, 0.0f, 1.0f);
-                // The shutters keep their order.
-                if (k == 0 && n > 2) app.compareShutters[1] = std::max(app.compareShutters[1], app.compareShutters[0]);
-                if (k == 1) app.compareShutters[0] = std::min(app.compareShutters[0], app.compareShutters[1]);
+                // A shutter stops at its neighbour instead of pushing it, so the part between can always be
+                // opened again from either side.
+                const float v = std::clamp((ImGui::GetIO().MousePos.x - app.originX) / span, 0.0f, 1.0f);
+                const float lo = k == 1 ? app.compareShutters[0] : 0.0f;
+                const float hi = k == 0 && n > 2 ? app.compareShutters[1] : 1.0f;
+                app.compareShutters[k] = std::clamp(v, lo, hi);
             }
-        }
-        // A label per part, at its left edge.
-        for (int k = 0; k < n; ++k) {
-            const float left = k == 0 ? app.originX : app.originX + app.compareShutters[k - 1] * span;
-            const float right = k == n - 1 ? app.originX + span : app.originX + app.compareShutters[k] * span;
-            const int id = ids[k];
-            std::string text = slotName(id);
-            if (text.empty()) continue;
-            const float letterW = textSize(fontMedium, 11, kSlotNames[id]).x;
-            float textW = textSize(fontRegular, 12, text.c_str()).x;
-            const float maxW = right - left - S(32);
-            if (textW > maxW) {
-                text = ellipsize(fontRegular, 12, text, std::max(maxW, S(40)));
-                textW = textSize(fontRegular, 12, text.c_str()).x;
-            }
-            const float bw = S(10) + letterW + S(7) + textW + S(10);
-            const ImVec2 a(std::round(std::max(left, app.vpX)) + S(10), std::round(std::max(top, app.vpY)) + S(10));
-            const ImVec2 b(a.x + bw, a.y + S(24));
-            if (b.x > app.vpX + app.vpW || bw > right - left) continue;
-            dl->AddRectFilled(a, b, IM_COL32(24, 24, 24, 214), S(4));
-            dl->AddRect(a, b, IM_COL32(255, 255, 255, 36), S(4), 0, line());
-            const float cy = (a.y + b.y) * 0.5f;
-            drawText(dl, fontMedium, 11, a.x + S(10), cy, kWhite, kSlotNames[id]);
-            drawText(dl, fontRegular, 12, a.x + S(10) + letterW + S(7), cy, hex(0xe8e8e8), text.c_str());
         }
         return;
     }
