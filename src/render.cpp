@@ -674,13 +674,13 @@ void releaseImage() {
 namespace {
 
 // An image Compare draws: A (0, the shown one), B (1) or C (2).
-struct Layer {
+struct CompareImage {
     const htv::Image* image = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
     int generation = 0;
 };
 
-Layer layer(int i) {
+CompareImage layer(int i) {
     if (i == 0) return {&app.image, app.hasImage ? app.srv.get() : nullptr, app.imageGeneration};
     const CompareSlot& s = app.compareSlots[i - 1];
     return {&s.image, s.srv.get(), s.generation};
@@ -688,7 +688,7 @@ Layer layer(int i) {
 
 // Zoom and the top-left corner of a layer's shown area. B and C cover A's area when sizes are matched, and
 // otherwise start at A's corner at A's zoom.
-void layerView(const Layer& l, float& zoom, float& x0, float& y0) {
+void layerView(const CompareImage& l, float& zoom, float& x0, float& y0) {
     const float w = float(app.rotation & 1 ? l.image->height : l.image->width);
     const float h = float(app.rotation & 1 ? l.image->width : l.image->height);
     float aw, ah;
@@ -702,7 +702,7 @@ void layerView(const Layer& l, float& zoom, float& x0, float& y0) {
 
 // Constants for drawing layer i into the viewport.
 ViewConstants layerConstants(int i, const UiColors& colors) {
-    const Layer l = layer(i);
+    const CompareImage l = layer(i);
     float zoom, x0, y0;
     layerView(l, zoom, x0, y0);
     ViewConstants c = makeConstants(*l.image, x0, y0, zoom, app.tiling == Tiling::Off ? 1.0f : 3.0f,
@@ -717,7 +717,7 @@ ViewConstants layerConstants(int i, const UiColors& colors) {
 const int kPairs[3][2] = {{0, 1}, {0, 2}, {1, 2}};
 
 // The second image of a pair, as psDiff and psDiffRead read it.
-void setSecond(ViewConstants& c, const Layer& first, const Layer& second) {
+void setSecond(ViewConstants& c, const CompareImage& first, const CompareImage& second) {
     c.image2Size[0] = float(second.image->width);
     c.image2Size[1] = float(second.image->height);
     // Matched sizes: B and C over A, and therefore over each other.
@@ -754,7 +754,7 @@ void drawCompare(const UiColors& colors) {
         return;
     }
     const int first = kPairs[app.comparePair][0], second = kPairs[app.comparePair][1];
-    const Layer a = layer(first), b = layer(second);
+    const CompareImage a = layer(first), b = layer(second);
     if (!a.srv || !b.srv) {  // the pair is not loaded yet: A alone
         draw(0, vx0, vx1, app.ps.get(), nullptr, layerConstants(0, colors));
         return;
@@ -794,7 +794,7 @@ void updateCompareStats() {
         return;
     }
     const int first = kPairs[app.comparePair][0], second = kPairs[app.comparePair][1];
-    const Layer a = layer(first), b = layer(second);
+    const CompareImage a = layer(first), b = layer(second);
     if (!a.srv || !b.srv) {
         app.compareStats = CompareStats();
         key[0] = -1;
@@ -985,14 +985,16 @@ void render() {
 
 namespace {
 
-std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, ID3D11ShaderResourceView* srv, int size) {
+std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, ID3D11ShaderResourceView* srv, int size,
+                                       bool contain = false) {
     std::vector<uint8_t> out;
     static Readback rb;
     if (!srv || !rb.create(size, DXGI_FORMAT_R8G8B8A8_UNORM)) return out;
-    // Cover the square, like the design's thumbnails; rotation and flips as on screen, no tiling.
+    // Cover the square, like the design's thumbnails (or fit inside it with `contain`); rotation and flips as
+    // on screen, no tiling.
     const float w = float(app.rotation & 1 ? image.height : image.width);
     const float h = float(app.rotation & 1 ? image.width : image.height);
-    const float zoom = float(size) / std::min(w, h);
+    const float zoom = float(size) / (contain ? std::max(w, h) : std::min(w, h));
     ViewConstants c =
         makeConstants(image, (size - w * zoom) * 0.5f, (size - h * zoom) * 0.5f, zoom, 1.0f, 4.0f, uiColors());
     c.clipping = 0;
@@ -1033,6 +1035,60 @@ ID3D11ShaderResourceView* compareThumbnail(int slot) {
         if (!px.empty()) s.thumbnail = createTexture(px.data(), kSize, kSize);
     }
     return s.thumbnail.get();
+}
+
+ID3D11ShaderResourceView* layerThumbnail(int index) {
+    constexpr int kSize = 64;
+    static std::vector<Com<ID3D11ShaderResourceView>> thumbs;
+    static int fileGeneration = -1, rotation = -1, madeInFrame = -1, made = 0;
+    if (!app.hasImage || index < 0 || index >= int(app.image.layers.size())) return nullptr;
+    if (fileGeneration != app.fileGeneration || rotation != app.rotation) {
+        thumbs.clear();
+        fileGeneration = app.fileGeneration;
+        rotation = app.rotation;
+    }
+    thumbs.resize(app.image.layers.size());
+    if (thumbs[size_t(index)]) return thumbs[size_t(index)].get();
+    if (app.image.layers[size_t(index)].group) return nullptr;
+    // A few a frame, so a volume with hundreds of slices doesn't stall the window.
+    const int frame = ImGui::GetFrameCount();
+    if (madeInFrame != frame) {
+        madeInFrame = frame;
+        made = 0;
+    }
+    if (made >= 3) {
+        requestRedraw();
+        return nullptr;
+    }
+    ++made;
+    std::vector<uint8_t> px;
+    const htv::Layer& l = app.image.layers[size_t(index)];
+    const bool onScreen = l.mips.empty() && app.image.layerKind != htv::LayerKind::PsdLayers;
+    if (onScreen && index == app.image.shownLayer) {
+        px = renderThumbnailOf(app.image, app.srv.get(), kSize);
+    } else if (!l.mips.empty()) {
+        // The smallest mip that still covers the thumbnail is enough.
+        size_t level = 0;
+        while (level + 1 < l.mips.size() && std::min(l.mips[level + 1].width, l.mips[level + 1].height) >= uint32_t(kSize))
+            ++level;
+        htv::Image one;
+        one.width = l.mips[level].width;
+        one.height = l.mips[level].height;
+        one.format = l.format;
+        one.maxValue = l.maxValue;
+        one.mips.push_back(l.mips[level]);
+        Com<ID3D11ShaderResourceView> srv;
+        int mips = 1;
+        std::string error;
+        // PSD layers come in any shape: the whole of each fits in its square.
+        if (createImageTexture(one, srv, mips, error))
+            px = renderThumbnailOf(one, srv.get(), kSize, app.image.layerKind == htv::LayerKind::PsdLayers);
+    }
+    Com<ID3D11ShaderResourceView> texture;
+    if (!px.empty()) texture = createTexture(px.data(), kSize, kSize);
+    if (!texture) texture = createTexture(std::vector<uint8_t>(size_t(kSize) * kSize * 4, 0).data(), kSize, kSize);
+    thumbs[size_t(index)] = std::move(texture);
+    return thumbs[size_t(index)].get();
 }
 
 bool readPixelsGpu(int x, int y, int n, float* rgba) {

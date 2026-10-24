@@ -175,6 +175,33 @@ Bytes makeJxl(int w, int h, bool hdr) {
 #endif
 
 #ifdef HTV_HAVE_KTX
+// KTX2 RGBA8 cubemap (or a 3D texture `depth` deep) whose picture i is filled with i + 1.
+Bytes makeKtx2Layers(int w, int h, bool cube, int depth) {
+    ktxTextureCreateInfo ci{};
+    ci.vkFormat = 37;  // VK_FORMAT_R8G8B8A8_UNORM
+    ci.baseWidth = uint32_t(w);
+    ci.baseHeight = uint32_t(h);
+    ci.baseDepth = uint32_t(depth);
+    ci.numDimensions = depth > 1 ? 3 : 2;
+    ci.numLevels = 1;
+    ci.numLayers = 1;
+    ci.numFaces = cube ? 6 : 1;
+    ktxTexture2* tex = nullptr;
+    if (ktxTexture2_Create(&ci, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &tex) != KTX_SUCCESS) return {};
+    const int pictures = cube ? 6 : depth;
+    for (int i = 0; i < pictures; ++i) {  // faceSlice is the face, or the depth slice of a 3D texture
+        std::vector<uint8_t> px(size_t(w) * h * 4, uint8_t(i + 1));
+        ktxTexture_SetImageFromMemory(ktxTexture(tex), 0, 0, uint32_t(i), px.data(), px.size());
+    }
+    ktx_uint8_t* data = nullptr;
+    ktx_size_t size = 0;
+    ktxTexture_WriteToMemory(ktxTexture(tex), &data, &size);
+    Bytes out(data, data + size);
+    free(data);
+    ktxTexture_Destroy(ktxTexture(tex));
+    return out;
+}
+
 // KTX2 with an RGBA8 sRGB image, optionally Basis Universal (UASTC) compressed.
 Bytes makeKtx2(int w, int h, bool basis) {
     ktxTextureCreateInfo ci{};
@@ -245,6 +272,133 @@ Bytes makeDds(uint32_t w, uint32_t h, bool bc7, GpuFormat dx10 = GpuFormat::BC7S
             put32(b, at + 4, 0x55aa55aau);
         }
     }
+    return b;
+}
+
+// Uncompressed RGBA8 DDS with a DX10 header: `slices` array slices (times 6 faces for a cubemap) of `levels`
+// mips each, or a volume `depth` deep. Every pixel of picture i holds the value i + 1, mip level l adds 100 * l.
+Bytes makeDdsLayers(uint32_t w, uint32_t h, uint32_t levels, uint32_t slices, bool cube, uint32_t depth = 1) {
+    const uint32_t pictures = depth > 1 ? depth : slices * (cube ? 6 : 1);
+    Bytes b(148, 0);
+    std::memcpy(b.data(), "DDS ", 4);
+    put32(b, 4, 124);
+    put32(b, 8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | (depth > 1 ? 0x800000 : 0));
+    put32(b, 12, h);
+    put32(b, 16, w);
+    put32(b, 24, depth);
+    put32(b, 28, levels);
+    put32(b, 76, 32);
+    put32(b, 80, 0x4);
+    std::memcpy(b.data() + 84, "DX10", 4);
+    put32(b, 108, 0x1000 | (depth > 1 ? 0x200000 : 0) | (cube ? 0xFE00 : 0));
+    put32(b, 128, uint32_t(GpuFormat::RGBA8));
+    put32(b, 132, depth > 1 ? 4 : 3);
+    put32(b, 136, cube ? 0x4 : 0);
+    put32(b, 140, depth > 1 ? 1 : slices);
+    auto fill = [&](uint32_t pw, uint32_t ph, uint8_t v) { b.insert(b.end(), size_t(pw) * ph * 4, v); };
+    if (depth > 1) {
+        for (uint32_t l = 0; l < levels; ++l)
+            for (uint32_t z = 0; z < std::max(1u, depth >> l); ++z)
+                fill(std::max(1u, w >> l), std::max(1u, h >> l), uint8_t(z + 1 + 100 * l));
+    } else {
+        for (uint32_t i = 0; i < pictures; ++i)
+            for (uint32_t l = 0; l < levels; ++l) fill(std::max(1u, w >> l), std::max(1u, h >> l), uint8_t(i + 1 + 100 * l));
+    }
+    return b;
+}
+
+// A PSD 4 x 2 pixels, 8-bit RGB, raw channels. From the top: group "Group" holding "Top" (blue over the right
+// half, alpha 128), then "Bottom" (opaque red over the whole canvas). The composite is `composite` (RGBA rows).
+Bytes makePsd(const std::vector<uint8_t>& composite) {
+    Bytes b;
+    auto u8 = [&](uint32_t v) { b.push_back(uint8_t(v)); };
+    auto u16 = [&](uint32_t v) { u8(v >> 8); u8(v); };
+    auto u32 = [&](uint32_t v) { u16(v >> 16); u16(v); };
+    auto str = [&](const char* t) { b.insert(b.end(), t, t + std::strlen(t)); };
+    const int W = 4, H = 2;
+    str("8BPS");
+    u16(1);
+    b.insert(b.end(), 6, 0);
+    u16(4);
+    u32(H);
+    u32(W);
+    u16(8);
+    u16(3);
+    u32(0);  // colour mode data
+    u32(28);  // image resources: 300 dpi
+    str("8BIM");
+    u16(0x03ED);
+    u16(0);
+    u32(16);
+    u32(300u << 16);
+    u16(1);
+    u16(1);
+    u32(300u << 16);
+    u16(1);
+    u16(1);
+
+    struct Rec {
+        const char* name;
+        int top, left, bottom, right;
+        uint32_t section;
+        uint8_t r, g, bl, a;
+    };
+    // Bottom to top, as PSD stores them.
+    const Rec recs[] = {{"Bottom", 0, 0, 2, 4, 0, 255, 0, 0, 255},
+                        {"</Layer group>", 0, 0, 0, 0, 3, 0, 0, 0, 0},
+                        {"Top", 0, 2, 2, 4, 0, 0, 0, 255, 128},
+                        {"Group", 0, 0, 0, 0, 1, 0, 0, 0, 0}};
+    Bytes info;
+    std::swap(b, info);
+    u16(4);
+    for (const Rec& r : recs) {
+        u32(uint32_t(r.top));
+        u32(uint32_t(r.left));
+        u32(uint32_t(r.bottom));
+        u32(uint32_t(r.right));
+        const uint32_t pixels = uint32_t((r.bottom - r.top) * (r.right - r.left));
+        u16(4);
+        for (int id : {0, 1, 2, -1}) {
+            u16(uint16_t(int16_t(id)));
+            u32(2 + pixels);
+        }
+        str("8BIM");
+        str(r.section ? "pass" : "norm");
+        u8(255);
+        u8(0);
+        u8(0);
+        u8(0);
+        const size_t nameLength = std::strlen(r.name);
+        const size_t namePadded = (nameLength + 1 + 3) & ~size_t(3);
+        u32(uint32_t(4 + 4 + namePadded + (r.section ? 16 : 0)));
+        u32(0);
+        u32(0);
+        u8(uint32_t(nameLength));
+        str(r.name);
+        b.insert(b.end(), namePadded - nameLength - 1, 0);
+        if (r.section) {
+            str("8BIM");
+            str("lsct");
+            u32(4);
+            u32(r.section);
+        }
+    }
+    for (const Rec& r : recs) {
+        const size_t pixels = size_t((r.bottom - r.top) * (r.right - r.left));
+        for (uint8_t v : {r.r, r.g, r.bl, r.a}) {
+            u16(0);
+            b.insert(b.end(), pixels, v);
+        }
+    }
+    if (b.size() & 1) u8(0);
+    std::swap(b, info);
+    u32(uint32_t(4 + info.size() + 4));
+    u32(uint32_t(info.size()));
+    b.insert(b.end(), info.begin(), info.end());
+    u32(0);  // global layer mask
+    u16(0);  // composite, raw, planar
+    for (int c = 0; c < 4; ++c)
+        for (int i = 0; i < W * H; ++i) u8(composite[size_t(i) * 4 + c]);
     return b;
 }
 
@@ -400,6 +554,15 @@ void testKtx() {
     if (!r.ok) std::printf("  %s\n", r.error.c_str());
     CHECK(r.image.format == GpuFormat::BC7Srgb);
     if (r.ok) CHECK(r.image.mips[0].data.size() == size_t(16 * 8 * 16));
+
+    Bytes cube = makeKtx2Layers(8, 8, true, 1);
+    r = loadImage(cube.data(), cube.size(), "ktx2");
+    CHECK(r.ok && r.image.layerKind == LayerKind::CubeFaces && r.image.layers.size() == 6);
+    if (r.image.layers.size() == 6) CHECK(r.image.layers[4].name == "+Z" && r.image.layers[4].mips[0].data[0] == 5);
+    Bytes volume = makeKtx2Layers(4, 4, false, 3);
+    r = loadImage(volume.data(), volume.size(), "ktx2");
+    CHECK(r.ok && r.image.layerKind == LayerKind::VolumeSlices && r.image.layers.size() == 3);
+    if (r.image.layers.size() == 3) CHECK(r.image.layers[2].mips[0].data[0] == 3);
 #endif
 }
 
@@ -467,6 +630,93 @@ void testDds() {
     bc7.resize(150);
     r = loadImage(bc7.data(), bc7.size(), "dds");
     CHECK(!r.ok);
+}
+
+void testDdsLayers() {
+    Bytes cube = makeDdsLayers(8, 8, 4, 1, true);
+    LoadResult r = loadImage(cube.data(), cube.size(), "dds");
+    CHECK(r.ok);
+    CHECK(r.image.layerKind == LayerKind::CubeFaces);
+    CHECK(r.image.layers.size() == 6);
+    CHECK(r.image.mips.size() == 4 && r.image.mips[0].data[0] == 1 && r.image.mips[2].data[0] == 201);
+    CHECK(r.image.layers[1].name == "\xE2\x88\x92X");
+    CHECK(r.image.layers[0].mips.empty() && r.image.layers[5].mips.size() == 4);
+    CHECK(showLayer(r.image, 5));
+    CHECK(r.image.shownLayer == 5 && r.image.mips[0].data[0] == 6 && r.image.mips[1].data[0] == 106);
+    CHECK(r.image.layers[5].mips.empty() && r.image.layers[0].mips.size() == 4 && r.image.layers[0].mips[0].data[0] == 1);
+    CHECK(!showLayer(r.image, 5) && !showLayer(r.image, 6));
+    CHECK(showLayer(r.image, 0) && r.image.mips[0].data[0] == 1);
+
+    Bytes array = makeDdsLayers(4, 4, 1, 3, false);
+    r = loadImage(array.data(), array.size(), "dds");
+    CHECK(r.ok && r.image.layerKind == LayerKind::ArraySlices && r.image.layers.size() == 3);
+    CHECK(r.image.layers[2].name == "Slice 2" && r.image.layers[2].mips[0].data[0] == 3);
+
+    Bytes cubes = makeDdsLayers(4, 4, 1, 2, true);
+    r = loadImage(cubes.data(), cubes.size(), "dds");
+    CHECK(r.ok && r.image.layerKind == LayerKind::CubeFaces && r.image.layers.size() == 12);
+    CHECK(r.image.layers[7].name == "Cube 1 \xE2\x88\x92X");
+
+    Bytes volume = makeDdsLayers(4, 4, 3, 1, false, 4);
+    r = loadImage(volume.data(), volume.size(), "dds");
+    CHECK(r.ok && r.image.layerKind == LayerKind::VolumeSlices && r.image.layers.size() == 4);
+    CHECK(r.image.mips.size() == 1 && r.image.layers[3].mips[0].data[0] == 4);
+
+    // A file cut short keeps the faces that are whole.
+    cube.resize(148 + (8 * 8 + 4 * 4 + 2 * 2 + 1) * 4 * 2 + 8 * 8 * 4 + 10);
+    r = loadImage(cube.data(), cube.size(), "dds");
+    CHECK(r.ok && r.image.layers.size() == 3 && r.image.layers[2].mips.size() == 1);
+    CHECK(r.image.note == "3 of 6 faces in the file");
+}
+
+void testPsdLayers() {
+    // The composite Photoshop would save: red on the left, red under half-transparent blue on the right.
+    std::vector<uint8_t> merged;
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 4; ++x) {
+            if (x < 2) merged.insert(merged.end(), {255, 0, 0, 255});
+            else merged.insert(merged.end(), {127, 0, 128, 255});
+        }
+    Bytes psd = makePsd(merged);
+    LoadResult r = loadImage(psd.data(), psd.size(), "psd");
+    CHECK(r.ok);
+    CHECK(r.image.layerKind == LayerKind::PsdLayers);
+    CHECK(r.image.dpi == 300.0f);
+    CHECK(r.image.layers.size() == 3);
+    if (r.image.layers.size() != 3) return;
+    Image& img = r.image;
+    CHECK(img.layers[0].name == "Group" && img.layers[0].group && img.layers[0].depth == 0);
+    CHECK(img.layers[1].name == "Top" && img.layers[1].parent == 0 && img.layers[1].depth == 1);
+    CHECK(img.layers[1].x == 2 && img.layers[1].width == 2 && img.layers[1].mips[0].data[2] == 255);
+    CHECK(img.layers[2].name == "Bottom" && img.layers[2].parent == -1 && img.layers[2].width == 4);
+    CHECK(!img.composited && img.mips[0].data[2 * 4] == 127);
+
+    // Hiding the group hides the layer in it.
+    img.layers[0].visible = false;
+    CHECK(!layerShows(img, 1) && layerShows(img, 2));
+    CHECK(compositeLayers(img) && img.composited);
+    CHECK(img.mips[0].data[3 * 4] == 255 && img.mips[0].data[3 * 4 + 2] == 0);
+    // Bottom hidden: the left is empty, the right is Top alone.
+    img.layers[0].visible = true;
+    img.layers[2].visible = false;
+    CHECK(compositeLayers(img));
+    CHECK(img.mips[0].data[3] == 0);
+    CHECK(img.mips[0].data[2 * 4 + 2] == 255 && img.mips[0].data[2 * 4 + 3] == 128);
+    // Back as saved: the file's own composite again.
+    img.layers[2].visible = true;
+    CHECK(compositeLayers(img) && !img.composited && img.mips[0].data[2 * 4] == 127);
+
+    // A blank composite (saved without Maximize compatibility) is rebuilt from the layers.
+    psd = makePsd(std::vector<uint8_t>(4 * 2 * 4, 255));
+    r = loadImage(psd.data(), psd.size(), "psd");
+    CHECK(r.ok && r.image.composited);
+    CHECK(r.image.mips[0].data[0] == 255 && r.image.mips[0].data[1] == 0 && r.image.mips[0].data[2 * 4 + 2] >= 127);
+
+    // Damaged layer data leaves the composite.
+    psd = makePsd(merged);
+    psd.resize(psd.size() / 2);
+    r = loadImage(psd.data(), psd.size(), "psd");
+    CHECK(r.image.layers.empty());
 }
 
 void testGarbage() {
@@ -575,6 +825,8 @@ int main(int argc, char** argv) {
     testHdr();
     testExr();
     testDds();
+    testDdsLayers();
+    testPsdLayers();
     testGarbage();
     testStats();
     std::printf(failures ? "%d check(s) failed\n" : "all checks passed\n", failures);

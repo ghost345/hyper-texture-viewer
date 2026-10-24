@@ -9,7 +9,7 @@ enum class Icon {
     Open, Prev, Next, Fit, RotateLeft, RotateRight, FlipH, FlipV, AlphaBackground, Tiling, Grid, Ruler,
     PixelOutline, ColorMatch, Histogram, Info, Layers, Compare, OnTop, Opacity, Theme, Settings, Help,
     Minimize, Maximize, Restore, Close, Chevron, Copy, Pin, More, Warning, Check, Sun, Image, Alert, Search, Clip,
-    Dismiss, ClickThrough,
+    Dismiss, ClickThrough, Eye, Folder,
     Count
 };
 

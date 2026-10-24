@@ -427,6 +427,7 @@ LoadResult loadDds(const uint8_t* data, size_t size) {
     uint32_t dxgi = 0;
     uint32_t faces = 1;
     bool expandRgb24 = false;
+    bool dxgiCube = false;
     bool volume = (caps2 & 0x200000) != 0 && depth > 1;
 
     if ((pfFlags & kFourCCFlag) && pfFourCC == fourCC('D', 'X', '1', '0')) {
@@ -437,7 +438,8 @@ LoadResult loadDds(const uint8_t* data, size_t size) {
         dxgi = readU32(data + 128);
         const uint32_t dimension = readU32(data + 132);
         const uint32_t misc = readU32(data + 136);
-        faces = std::max(1u, readU32(data + 140)) * ((misc & 0x4) ? 6 : 1);
+        dxgiCube = (misc & 0x4) != 0;
+        faces = std::max(1u, readU32(data + 140)) * (dxgiCube ? 6 : 1);
         volume = dimension == 4;
         offset = 148;
     } else if (pfFlags & kFourCCFlag) {
@@ -498,21 +500,13 @@ LoadResult loadDds(const uint8_t* data, size_t size) {
     img.format = GpuFormat(dxgi);
     const FormatInfo& info = formatInfo(img.format);
 
-    // Only the first face / array slice / volume slice is read for now; its whole mip chain comes first in the file.
-    const uint32_t levels = volume ? 1 : std::min(mipCount, 17u);
-    for (uint32_t level = 0; level < levels; ++level) {
-        const uint32_t w = std::max(1u, width >> level), h = std::max(1u, height >> level);
-        Surface s = makeSurface(info, w, h);
+    // Reads one surface at `offset`; false when the file ends before it.
+    auto readSurface = [&](uint32_t w, uint32_t h, Surface& s) {
+        s = makeSurface(info, w, h);
         const size_t srcPitch = expandRgb24 ? size_t(w) * 3 : s.rowPitch;
         const size_t rows = info.compressed ? std::max(1u, (h + 3) / 4) : h;
         const size_t srcSize = srcPitch * rows;
-        if (offset + srcSize > size) {
-            if (level == 0) {
-                r.error = "truncated DDS data";
-                return r;
-            }
-            break;  // keep the levels that are there
-        }
+        if (offset + srcSize > size) return false;
         if (expandRgb24) {
             const uint8_t* src = data + offset;
             for (size_t i = 0; i < size_t(w) * h; ++i) {
@@ -525,27 +519,81 @@ LoadResult loadDds(const uint8_t* data, size_t size) {
             std::memcpy(s.data.data(), data + offset, srcSize);
         }
         offset += srcSize;
-        img.mips.push_back(std::move(s));
-    }
-
-    if (img.format == GpuFormat::RGBA16F || img.format == GpuFormat::RGBA32F) {
+        return true;
+    };
+    auto maxOf = [&](const std::vector<Surface>& mips) {
+        if (img.format != GpuFormat::RGBA16F && img.format != GpuFormat::RGBA32F) return 0.0f;
+        Image probe;
+        probe.width = width;
+        probe.height = height;
+        probe.format = img.format;
+        probe.mips.push_back(mips[0]);
         float m = 0.0f, px[4];
         for (uint32_t y = 0; y < height; ++y)
             for (uint32_t x = 0; x < width; ++x)
-                if (readPixel(img, x, y, px))
+                if (readPixel(probe, x, y, px))
                     for (int c = 0; c < 3; ++c)
                         if (std::isfinite(px[c])) m = std::max(m, px[c]);
-        img.maxValue = m;
+        return m;
+    };
+
+    // Each face or array slice has its whole mip chain in turn. A volume has, per mip level, all of that level's
+    // depth slices; only level 0's slices are read, and the GPU makes their mips.
+    std::vector<std::vector<Surface>> pictures;
+    if (volume) {
+        for (uint32_t z = 0; z < std::min(depth, 2048u); ++z) {
+            Surface s;
+            if (!readSurface(width, height, s)) break;
+            pictures.push_back({std::move(s)});
+        }
+    } else {
+        const uint32_t levels = std::min(mipCount, 17u);
+        for (uint32_t face = 0; face < std::min(faces, 2048u); ++face) {
+            std::vector<Surface> mips;
+            for (uint32_t level = 0; level < levels; ++level) {
+                Surface s;
+                if (!readSurface(std::max(1u, width >> level), std::max(1u, height >> level), s)) break;
+                mips.push_back(std::move(s));
+            }
+            if (mips.empty()) break;
+            const bool complete = mips.size() == levels;
+            pictures.push_back(std::move(mips));
+            if (!complete) break;  // the file ends here: keep the levels that are there
+        }
     }
+    if (pictures.empty()) {
+        r.error = "truncated DDS data";
+        return r;
+    }
+
+    const size_t count = pictures.size();
+    if (count > 1) {
+        static const char* kFaceNames[6] = {"+X", "\xE2\x88\x92X", "+Y", "\xE2\x88\x92Y", "+Z", "\xE2\x88\x92Z"};
+        const bool cube = !volume && faces % 6 == 0 && (faces == 6 || (caps2 & 0x200) || dxgiCube);
+        img.layerKind = volume ? LayerKind::VolumeSlices : cube ? LayerKind::CubeFaces : LayerKind::ArraySlices;
+        for (size_t i = 0; i < count; ++i) {
+            Layer l;
+            if (cube && faces > 6) l.name = "Cube " + std::to_string(i / 6) + " " + kFaceNames[i % 6];
+            else if (cube) l.name = kFaceNames[i % 6];
+            else l.name = "Slice " + std::to_string(i);
+            l.width = width;
+            l.height = height;
+            l.format = img.format;
+            l.maxValue = maxOf(pictures[i]);
+            if (i > 0) l.mips = std::move(pictures[i]);
+            img.layers.push_back(std::move(l));
+        }
+        img.maxValue = img.layers[0].maxValue;
+    } else {
+        img.maxValue = maxOf(pictures[0]);
+    }
+    img.mips = std::move(pictures[0]);
 
     img.description = std::string("DDS, ") + info.name + ", " + std::to_string(img.mips.size()) +
                       (img.mips.size() == 1 ? " mip" : " mips");
-    if (volume)
-        img.note = "volume: slice 0 shown";
-    else if (faces == 6)
-        img.note = "cubemap: face 0 of 6 shown";
-    else if (faces > 1)
-        img.note = "array: slice 0 of " + std::to_string(faces) + " shown";
+    const uint32_t expected = volume ? depth : faces;
+    if (count < expected) img.note = std::to_string(count) + " of " + std::to_string(expected) + " " +
+                                     (volume ? "slices" : faces % 6 == 0 ? "faces" : "slices") + " in the file";
     r.ok = true;
     return r;
 }
@@ -637,6 +685,7 @@ LoadResult loadImage(const uint8_t* data, size_t size, const std::string& extens
     if (extension == "ktx" || extension == "ktx2") return loadKtx(data, size);
     if (extension == "gif") return loadGif(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
+    if (r.ok && extension == "psd") readPsdLayers(data, size, r.image);
     return r;
 }
 
@@ -781,6 +830,42 @@ std::string missingNormalZ(const Image& image, const std::string& name) {
     const bool varies = hi[0] - lo[0] > 8.0f / 255.0f || hi[1] - lo[1] > 8.0f / 255.0f;
     if (blueEmpty && varies && (centred || named)) return "Blue is empty and red and green centre on 0.5";
     return {};
+}
+
+bool showLayer(Image& image, int index) {
+    if (image.layerKind == LayerKind::None || image.layerKind == LayerKind::PsdLayers) return false;
+    if (index < 0 || index >= int(image.layers.size()) || index == image.shownLayer) return false;
+    Layer& old = image.layers[size_t(image.shownLayer)];
+    Layer& next = image.layers[size_t(index)];
+    if (next.mips.empty()) return false;
+    old.mips = std::move(image.mips);
+    image.mips = std::move(next.mips);
+    next.mips.clear();
+    image.width = next.width;
+    image.height = next.height;
+    image.format = next.format;
+    image.maxValue = next.maxValue;
+    image.shownLayer = index;
+    return true;
+}
+
+bool layerShows(const Image& image, int index) {
+    for (int i = index; i >= 0 && i < int(image.layers.size()); i = image.layers[size_t(i)].parent)
+        if (!image.layers[size_t(i)].visible) return false;
+    return index >= 0 && index < int(image.layers.size());
+}
+
+const char* layerKindName(LayerKind kind) {
+    switch (kind) {
+        case LayerKind::CubeFaces: return "Cubemap";
+        case LayerKind::ArraySlices: return "Array";
+        case LayerKind::VolumeSlices: return "Volume";
+        case LayerKind::Pages: return "Pages";
+        case LayerKind::ExrLayers: return "EXR";
+        case LayerKind::PsdLayers: return "PSD";
+        case LayerKind::None: break;
+    }
+    return "";
 }
 
 }  // namespace htv

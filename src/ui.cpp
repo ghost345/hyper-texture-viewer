@@ -180,10 +180,12 @@ void runAction(Action a) {
         case Action::ColorMatch: toggleColorMatch(); break;
         case Action::MatchPrevRegion:
             if (app.showFrames && isAnimation()) { app.framePlaying = false; showFrame(app.frameIndex - 1); }
+            else if (app.showFrames && hasLayers() && app.image.layerKind != htv::LayerKind::PsdLayers) selectLayer(app.image.shownLayer - 1);
             else stepMatchRegion(-1);
             break;
         case Action::MatchNextRegion:
             if (app.showFrames && isAnimation()) { app.framePlaying = false; showFrame(app.frameIndex + 1); }
+            else if (app.showFrames && hasLayers() && app.image.layerKind != htv::LayerKind::PsdLayers) selectLayer(app.image.shownLayer + 1);
             else stepMatchRegion(+1);
             break;
         case Action::Histogram: app.showHistogram = !app.showHistogram; break;

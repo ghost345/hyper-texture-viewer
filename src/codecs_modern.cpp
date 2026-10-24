@@ -449,46 +449,84 @@ LoadResult loadKtx(const uint8_t* data, size_t size) {
     img.height = tex->baseHeight;
     img.format = format;
     const uint8_t* base = ktxTexture_GetData(tex);
-    for (uint32_t level = 0; level < tex->numLevels; ++level) {
-        const uint32_t w = std::max(1u, img.width >> level), h = std::max(1u, img.height >> level);
-        ktx_size_t offset = 0;
-        if (ktxTexture_GetImageOffset(tex, level, 0, 0, &offset) != KTX_SUCCESS) break;
-        Surface s;
-        s.width = w;
-        s.height = h;
-        size_t rows = h;
-        if (info.compressed) {
-            s.rowPitch = std::max(1u, (w + 3) / 4) * info.bytes;
-            rows = std::max(1u, (h + 3) / 4);
-        } else {
-            s.rowPitch = ktxTexture_GetRowPitch(tex, level);  // includes KTX1 row padding
+    // One picture's mip chain: a face of an array layer, or a depth slice (level 0 only).
+    auto readMips = [&](uint32_t layer, uint32_t faceSlice, uint32_t levels) {
+        std::vector<Surface> mips;
+        for (uint32_t level = 0; level < levels; ++level) {
+            const uint32_t w = std::max(1u, img.width >> level), h = std::max(1u, img.height >> level);
+            ktx_size_t offset = 0;
+            if (ktxTexture_GetImageOffset(tex, level, layer, faceSlice, &offset) != KTX_SUCCESS) break;
+            Surface s;
+            s.width = w;
+            s.height = h;
+            size_t rows = h;
+            if (info.compressed) {
+                s.rowPitch = std::max(1u, (w + 3) / 4) * info.bytes;
+                rows = std::max(1u, (h + 3) / 4);
+            } else {
+                s.rowPitch = ktxTexture_GetRowPitch(tex, level);  // includes KTX1 row padding
+            }
+            const size_t bytes = s.rowPitch * rows;
+            if (offset + bytes > ktxTexture_GetDataSize(tex)) break;
+            s.data.assign(base + offset, base + offset + bytes);
+            mips.push_back(std::move(s));
         }
-        const size_t bytes = s.rowPitch * rows;
-        if (offset + bytes > ktxTexture_GetDataSize(tex)) break;
-        s.data.assign(base + offset, base + offset + bytes);
-        img.mips.push_back(std::move(s));
-    }
-    if (img.mips.empty()) {
-        r.error = "KTX file has no image data";
-        return r;
-    }
-    if (format == GpuFormat::RGBA16F || format == GpuFormat::RGBA32F) {
+        return mips;
+    };
+    auto maxOf = [&](const std::vector<Surface>& mips) {
+        if (format != GpuFormat::RGBA16F && format != GpuFormat::RGBA32F) return 0.0f;
+        Image probe;
+        probe.width = img.width;
+        probe.height = img.height;
+        probe.format = format;
+        probe.mips.push_back(mips[0]);
         float px[4], m = 0.0f;
         for (uint32_t y = 0; y < img.height; ++y)
             for (uint32_t x = 0; x < img.width; ++x)
-                if (readPixel(img, x, y, px))
+                if (readPixel(probe, x, y, px))
                     for (int c = 0; c < 3; ++c)
                         if (std::isfinite(px[c])) m = std::max(m, px[c]);
-        img.maxValue = m;
+        return m;
+    };
+
+    const bool volume = tex->numDimensions == 3 && tex->baseDepth > 1;
+    const uint32_t faces = tex->numFaces, layers = std::max(1u, tex->numLayers);
+    std::vector<std::vector<Surface>> pictures;
+    std::vector<std::string> names;
+    static const char* kFaceNames[6] = {"+X", "\xE2\x88\x92X", "+Y", "\xE2\x88\x92Y", "+Z", "\xE2\x88\x92Z"};
+    for (uint32_t layer = 0; layer < std::min(layers, 2048u); ++layer)
+        for (uint32_t f = 0; f < (volume ? std::min(tex->baseDepth, 2048u) : faces); ++f) {
+            std::vector<Surface> mips = readMips(layer, f, volume ? 1 : tex->numLevels);
+            if (mips.empty()) continue;
+            pictures.push_back(std::move(mips));
+            if (tex->isCubemap)
+                names.push_back(layers > 1 ? "Cube " + std::to_string(layer) + " " + kFaceNames[f % 6] : kFaceNames[f % 6]);
+            else
+                names.push_back("Slice " + std::to_string(volume ? f : layer));
+        }
+    if (pictures.empty()) {
+        r.error = "KTX file has no image data";
+        return r;
     }
+    if (pictures.size() > 1) {
+        img.layerKind = volume ? LayerKind::VolumeSlices : tex->isCubemap ? LayerKind::CubeFaces : LayerKind::ArraySlices;
+        for (size_t i = 0; i < pictures.size(); ++i) {
+            Layer l;
+            l.name = names[i];
+            l.width = img.width;
+            l.height = img.height;
+            l.format = format;
+            l.maxValue = maxOf(pictures[i]);
+            if (i > 0) l.mips = std::move(pictures[i]);
+            img.layers.push_back(std::move(l));
+        }
+        img.maxValue = img.layers[0].maxValue;
+    } else {
+        img.maxValue = maxOf(pictures[0]);
+    }
+    img.mips = std::move(pictures[0]);
     img.description = container + ", " + info.name + encoding + ", " + std::to_string(img.mips.size()) +
                       (img.mips.size() == 1 ? " mip" : " mips");
-    if (tex->isCubemap)
-        img.note = "cubemap: face 0 of 6 shown";
-    else if (tex->numLayers > 1)
-        img.note = "array: layer 0 of " + std::to_string(tex->numLayers) + " shown";
-    else if (tex->baseDepth > 1)
-        img.note = "volume: slice 0 shown";
     r.ok = true;
     return r;
 #endif

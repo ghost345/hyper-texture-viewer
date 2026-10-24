@@ -59,6 +59,8 @@ const IconDef kIcons[int(Icon::Count)] = {
     /* Clip */ {{{"M4 4h16v16H4z", false}, {"M4 12l8-8M4 20L20 4M12 20l8-8", false}}},
     /* Dismiss */ {{{"M6 6l12 12M18 6L6 18", false}}},
     /* ClickThrough: drawn by dashedPointer */ {{{nullptr, false}}},
+    /* Eye */ {{{"M2.5 12C5.5 7 8.6 5.5 12 5.5C15.4 5.5 18.5 7 21.5 12C18.5 17 15.4 18.5 12 18.5C8.6 18.5 5.5 17 2.5 12z", false}, {"M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z", false}}},
+    /* Folder */ {{{"M3 18.5v-12A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v10z", false}}},
 };
 
 // Minimal SVG path interpreter: M L H V A C Z and their relative forms, which is all the icon set uses.

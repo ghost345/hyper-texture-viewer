@@ -565,9 +565,10 @@ void finishLoad(LoadedFile* raw) {
     app.stats = std::move(f->stats);
     app.imageAlpha = f->alpha;
     app.hasImage = true;
+    ++app.fileGeneration;
     app.frameIndex = 0;
     app.frameShownMs = nowMs();
-    if (app.image.frames.size() <= 1) app.showFrames = false;
+    if (!isAnimation() && !hasLayers()) app.showFrames = false;
     app.fromClipboard = f->clipboard;
     app.shownPath = f->path;
     app.fileSize = f->fileSize;
@@ -673,6 +674,76 @@ void showFrame(int index) {
     app.frameShownMs = nowMs();
     if (app.pixelLocked) app.imageAlpha = app.imageAlpha;  // readouts refresh on the new generation
     requestRedraw();
+}
+
+bool hasLayers() {
+    if (!app.hasImage) return false;
+    const htv::Image& img = app.image;
+    return img.layers.size() > 1 || (img.layerKind == htv::LayerKind::PsdLayers && !img.layers.empty());
+}
+
+// The image's pixels changed in place (another layer, or the layers composited again): upload them and
+// refresh what was worked out from them.
+static void layerChanged(bool sizeChanged) {
+    std::string error;
+    if (!uploadImage(app.image, error)) return;
+    if (isHighPrecision(app.image) || app.stats.channelsValid) app.stats = htv::computeStats(app.image, app.stats.channelsValid);
+    else app.stats = htv::ImageStats();
+    app.imageAlpha = htv::hasTranslucentPixels(app.image);
+    app.normalHint = app.fromClipboard ? std::string() : htv::missingNormalZ(app.image, narrow(app.shownPath.filename().wstring()));
+    if (app.forcedMip >= app.textureMips) app.forcedMip = -1;
+    if (app.pixelLocked) {
+        app.lockedX = std::min(app.lockedX, int(app.image.width) - 1);
+        app.lockedY = std::min(app.lockedY, int(app.image.height) - 1);
+    }
+    if (sizeChanged && app.fit) fitToWindow();
+    requestRedraw();
+}
+
+void selectLayer(int index) {
+    if (!hasLayers()) return;
+    const int n = int(app.image.layers.size());
+    index = ((index % n) + n) % n;
+    const uint32_t w = app.image.width, h = app.image.height;
+    if (!htv::showLayer(app.image, index)) return;
+    layerChanged(w != app.image.width || h != app.image.height);
+}
+
+void setLayerVisible(int index, bool visible, bool solo) {
+    htv::Image& img = app.image;
+    if (!hasLayers() || img.layerKind != htv::LayerKind::PsdLayers || index < 0 || index >= int(img.layers.size())) return;
+    // Alt+click, as in Photoshop: the layer alone (with the groups around it and what is inside it), and the
+    // same again puts every eye back as it was.
+    static std::vector<bool> beforeSolo, soloState;
+    static int soloIndex = -1;
+    static fs::path soloPath;
+    auto state = [&] {
+        std::vector<bool> v;
+        for (const htv::Layer& l : img.layers) v.push_back(l.visible);
+        return v;
+    };
+    auto contains = [&](int outer, int i) {  // `i` is `outer` or inside it
+        for (int p = i; p >= 0; p = img.layers[size_t(p)].parent)
+            if (p == outer) return true;
+        return false;
+    };
+    if (solo && soloPath == app.shownPath && soloIndex == index && state() == soloState && beforeSolo.size() == img.layers.size()) {
+        for (size_t i = 0; i < img.layers.size(); ++i) img.layers[i].visible = beforeSolo[i];
+        soloIndex = -1;
+    } else if (solo) {
+        beforeSolo = state();
+        for (int i = 0; i < int(img.layers.size()); ++i) {
+            htv::Layer& l = img.layers[size_t(i)];
+            if (contains(i, index)) l.visible = true;   // the layer and the groups around it
+            else if (!contains(index, i)) l.visible = false;  // inside it: as they were
+        }
+        soloIndex = index;
+        soloPath = app.shownPath;
+        soloState = state();
+    } else {
+        img.layers[size_t(index)].visible = visible;
+    }
+    if (htv::compositeLayers(img)) layerChanged(false);
 }
 
 // How long a frame stays, as browsers play it: GIFs saved with 0 or 10 ms mean "as fast as possible",

@@ -117,6 +117,7 @@ struct App {
     htv::ImageStats stats;
     bool imageAlpha = false;       // some pixel is not fully opaque
     int imageGeneration = 0;       // changes with every upload, for caches of image data
+    int fileGeneration = 0;        // changes with every file shown (not with its layers or frames)
     bool hasImage = false;         // an image is on screen (a failed file clears it)
     std::filesystem::path path;    // last file asked for: shown, loading or failed
     std::filesystem::path shownPath;
@@ -208,7 +209,7 @@ struct App {
     std::filesystem::path previousPath;  // the image shown before this one: the first guess for B
 
     // Layers / Frames (L).
-    bool showFrames = false;      // the Frames panel, for animations
+    bool showFrames = false;      // the Frames panel for animations, or the Layers panel for files with layers
     int frameIndex = 0;
     bool framePlaying = true;
     double frameShownMs = 0;      // when the current frame went up
@@ -306,6 +307,14 @@ void showMatchRegion(int index);  // centres the view on a region, zooming out w
 bool isAnimation();
 void showFrame(int index);  // uploads a frame of the animation; wraps around
 void advanceFrame();        // the next frame, for the playback timer
+// Layers: the file has cube faces, array or volume slices, pages, EXR or PSD layers to list.
+bool hasLayers();
+void selectLayer(int index);  // one-at-a-time kinds: shows that layer instead
+// PSD: shows or hides a layer (or group) and composites again. `solo` shows it alone, or everything again
+// when it already was alone.
+void setLayerVisible(int index, bool visible, bool solo = false);
+// A 64 px thumbnail of a layer, made on first use.
+ID3D11ShaderResourceView* layerThumbnail(int index);
 // Compare: slot 0 is B, 1 is C. Loads in the background; an empty path clears the slot.
 void loadCompareSlot(int slot, const std::filesystem::path& path);
 bool pickImageFile(std::filesystem::path& out);  // the Open dialog; false when cancelled

@@ -506,8 +506,8 @@ void overlaysGroup(Row& r, const TopLayout& L) {
 }
 
 void analysisGroup(Row& r, const TopLayout& L) {
-    const bool anim = isAnimation();  // the one kind of file with layers to show so far: frames
-    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Info) && !(anim && L.shows(Tool::Layers))) return;
+    const bool layers = isAnimation() || hasLayers();  // the button only exists for files with frames or layers
+    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Info) && !(layers && L.shows(Tool::Layers))) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     if (L.shows(Tool::Match) && r.button("match", Icon::ColorMatch, nullptr, (app.colorMatch && !off ? kOn : 0) | off, "Color match",
@@ -518,8 +518,9 @@ void analysisGroup(Row& r, const TopLayout& L) {
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
     if (L.shows(Tool::Info) && r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
         app.showInfo = !app.showInfo;
-    if (anim && L.shows(Tool::Layers) &&
-        r.button("layers", Icon::Layers, nullptr, app.showFrames ? kOn : 0, "Frames", keyText(Action::Layers)))
+    if (layers && L.shows(Tool::Layers) &&
+        r.button("layers", Icon::Layers, nullptr, app.showFrames ? kOn : 0, isAnimation() ? "Frames" : "Layers",
+                 keyText(Action::Layers)))
         toggleFramesOrLayers();
 }
 
@@ -575,8 +576,8 @@ void moreMenuItems(const TopLayout& L) {
     if (item(Tool::Info, 4) &&
         menuItem({"Info", keyText(Action::Info), app.showInfo, !(off && app.error.empty()), false, Icon::Info}))
         app.showInfo = !app.showInfo;
-    const bool anim = isAnimation();
-    if (anim && item(Tool::Layers, 4) && menuItem({"Frames", keyText(Action::Layers), app.showFrames, true, false, Icon::Layers}))
+    if ((isAnimation() || hasLayers()) && item(Tool::Layers, 4) &&
+        menuItem({isAnimation() ? "Frames" : "Layers", keyText(Action::Layers), app.showFrames, true, false, Icon::Layers}))
         toggleFramesOrLayers();
     if (item(Tool::Compare, 4) && menuItem({"Compare", keyText(Action::Compare), app.compare, !off, false, Icon::Compare}))
         toggleCompare();

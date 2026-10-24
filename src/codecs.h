@@ -13,6 +13,10 @@ LoadResult loadAvif(const uint8_t* data, size_t size);
 LoadResult loadJxl(const uint8_t* data, size_t size);
 LoadResult loadKtx(const uint8_t* data, size_t size);
 
+// Adds a PSD's layers (8 and 16 bit, RGB and greyscale) to `image`, which holds the file's composite, and its
+// print resolution. Leaves the image as it is when the file has no layers it can read.
+void readPsdLayers(const uint8_t* data, size_t size, Image& image);
+
 // HDR transfer functions shared by the AVIF and JPEG XL loaders.
 enum class Transfer { Linear, Srgb, Pq, Hlg };
 enum class Primaries { Bt709, Bt2020, DisplayP3 };

@@ -70,6 +70,39 @@ struct Frame {
     int delayMs = 0;
 };
 
+// A picture the file holds besides the one on screen: a cubemap face, a texture array or volume slice, a TIFF
+// page, an EXR layer or a PSD layer.
+struct Layer {
+    std::string name;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    GpuFormat format = GpuFormat::Unknown;
+    std::vector<Surface> mips;  // empty while this one is on screen (one-at-a-time kinds): Image::mips has them
+    float maxValue = 0.0f;
+    std::string detail;         // shown after the name when it tells layers apart, e.g. "RGBA half" or "512 × 256"
+    // PSD only: the layer's pixels (in the image's format) sit at x, y on the canvas.
+    int x = 0;
+    int y = 0;
+    float opacity = 1.0f;
+    bool visible = true;
+    bool visibleInFile = true;
+    bool group = false;         // a layer group: no pixels, hides or fades the layers inside it
+    int parent = -1;            // the group it is in
+    int depth = 0;              // how many groups deep
+    std::string blend;          // Photoshop's blend key: "norm", "mul ", "pass" (groups)...
+    bool clipped = false;       // a clipping mask on the layer below
+};
+
+enum class LayerKind {
+    None,
+    CubeFaces,     // one at a time
+    ArraySlices,
+    VolumeSlices,
+    Pages,
+    ExrLayers,
+    PsdLayers,     // composited: each has its own eye
+};
+
 struct Image {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -81,6 +114,11 @@ struct Image {
     float dpi = 0.0f;            // print resolution the file states, 0 when it states none
     std::vector<Frame> frames;   // more than one: an animation. frame 0's pixels equal mips[0].
     int loopCount = 0;           // 0 loops forever
+    std::vector<Layer> layers;   // more than one, or none. Listed top to bottom for PSD.
+    LayerKind layerKind = LayerKind::None;
+    int shownLayer = 0;          // one-at-a-time kinds: the layer in mips; PSD: unused
+    bool composited = false;     // PSD: mips[0] was rebuilt from the layers instead of being the file's own composite
+    Surface fileComposite;       // PSD: the file's own composite, for when every layer is back as saved
 };
 
 struct LoadResult {
@@ -103,6 +141,20 @@ bool readPixel(const Image& image, uint32_t x, uint32_t y, float rgba[4]);
 // "nrm", "_n") and the colours (red and green around 0.5, blue empty: yellow-green instead of the bluish
 // tangent-space look). `name` is the file name, lower or upper case.
 std::string missingNormalZ(const Image& image, const std::string& name);
+
+// Puts layer `index` on screen for the one-at-a-time kinds: its pixels, size and format move into the image,
+// and the previous layer's go back to its entry. False when there is nothing to change.
+bool showLayer(Image& image, int index);
+
+// PSD: rebuilds mips[0] from the visible layers, blending each over the ones below as Normal (blend modes,
+// clipping and layer effects are not reproduced). False when the image has no PSD layers.
+bool compositeLayers(Image& image);
+
+// Whether a PSD layer shows: it and every group around it are visible.
+bool layerShows(const Image& image, int index);
+
+// "Cubemap", "Array", "Volume", "Pages", "EXR", "PSD".
+const char* layerKindName(LayerKind kind);
 
 uint16_t floatToHalf(float value);
 float halfToFloat(uint16_t value);

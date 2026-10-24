@@ -166,8 +166,9 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (bt) return HTBOTTOM;
             }
             if (uiIsCaption(float(p.x), float(p.y))) return HTCAPTION;
-            // Alt + drag on the image moves the window, which matters when the bars are hidden.
-            if ((GetKeyState(VK_MENU) & 0x8000) && inViewport(p.x, p.y)) return HTCAPTION;
+            // Alt + drag on the image moves the window, which matters when the bars are hidden. Panels over the
+            // image keep their Alt+clicks (a layer's eye).
+            if ((GetKeyState(VK_MENU) & 0x8000) && inViewport(p.x, p.y) && !uiMouse) return HTCAPTION;
             return HTCLIENT;
         }
         case WM_NCACTIVATE:
