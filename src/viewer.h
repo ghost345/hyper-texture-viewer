@@ -8,6 +8,7 @@
 namespace htv {
 
 constexpr UINT WM_APP_LOADED = WM_APP + 1;  // a background load finished; lParam owns a LoadedFile
+constexpr UINT WM_APP_PREFETCHED = WM_APP + 2;  // a neighbour was decoded ahead; lParam owns a LoadedFile
 constexpr UINT_PTR kWatchTimer = 1;         // checks the shown file for changes on disk
 constexpr UINT_PTR kLoadingTimer = 2;       // keeps frames coming while a load runs
 constexpr UINT_PTR kZebraTimer = 3;         // moves the clipping stripes
@@ -40,6 +41,7 @@ void loadSettings();
 void saveOnExit();
 void openStartupFile(const std::filesystem::path& path);  // synchronous when benchmarking
 void finishLoad(LoadedFile* file);
+void prefetchDone(LoadedFile* file);
 void checkFileChanged();
 bool isSupported(const std::filesystem::path& path);
 

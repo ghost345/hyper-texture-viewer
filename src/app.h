@@ -207,6 +207,7 @@ bool setPortableMode(bool on);  // false when the exe's folder is not writable
 void applyTheme();              // after themeMode changes, or Windows switches its theme
 void applyInterfaceScale();     // after interfaceScale changes
 void relistFolder();            // after folderSort changes
+void trimImageCache();          // after cacheMB or prefetch change
 void relayout();  // after the bars change height
 void fitToWindow();
 void zoomAt(float newZoom, float x, float y);

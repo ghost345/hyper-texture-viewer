@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -91,7 +92,9 @@ std::atomic<uint64_t> bytesRead{0};
 std::atomic<bool> decoding{false};
 bool workerStarted = false;
 
-bool readFile(const fs::path& path, int generation, std::vector<uint8_t>& out, std::string& error) {
+// Reads a whole file in chunks; `cancelled` is asked between chunks and `progress` (when given) counts the bytes.
+bool readFile(const fs::path& path, const std::function<bool()>& cancelled, std::atomic<uint64_t>* progress,
+              std::vector<uint8_t>& out, std::string& error) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
@@ -112,7 +115,7 @@ bool readFile(const fs::path& path, int generation, std::vector<uint8_t>& out, s
     size_t done = 0;
     bool ok = true;
     while (done < out.size()) {
-        if (generation != latestGeneration) {
+        if (cancelled()) {
             ok = false;
             break;
         }
@@ -124,31 +127,50 @@ bool readFile(const fs::path& path, int generation, std::vector<uint8_t>& out, s
             break;
         }
         done += read;
-        bytesRead = done;
+        if (progress) *progress = done;
     }
     CloseHandle(f);
     return ok;
 }
 
-void decode(LoadedFile& r) {
+// Prefetching decodes the folder's neighbours on a second, lower-priority thread; the user's request never
+// waits for it. A request for the file it is decoding takes that decode over instead of starting again.
+std::mutex prefetchMutex;
+std::condition_variable prefetchWake;
+std::vector<std::unique_ptr<LoadedFile>> prefetchQueue;  // most wanted first
+std::atomic<int> prefetchGeneration{0};                  // a new queue cancels reads of the old one
+fs::path prefetchInFlight;
+std::atomic<int> promotedGeneration{0};                  // the user asked for the file in flight
+OpenMode promotedMode = OpenMode::Browse;
+bool prefetchStarted = false;
+
+// `foreground`: the user's request, which shows progress; otherwise a prefetch.
+void decode(LoadedFile& r, bool foreground) {
     const double t0 = nowMs();
     r.stamp = stampOf(r.path);
     r.fileSize = r.stamp.size;
     const std::string ext = lowerExtension(r.path);
     r.format = ext;
     for (char& c : r.format) c = char(std::toupper(static_cast<unsigned char>(c)));
-    bytesRead = 0;
-    decoding = false;
+    if (foreground) {
+        bytesRead = 0;
+        decoding = false;
+    }
+    const int generation = r.generation;
+    const std::function<bool()> cancelled = [&] {
+        return foreground ? generation != latestGeneration
+                          : generation != prefetchGeneration && promotedGeneration == 0;
+    };
     htv::LoadResult result;
     if (hasBuiltInDecoder(ext)) {
         std::vector<uint8_t> bytes;
-        if (!readFile(r.path, r.generation, bytes, r.error)) return;
-        decoding = true;
+        if (!readFile(r.path, cancelled, foreground ? &bytesRead : nullptr, bytes, r.error)) return;
+        if (foreground) decoding = true;
         result = htv::loadImage(bytes.data(), bytes.size(), ext);
     }
     // Anything the built-in decoders don't cover goes to the codecs installed in Windows.
     if (!result.ok) {
-        decoding = true;
+        if (foreground) decoding = true;
         htv::LoadResult wic = htv::loadWithWic(r.path);
         if (wic.ok || result.error.empty()) result = std::move(wic);
     }
@@ -174,9 +196,131 @@ void workerLoop() {
             loaderWake.wait(lock, [] { return waiting != nullptr; });
             job = std::move(waiting);
         }
-        decode(*job);
-        if (job->generation == latestGeneration) PostMessageW(app.hwnd, WM_APP_LOADED, 0, reinterpret_cast<LPARAM>(job.release()));
+        decode(*job, true);
+        // Superseded results still go back: the main thread keeps them in the cache.
+        PostMessageW(app.hwnd, WM_APP_LOADED, 0, reinterpret_cast<LPARAM>(job.release()));
     }
+}
+
+void prefetchLoop() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    for (;;) {
+        std::unique_ptr<LoadedFile> job;
+        {
+            std::unique_lock<std::mutex> lock(prefetchMutex);
+            prefetchWake.wait(lock, [] { return !prefetchQueue.empty(); });
+            job = std::move(prefetchQueue.front());
+            prefetchQueue.erase(prefetchQueue.begin());
+            prefetchInFlight = job->path;
+        }
+        decode(*job, false);
+        bool promoted = false;
+        {
+            std::lock_guard<std::mutex> lock(prefetchMutex);
+            prefetchInFlight.clear();
+            if (const int g = promotedGeneration.exchange(0)) {
+                job->generation = g;
+                job->mode = promotedMode;
+                promoted = true;
+            }
+        }
+        PostMessageW(app.hwnd, promoted ? WM_APP_LOADED : WM_APP_PREFETCHED, 0, reinterpret_cast<LPARAM>(job.release()));
+    }
+}
+
+// ---- cache of decoded images ----
+
+// Images the user moved away from and prefetched neighbours, least recently used first out. Main thread only.
+struct CacheEntry {
+    std::unique_ptr<LoadedFile> file;
+    uint64_t bytes = 0;
+    uint64_t lastUse = 0;
+};
+std::vector<CacheEntry> cache;
+uint64_t cacheClock = 0;
+
+uint64_t imageBytes(const htv::Image& image) {
+    uint64_t n = 0;
+    for (const htv::Surface& s : image.mips) n += s.data.size();
+    return n;
+}
+
+uint64_t cacheBudget() { return uint64_t(std::max(app.cacheMB, 0)) << 20; }
+
+void trimCache(uint64_t budget) {
+    uint64_t total = 0;
+    for (const CacheEntry& e : cache) total += e.bytes;
+    while (total > budget && !cache.empty()) {
+        auto oldest = std::min_element(cache.begin(), cache.end(),
+                                       [](const CacheEntry& a, const CacheEntry& b) { return a.lastUse < b.lastUse; });
+        total -= oldest->bytes;
+        cache.erase(oldest);
+    }
+}
+
+void cacheInsert(std::unique_ptr<LoadedFile> f) {
+    if (!f || !f->ok || f->clipboard || f->path.empty()) return;
+    const uint64_t bytes = imageBytes(f->image);
+    if (bytes > cacheBudget()) return;
+    cache.erase(std::remove_if(cache.begin(), cache.end(), [&](const CacheEntry& e) { return e.file->path == f->path; }),
+                cache.end());
+    cache.push_back({std::move(f), bytes, ++cacheClock});
+    trimCache(cacheBudget());
+}
+
+// The cached decode of `path` if the file has not changed since; it leaves the cache.
+std::unique_ptr<LoadedFile> cacheTake(const fs::path& path) {
+    for (auto it = cache.begin(); it != cache.end(); ++it) {
+        if (it->file->path != path) continue;
+        std::unique_ptr<LoadedFile> f = std::move(it->file);
+        cache.erase(it);
+        if (f->stamp != stampOf(path)) return nullptr;
+        return f;
+    }
+    return nullptr;
+}
+
+bool cached(const fs::path& path) {
+    for (CacheEntry& e : cache)
+        if (e.file->path == path) {
+            e.lastUse = ++cacheClock;  // still wanted: a neighbour again
+            return true;
+        }
+    return false;
+}
+
+int lastStep = 1;  // direction of the last Previous/Next, prefetched first
+
+// Queues the shown file's neighbours that are not decoded yet; the queue of the previous file is dropped.
+void schedulePrefetch() {
+    if (app.cacheMB <= 0 || app.prefetch <= 0 || app.folderIndex < 0 || app.folder.size() < 2 || !app.benchPath.empty())
+        return;
+    const int n = int(app.folder.size());
+    std::vector<fs::path> wanted;
+    for (int d = 1; d <= app.prefetch; ++d)
+        for (int dir : {lastStep, -lastStep}) {
+            const fs::path& p = app.folder[size_t(((app.folderIndex + dir * d) % n + n) % n)];
+            if (p != app.shownPath && !cached(p) && std::find(wanted.begin(), wanted.end(), p) == wanted.end())
+                wanted.push_back(p);
+        }
+    std::lock_guard<std::mutex> lock(prefetchMutex);
+    prefetchQueue.clear();
+    const int generation = ++prefetchGeneration;
+    for (const fs::path& p : wanted) {
+        if (p == prefetchInFlight) continue;
+        auto job = std::make_unique<LoadedFile>();
+        job->path = p;
+        job->mode = OpenMode::Browse;
+        job->generation = generation;
+        job->channelStats = app.showHistogram;
+        prefetchQueue.push_back(std::move(job));
+    }
+    if (!prefetchStarted) {
+        std::thread(prefetchLoop).detach();
+        prefetchStarted = true;
+    }
+    prefetchWake.notify_one();
 }
 
 // ---- folder ----
@@ -215,6 +359,8 @@ void listFolder(const fs::path& file) {
 }
 
 FileStamp watchedStamp, pendingStamp;
+FileStamp shownStamp;     // of the image on screen, for the cache
+std::string shownFormat;
 bool reloadPending = false;
 fs::path pathBeforeLoad;  // restored when a load is cancelled
 
@@ -239,11 +385,33 @@ void requestOpen(const fs::path& path, OpenMode mode) {
     app.loadingProgress = 0.0f;
     if (!app.benchPath.empty()) {
         // Benchmarks time the whole open on the main thread.
-        decode(*job);
+        decode(*job, true);
         finishLoad(job.release());
         return;
     }
+    // Decoded before: shown at once.
+    if (mode != OpenMode::Reload) {
+        if (std::unique_ptr<LoadedFile> hit = cacheTake(path)) {
+            hit->mode = mode;
+            hit->generation = job->generation;
+            finishLoad(hit.release());
+            return;
+        }
+    }
     SetTimer(app.hwnd, kLoadingTimer, 50, nullptr);
+    {
+        // Being prefetched right now: that decode becomes this request.
+        std::lock_guard<std::mutex> lock(prefetchMutex);
+        if (mode != OpenMode::Reload && prefetchInFlight == path) {
+            promotedGeneration = job->generation;
+            promotedMode = mode;
+            return;
+        }
+        promotedGeneration = 0;
+        prefetchQueue.erase(std::remove_if(prefetchQueue.begin(), prefetchQueue.end(),
+                                           [&](const std::unique_ptr<LoadedFile>& q) { return q->path == path; }),
+                            prefetchQueue.end());
+    }
     std::lock_guard<std::mutex> lock(loaderMutex);
     waiting = std::move(job);
     if (!workerStarted) {
@@ -351,7 +519,10 @@ bool isSupported(const fs::path& p) {
 
 void finishLoad(LoadedFile* raw) {
     std::unique_ptr<LoadedFile> f(raw);
-    if (f->generation != latestGeneration) return;  // superseded by a newer request
+    if (f->generation != latestGeneration) {  // superseded by a newer request: kept for later
+        if (f->path != app.shownPath) cacheInsert(std::move(f));
+        return;
+    }
     app.loading = false;
     KillTimer(app.hwnd, kLoadingTimer);
     if (!f->clipboard) watchedStamp = f->stamp;
@@ -371,6 +542,21 @@ void finishLoad(LoadedFile* raw) {
     app.tUpload = nowMs() - t0;
 
     const bool sameSize = app.hasImage && app.image.width == f->image.width && app.image.height == f->image.height;
+    // The image on screen goes to the cache for going back to it, unless this is a new version of it.
+    if (app.hasImage && !app.fromClipboard && app.shownPath != f->path && app.cacheMB > 0) {
+        auto old = std::make_unique<LoadedFile>();
+        old->path = app.shownPath;
+        old->ok = true;
+        old->image = std::move(app.image);
+        old->stats = std::move(app.stats);
+        old->alpha = app.imageAlpha;
+        old->fileSize = app.fileSize;
+        old->stamp = shownStamp;
+        old->format = shownFormat;
+        cacheInsert(std::move(old));
+    }
+    shownStamp = f->stamp;
+    shownFormat = f->format;
     app.image = std::move(f->image);
     app.stats = std::move(f->stats);
     app.imageAlpha = f->alpha;
@@ -406,6 +592,7 @@ void finishLoad(LoadedFile* raw) {
             saveSettings();
         }
     }
+    if (!f->clipboard) schedulePrefetch();
     requestRedraw();
 }
 
@@ -419,6 +606,7 @@ void openPath(const fs::path& path) {
 
 void step(int delta) {
     if (app.folder.empty()) return;
+    lastStep = delta < 0 ? -1 : 1;
     const int n = int(app.folder.size());
     const int from = app.folderIndex < 0 ? (delta > 0 ? -1 : 0) : app.folderIndex;
     requestOpen(app.folder[size_t(((from + delta) % n + n) % n)], OpenMode::Browse);
@@ -682,6 +870,23 @@ bool setPortableMode(bool on) {
     }
     saveSettings();
     return true;
+}
+
+void prefetchDone(LoadedFile* raw) {
+    std::unique_ptr<LoadedFile> f(raw);
+    if (f->generation != prefetchGeneration || f->path == app.shownPath) return;
+    cacheInsert(std::move(f));
+}
+
+void trimImageCache() {
+    trimCache(cacheBudget());
+    if (app.cacheMB <= 0 || app.prefetch <= 0) {
+        std::lock_guard<std::mutex> lock(prefetchMutex);
+        prefetchQueue.clear();
+        ++prefetchGeneration;
+    } else {
+        schedulePrefetch();
+    }
 }
 
 void relistFolder() {

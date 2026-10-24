@@ -192,6 +192,7 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
             const int mb = int(std::round(tpos * float(maxMB) / 256.0f)) * 256;
             if (mb != app.cacheMB) {
                 app.cacheMB = mb;
+                trimImageCache();
                 saveSettings();
             }
         }
@@ -211,8 +212,10 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
         static const char* prefetch[] = {"Off", "\xC2\xB1" "1", "\xC2\xB1" "2"};
         static const char* prefetchTips[] = {"Decode only the file shown", "Decode the next and previous file ahead",
                                              "Decode two files ahead in each direction"};
-        if (segmented(dl, "prefetch", controlX, cy, prefetch, 3, app.prefetch, false, prefetchTips, app.cacheMB == 0))
+        if (segmented(dl, "prefetch", controlX, cy, prefetch, 3, app.prefetch, false, prefetchTips, app.cacheMB == 0)) {
+            trimImageCache();
             saveSettings();
+        }
         y += rowH;
 
         cy = y + rowH * 0.5f;

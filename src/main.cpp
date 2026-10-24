@@ -237,6 +237,9 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             finishLoad(reinterpret_cast<LoadedFile*>(lp));
             redraw = true;
             return 0;
+        case WM_APP_PREFETCHED:
+            prefetchDone(reinterpret_cast<LoadedFile*>(lp));
+            return 0;
         case WM_MOUSEWHEEL: {
             POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &p);

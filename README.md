@@ -15,7 +15,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
 - Settings (Ctrl+,): theme (dark, light or as Windows), interface scale, viewport colour, checker size, what stays when switching files, folder order, automatic reload, single instance, portable mode, and every key reassignable (the F1 screen shows the current keys).
 - Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top and window opacity, borderless window that hides its bars with Tab.
-- Files load in the background with progress; the open file reloads when it changes on disk, a broken file shows what went wrong without stopping browsing. Recent files with thumbnails, paste from the clipboard.
+- Files load in the background with progress; images you leave stay decoded in a cache (size in Settings) and the folder's neighbours are decoded ahead, so Previous/Next is instant; the open file reloads when it changes on disk, a broken file shows what went wrong without stopping browsing. Recent files with thumbnails, paste from the clipboard.
 - One exe, static runtime, no installer. Windows 10/11 x64; Direct3D 11 on any GPU, with a software fallback (WARP).
 
 ## Controls
