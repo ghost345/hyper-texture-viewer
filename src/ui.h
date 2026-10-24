@@ -16,6 +16,7 @@ UiColors uiColors();              // theme colours the image shader needs
 
 float uiTopBarHeight();
 float uiBottomBarHeight();
+float uiMinWidth();  // the narrowest the window can be with nothing in the bars overlapping; 0 if unknown yet
 bool uiIsCaption(float x, float y);  // empty top bar: drags the window like a title bar
 bool uiKeyDown(int virtualKey);      // keyboard shortcuts; true when handled
 

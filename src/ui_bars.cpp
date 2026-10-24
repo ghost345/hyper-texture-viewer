@@ -313,12 +313,36 @@ void themeMenuItems() {
 
 bool noImage() { return !app.hasImage; }
 
-// How the bar fits the window: everything; or the compact set with a "..." menu, a shorter file name and
-// at last no folder counter.
+// Controls that move into the "..." menu one at a time as the window narrows, in bar order.
+enum class Tool { ActualSize, Zoom, RotL, RotR, FlipH, FlipV, Channels, TexMode, AlphaBg, Tiling, Grid, Ruler, Outline,
+                  Match, Histogram, Info, Layers, Compare, CompareLabel, OnTop, Theme, Settings, Help, Count };
+
+// Which goes first: the least used, keeping the tools that read the image and the channel switch for last.
+const Tool kHideOrder[] = {Tool::Ruler,  Tool::Help,      Tool::Settings, Tool::Theme,      Tool::CompareLabel,
+                           Tool::Outline, Tool::Grid,     Tool::FlipV,    Tool::FlipH,      Tool::RotR,
+                           Tool::RotL,   Tool::Tiling,    Tool::AlphaBg,  Tool::OnTop,      Tool::Layers,
+                           Tool::Histogram, Tool::Info,   Tool::Match,    Tool::Compare,    Tool::ActualSize,
+                           Tool::Zoom,   Tool::TexMode,   Tool::Channels};
+constexpr int kHideable = int(sizeof kHideOrder / sizeof kHideOrder[0]);
+
+// How the bar fits the window: the first `hidden` tools of kHideOrder sit in the "..." menu; once they all
+// do, the file name gets shorter and at last the folder counter goes.
 struct TopLayout {
-    bool compact = false;
+    int hidden = 0;
     float nameMax = 240;
     bool counter = true;
+    bool worstCase = false;  // measure the widest the bar can get at this layout, whatever the file
+
+    bool shows(Tool tool) const {
+        for (int i = 0; i < hidden; ++i)
+            if (kHideOrder[i] == tool) return false;
+        return true;
+    }
+    bool menu() const {
+        for (int i = 0; i < hidden; ++i)
+            if (kHideOrder[i] != Tool::CompareLabel) return true;
+        return false;
+    }
 };
 
 void fileGroup(Row& r, const TopLayout& L) {
@@ -330,9 +354,9 @@ void fileGroup(Row& r, const TopLayout& L) {
     const std::string name = fileName();
     const bool none = name.empty();
     const std::string shown = ellipsize(fontMedium, 13, none ? std::string("No image") : name, S(L.nameMax));
-    const float nameW = textSize(fontMedium, 13, shown.c_str()).x;
+    const float nameW = L.worstCase ? S(L.nameMax) : textSize(fontMedium, 13, shown.c_str()).x;
     const bool loading = isLoadingVisible();
-    const bool failed = !app.error.empty() && !app.loading;
+    const bool failed = (!app.error.empty() && !app.loading) || L.worstCase;
     if (!r.measure) {
         const ImVec2 a(r.x + S(6), r.cy - S(10)), b(a.x + nameW, r.cy + S(10));
         drawText(r.dl, fontMedium, 13, a.x, r.cy, none ? t.tx3 : loading ? t.tx2 : t.tx, shown.c_str());
@@ -370,20 +394,26 @@ void viewGroup(Row& r, const TopLayout& L) {
         app.fit = true;
         fitToWindow();
     }
-    if (r.button("actual", Icon::Count, "1:1", (!app.fit && app.zoom == 1.0f && !off ? kOn : 0) | off, "Actual size", keyText(Action::ActualSize)))
+    if (L.shows(Tool::ActualSize) && r.button("actual", Icon::Count, "1:1", (!app.fit && app.zoom == 1.0f && !off ? kOn : 0) | off, "Actual size", keyText(Action::ActualSize)))
         zoomCentered(1.0f);
-    const std::string zoom = off ? std::string("\xE2\x80\x94") : formatZoom(app.zoom);
-    ImRect zr;
-    toggleMenuOnPress(r.dropdown("zoom", zoom.c_str(), fontRegular, 12, 22, 7, 4, "Zoom", "Wheel", &zr, off, "3200%"), "zoom menu");
-    if (!r.measure && beginMenu("zoom menu", ImVec2(zr.Min.x, zr.Max.y + S(4)))) {
-        zoomMenuItems();
-        endMenu();
+    if (L.shows(Tool::Zoom)) {
+        const std::string zoom = off ? std::string("\xE2\x80\x94") : formatZoom(app.zoom);
+        ImRect zr;
+        toggleMenuOnPress(r.dropdown("zoom", zoom.c_str(), fontRegular, 12, 22, 7, 4, "Zoom", "Wheel", &zr, off, "3200%"),
+                          "zoom menu");
+        if (!r.measure && beginMenu("zoom menu", ImVec2(zr.Min.x, zr.Max.y + S(4)))) {
+            zoomMenuItems();
+            endMenu();
+        }
     }
-    if (L.compact) return;
-    if (r.button("rotl", Icon::RotateLeft, nullptr, off, "Rotate left", keyText(Action::RotateLeft))) rotate(-1);
-    if (r.button("rotr", Icon::RotateRight, nullptr, off, "Rotate right", keyText(Action::RotateRight))) rotate(+1);
-    if (r.button("fliph", Icon::FlipH, nullptr, (app.flipH ? kOn : 0) | off, "Flip horizontal", keyText(Action::FlipH))) app.flipH = !app.flipH;
-    if (r.button("flipv", Icon::FlipV, nullptr, (app.flipV ? kOn : 0) | off, "Flip vertical", keyText(Action::FlipV))) app.flipV = !app.flipV;
+    if (L.shows(Tool::RotL) && r.button("rotl", Icon::RotateLeft, nullptr, off, "Rotate left", keyText(Action::RotateLeft))) rotate(-1);
+    if (L.shows(Tool::RotR) && r.button("rotr", Icon::RotateRight, nullptr, off, "Rotate right", keyText(Action::RotateRight))) rotate(+1);
+    if (L.shows(Tool::FlipH) &&
+        r.button("fliph", Icon::FlipH, nullptr, (app.flipH ? kOn : 0) | off, "Flip horizontal", keyText(Action::FlipH)))
+        app.flipH = !app.flipH;
+    if (L.shows(Tool::FlipV) &&
+        r.button("flipv", Icon::FlipV, nullptr, (app.flipV ? kOn : 0) | off, "Flip vertical", keyText(Action::FlipV)))
+        app.flipV = !app.flipV;
 }
 
 // The channel switch (.seg): RGB R G B A L.
@@ -440,9 +470,11 @@ std::string textureModeLabel() {
     return mode;
 }
 
-void channelsGroup(Row& r) {
+void channelsGroup(Row& r, const TopLayout& L) {
+    if (!L.shows(Tool::Channels) && !L.shows(Tool::TexMode)) return;
     r.separator(16, 5);
-    channelSwitch(r);
+    if (L.shows(Tool::Channels)) channelSwitch(r);
+    if (!L.shows(Tool::TexMode)) return;
     ImRect tr;
     const std::string mode = textureModeLabel();
     toggleMenuOnPress(r.dropdown("texmode", mode.c_str(), fontRegular, 12, 22, 7, 4, "Texture mode", nullptr, &tr, noImage(),
@@ -454,20 +486,24 @@ void channelsGroup(Row& r) {
     }
 }
 
-void backgroundGroup(Row& r) {
+void backgroundGroup(Row& r, const TopLayout& L) {
+    if (!L.shows(Tool::AlphaBg) && !L.shows(Tool::Tiling)) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     const float x0 = r.x;
     const bool checker = app.alphaBackground == AlphaBackground::Checker && !app.ignoreAlpha;
     const bool alphaOpen = ImGui::IsPopupOpen("alpha menu");
-    toggleMenuOnPress(r.button("alphabg", Icon::AlphaBackground, nullptr,
-                               kChevron | (checker && !off ? kOn : 0) | (alphaOpen ? kOpen : 0) | off,
-                               "Alpha background", keyText(Action::AlphaBackground)),
-                      "alpha menu");
-    if (!r.measure && beginMenu("alpha menu", ImVec2(x0, r.cy + S(16)), ImVec2(0, 0), S(196))) {
-        alphaMenuItems();
-        endMenu();
+    if (L.shows(Tool::AlphaBg)) {
+        toggleMenuOnPress(r.button("alphabg", Icon::AlphaBackground, nullptr,
+                                   kChevron | (checker && !off ? kOn : 0) | (alphaOpen ? kOpen : 0) | off,
+                                   "Alpha background", keyText(Action::AlphaBackground)),
+                          "alpha menu");
+        if (!r.measure && beginMenu("alpha menu", ImVec2(x0, r.cy + S(16)), ImVec2(0, 0), S(196))) {
+            alphaMenuItems();
+            endMenu();
+        }
     }
+    if (!L.shows(Tool::Tiling)) return;
     const float x1 = r.x;
     const bool tilingOpen = ImGui::IsPopupOpen("tiling menu");
     toggleMenuOnPress(r.button("tiling", Icon::Tiling, nullptr,
@@ -480,80 +516,132 @@ void backgroundGroup(Row& r) {
     }
 }
 
-void overlaysGroup(Row& r) {
+void overlaysGroup(Row& r, const TopLayout& L) {
+    if (!L.shows(Tool::Grid) && !L.shows(Tool::Ruler) && !L.shows(Tool::Outline)) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
-    if (r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", keyText(Action::Grid))) app.grid = !app.grid;
-    r.button("ruler", Icon::Ruler, nullptr, kDisabled, "Ruler (coming soon)", "Ctrl+U");
-    if (r.button("outline", Icon::PixelOutline, nullptr, (app.pixelOutline && !off ? kOn : 0) | off, "Pixel outline", keyText(Action::PixelOutline)))
+    if (L.shows(Tool::Grid) &&
+        r.button("grid", Icon::Grid, nullptr, (app.grid && !off ? kOn : 0) | off, "Pixel grid", keyText(Action::Grid)))
+        app.grid = !app.grid;
+    if (L.shows(Tool::Ruler)) r.button("ruler", Icon::Ruler, nullptr, kDisabled, "Ruler (coming soon)", "Ctrl+U");
+    if (L.shows(Tool::Outline) && r.button("outline", Icon::PixelOutline, nullptr, (app.pixelOutline && !off ? kOn : 0) | off,
+                                           "Pixel outline", keyText(Action::PixelOutline)))
         app.pixelOutline = !app.pixelOutline;
 }
 
-void analysisGroup(Row& r) {
+void analysisGroup(Row& r, const TopLayout& L) {
+    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Info) && !L.shows(Tool::Layers)) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
-    if (r.button("match", Icon::ColorMatch, nullptr, (app.colorMatch && !off ? kOn : 0) | off, "Color match",
+    if (L.shows(Tool::Match) && r.button("match", Icon::ColorMatch, nullptr, (app.colorMatch && !off ? kOn : 0) | off, "Color match",
                  keyText(Action::ColorMatch)))
         toggleColorMatch();
-    if (r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", keyText(Action::Histogram)))
+    if (L.shows(Tool::Histogram) && r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", keyText(Action::Histogram)))
         app.showHistogram = !app.showHistogram;
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
-    if (r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
+    if (L.shows(Tool::Info) && r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
         app.showInfo = !app.showInfo;
     const bool anim = isAnimation();
-    if (r.button("layers", Icon::Layers, nullptr, (app.showFrames && anim ? kOn : 0) | (noImage() ? kDisabled : 0),
+    if (L.shows(Tool::Layers) && r.button("layers", Icon::Layers, nullptr, (app.showFrames && anim ? kOn : 0) | (noImage() ? kDisabled : 0),
                  anim ? "Frames" : "Layers", keyText(Action::Layers)))
         toggleFramesOrLayers();
 }
 
-void moreMenuItems() {
+// The "..." menu: the tools the bar has no room for, in bar order, a separator between groups.
+void moreMenuItems(const TopLayout& L) {
     const bool off = noImage();
-    if (menuItem({"Rotate left", "Ctrl+L", false, !off, false, Icon::RotateLeft})) rotate(-1);
-    if (menuItem({"Rotate right", "Ctrl+R", false, !off, false, Icon::RotateRight})) rotate(+1);
-    if (menuItem({"Flip horizontal", keyText(Action::FlipH), false, !off, false, Icon::FlipH})) app.flipH = !app.flipH;
-    if (menuItem({"Flip vertical", keyText(Action::FlipV), false, !off, false, Icon::FlipV})) app.flipV = !app.flipV;
-    menuSeparator();
-    if (submenu("more alpha", "Alpha background", Icon::AlphaBackground)) {
+    int group = -1;
+    auto item = [&](Tool tool, int g) {
+        if (L.shows(tool)) return false;
+        if (group >= 0 && g != group) menuSeparator();
+        group = g;
+        return true;
+    };
+    if (item(Tool::ActualSize, 0) &&
+        menuItem({"Actual size", keyText(Action::ActualSize), !app.fit && app.zoom == 1.0f && !off, !off, false, Icon::Search}))
+        zoomCentered(1.0f);
+    if (item(Tool::Zoom, 0) && submenu("more zoom", "Zoom", Icon::Search)) {
+        zoomMenuItems();
+        endSubmenu();
+    }
+    if (item(Tool::RotL, 0) && menuItem({"Rotate left", keyText(Action::RotateLeft), false, !off, false, Icon::RotateLeft})) rotate(-1);
+    if (item(Tool::RotR, 0) && menuItem({"Rotate right", keyText(Action::RotateRight), false, !off, false, Icon::RotateRight})) rotate(+1);
+    if (item(Tool::FlipH, 0) && menuItem({"Flip horizontal", keyText(Action::FlipH), app.flipH, !off, false, Icon::FlipH}))
+        app.flipH = !app.flipH;
+    if (item(Tool::FlipV, 0) && menuItem({"Flip vertical", keyText(Action::FlipV), app.flipV, !off, false, Icon::FlipV}))
+        app.flipV = !app.flipV;
+    if (item(Tool::Channels, 1) && submenu("more channels", "Channels", Icon::Opacity)) {
+        static const char* names[] = {"All channels", "Red", "Green", "Blue", "Alpha", "Luminance"};
+        static const Action keys[] = {Action::AllChannels, Action::Red, Action::Green, Action::Blue, Action::Alpha, Action::Luminance};
+        for (int i = 0; i < 6; ++i)
+            if (menuItem({names[i], keyText(keys[i]), int(app.channel) == i, !off, true})) app.channel = Channel(i);
+        endSubmenu();
+    }
+    if (item(Tool::TexMode, 1) && submenu("more texmode", "Texture mode", Icon::Image)) {
+        textureMenuItems();
+        endSubmenu();
+    }
+    if (item(Tool::AlphaBg, 2) && submenu("more alpha", "Alpha background", Icon::AlphaBackground)) {
         alphaMenuItems();
         endSubmenu();
     }
-    if (submenu("more tiling", "Tiling", Icon::Tiling)) {
+    if (item(Tool::Tiling, 2) && submenu("more tiling", "Tiling", Icon::Tiling)) {
         tilingMenuItems();
         endSubmenu();
     }
-    menuSeparator();
-    if (menuItem({"Grid", "Ctrl+G", false, !off, false, Icon::Grid})) app.grid = !app.grid;
-    menuItem({"Ruler", "Ctrl+U", false, false, false, Icon::Ruler});
-    if (menuItem({"Pixel outline", keyText(Action::PixelOutline), false, !off, false, Icon::PixelOutline})) app.pixelOutline = !app.pixelOutline;
-    menuSeparator();
-    if (submenu("more theme", "Theme", app.darkTheme ? Icon::Theme : Icon::Sun)) {
+    if (item(Tool::Grid, 3) && menuItem({"Pixel grid", keyText(Action::Grid), app.grid, !off, false, Icon::Grid})) app.grid = !app.grid;
+    if (item(Tool::Ruler, 3)) menuItem({"Ruler (coming soon)", "Ctrl+U", false, false, false, Icon::Ruler});
+    if (item(Tool::Outline, 3) &&
+        menuItem({"Pixel outline", keyText(Action::PixelOutline), app.pixelOutline, !off, false, Icon::PixelOutline}))
+        app.pixelOutline = !app.pixelOutline;
+    if (item(Tool::Match, 4) && menuItem({"Color match", keyText(Action::ColorMatch), app.colorMatch, !off, false, Icon::ColorMatch}))
+        toggleColorMatch();
+    if (item(Tool::Histogram, 4) &&
+        menuItem({"Histogram", keyText(Action::Histogram), app.showHistogram, !off, false, Icon::Histogram}))
+        app.showHistogram = !app.showHistogram;
+    if (item(Tool::Info, 4) &&
+        menuItem({"Info", keyText(Action::Info), app.showInfo, !(off && app.error.empty()), false, Icon::Info}))
+        app.showInfo = !app.showInfo;
+    const bool anim = isAnimation();
+    if (item(Tool::Layers, 4) &&
+        menuItem({anim ? "Frames" : "Layers", keyText(Action::Layers), app.showFrames, !off, false, Icon::Layers}))
+        toggleFramesOrLayers();
+    if (item(Tool::Compare, 4) && menuItem({"Compare", keyText(Action::Compare), app.compare, !off, false, Icon::Compare}))
+        toggleCompare();
+    if (item(Tool::OnTop, 5) && menuItem({"Always on top", keyText(Action::AlwaysOnTop), app.topmost, true, false, Icon::OnTop}))
+        setTopmost(!app.topmost);
+    if (item(Tool::Theme, 6) && submenu("more theme", "Theme", app.darkTheme ? Icon::Theme : Icon::Sun)) {
         themeMenuItems();
         endSubmenu();
     }
-    menuItem({"Settings", "Ctrl+,", false, false, false, Icon::Settings});
-    if (menuItem({"Keyboard shortcuts", "F1", false, true, false, Icon::Help})) app.showHelp = !app.showHelp;
+    if (item(Tool::Settings, 6) && menuItem({"Settings", keyText(Action::Settings), app.showSettings, true, false, Icon::Settings}))
+        app.showSettings = !app.showSettings;
+    if (item(Tool::Help, 6) && menuItem({"Keyboard shortcuts", keyText(Action::Help), app.showHelp, true, false, Icon::Help}))
+        app.showHelp = !app.showHelp;
 }
 
 void compareGroup(Row& r, const TopLayout& L) {
     r.separator(16, 5);
     const int cmpOff = noImage() ? kDisabled : 0;
-    if (r.button("compare", Icon::Compare, L.compact ? nullptr : "Compare",
+    if (L.shows(Tool::Compare) && r.button("compare", Icon::Compare, L.shows(Tool::CompareLabel) ? "Compare" : nullptr,
                  (app.compare && !cmpOff ? kOn : 0) | cmpOff, "Compare", keyText(Action::Compare)))
         toggleCompare();
-    if (!L.compact) return;
+    if (!L.menu()) return;
     const float x0 = r.x;
     const bool open = ImGui::IsPopupOpen("more menu");
     toggleMenuOnPress(r.button("more", Icon::More, nullptr, open ? kOpen : 0, "More tools", nullptr), "more menu");
     if (!r.measure && beginMenu("more menu", ImVec2(x0, r.cy + S(16)), ImVec2(0, 0), S(250))) {
-        moreMenuItems();
+        moreMenuItems(L);
         endMenu();
     }
 }
 
 void rightGroup(Row& r, const TopLayout& L) {
-    if (r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", keyText(Action::AlwaysOnTop))) setTopmost(!app.topmost);
+    if (L.shows(Tool::OnTop) &&
+        r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", keyText(Action::AlwaysOnTop)))
+        setTopmost(!app.topmost);
     char pct[16];
-    std::snprintf(pct, sizeof pct, "%d%%", int(std::lround(app.opacity * 100)));
+    std::snprintf(pct, sizeof pct, "%d%%", L.worstCase ? 100 : int(std::lround(app.opacity * 100)));
     const bool open = ImGui::IsPopupOpen("opacity menu");
     toggleMenuOnPress(r.button("opacity", Icon::Opacity, pct, kMonoLabel | (app.opacity < 1.0f ? kOn : 0) | (open ? kOpen : 0),
                                "Window opacity", "Alt+Wheel"),
@@ -561,25 +649,25 @@ void rightGroup(Row& r, const TopLayout& L) {
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
     // Transparent to mouse: only for a see-through window, and always labelled with the key that brings the
     // mouse back, since the button itself can't be clicked while it is on.
-    if (app.opacity < 1.0f || app.clickThrough) {
+    if (app.opacity < 1.0f || app.clickThrough || L.worstCase) {
         const char* key = keyText(Action::ClickThrough);
         if (!key) key = "Ctrl+T";
         if (r.button("clickthrough", Icon::ClickThrough, key, kMonoLabel | (app.clickThrough ? kOn : 0),
                      "Transparent to mouse: clicks go to the window below", key))
             setClickThrough(!app.clickThrough);
     }
-    if (!L.compact) {
-        if (r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
-                     app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
-            app.themeMode = app.darkTheme ? 1 : 0;
-            applyTheme();
-            saveSettings();
-        }
-        if (r.button("settings", Icon::Settings, nullptr, app.showSettings ? kOn : 0, "Settings", keyText(Action::Settings)))
-            app.showSettings = !app.showSettings;
-        if (r.button("help", Icon::Help, nullptr, app.showHelp ? kOn : 0, "Keyboard shortcuts", keyText(Action::Help)))
-            app.showHelp = !app.showHelp;
+    if (L.shows(Tool::Theme) && r.button("theme", app.darkTheme ? Icon::Theme : Icon::Sun, nullptr, 0,
+                                         app.darkTheme ? "Switch to the light theme" : "Switch to the dark theme", nullptr)) {
+        app.themeMode = app.darkTheme ? 1 : 0;
+        applyTheme();
+        saveSettings();
     }
+    if (L.shows(Tool::Settings) &&
+        r.button("settings", Icon::Settings, nullptr, app.showSettings ? kOn : 0, "Settings", keyText(Action::Settings)))
+        app.showSettings = !app.showSettings;
+    if (L.shows(Tool::Help) &&
+        r.button("help", Icon::Help, nullptr, app.showHelp ? kOn : 0, "Keyboard shortcuts", keyText(Action::Help)))
+        app.showHelp = !app.showHelp;
     r.separator(16, 5);
     r.x -= S(5) + r.gap;  // the last separator has no right margin
 }
@@ -615,12 +703,10 @@ float windowButtons(Row& r) {
 void leftGroups(Row& r, const TopLayout& L) {
     fileGroup(r, L);
     viewGroup(r, L);
-    channelsGroup(r);
-    if (!L.compact) {
-        backgroundGroup(r);
-        overlaysGroup(r);
-    }
-    analysisGroup(r);
+    channelsGroup(r, L);
+    backgroundGroup(r, L);
+    overlaysGroup(r, L);
+    analysisGroup(r, L);
     compareGroup(r, L);
 }
 
@@ -678,6 +764,10 @@ void opacityPopup(ImVec2 anchor) {
     endMenu();
 }
 
+static float tightestWidth = 0;
+
+float topBarMinWidth() { return tightestWidth; }
+
 void topBar() {
     const Theme& t = T();
     const float W = float(app.winW);
@@ -705,15 +795,18 @@ void topBar() {
         w += r.x + windowButtons(r);
         return w;
     };
+    // Tools go into "..." one at a time, then the file name gives up width down to 60 px, then the counter goes.
     TopLayout L;
-    if (width(L) > W) {
-        L.compact = true;
-        for (float name : {240.0f, 200.0f, 160.0f, 120.0f, 90.0f, 60.0f}) {
-            L.nameMax = name;
-            if (width(L) <= W) break;
-        }
-        if (width(L) > W) L.counter = false;
-    }
+    while (L.hidden < kHideable && width(L) > W) ++L.hidden;
+    while (L.nameMax > 60.0f && width(L) > W) L.nameMax = std::max(60.0f, L.nameMax - 4.0f);
+    if (width(L) > W) L.counter = false;
+    // The window can't get narrower than the bar at its tightest.
+    TopLayout tightest;
+    tightest.hidden = kHideable;
+    tightest.nameMax = 60.0f;
+    tightest.counter = false;
+    tightest.worstCase = true;
+    tightestWidth = std::ceil(width(tightest));
     TopLayout right = L;
     r.measure = true;
     r.x = 0;

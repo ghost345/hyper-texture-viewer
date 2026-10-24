@@ -172,7 +172,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return DefWindowProcW(hwnd, msg, wp, -1);  // keeps Windows from painting a frame over the bars
         case WM_GETMINMAXINFO: {
             auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
-            mm->ptMinTrackSize.x = LONG(480 * app.scale);
+            // Wide enough for the top bar with everything it can fold away in "...".
+            mm->ptMinTrackSize.x = std::max(LONG(480 * app.scale), LONG(std::ceil(uiMinWidth())));
             mm->ptMinTrackSize.y = LONG(320 * app.scale);
             return 0;
         }

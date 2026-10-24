@@ -77,6 +77,7 @@ UiColors uiColors() {
 
 float uiTopBarHeight() { return topBarH; }
 float uiBottomBarHeight() { return bottomBarH; }
+float uiMinWidth() { return ui::topBarMinWidth(); }
 
 bool uiIsCaption(float x, float y) {
     if (!app.showBars || y < 0 || y >= topBarH) return false;

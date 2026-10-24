@@ -17,7 +17,8 @@ Fast image viewer for texture artists on Windows. Early prototype.
 - Compare (`Ctrl+K`): up to three images (A is the shown one, B and C are other files) as split shutters you drag on the image, a blend slider, or a difference through a heat ramp with adjustable gain and Max Δ / Mean Δ / Pixels Δ>2 / PSNR.
 - Frames (`L` on a GIF or animated WebP): play, pause (Space), step (`,` / `.`) and scrub the frames, with the frame delay and loop count. For a still image `L` shows the Layers panel (PSD and EXR layer lists are planned).
 - Settings (Ctrl+,): theme (dark, light or as Windows), interface scale, viewport colour, checker size, what stays when switching files, folder order, automatic reload, single instance, portable mode, and every key reassignable (the F1 screen shows the current keys).
-- Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top and window opacity, borderless window that hides its bars with Tab.
+- Info panel, keyboard shortcuts screen (F1), light and dark themes, always on top (Ctrl+Shift+T), window opacity and, below 100%, transparent to mouse (Ctrl+T, works system-wide to take the mouse back), borderless window that hides its bars with Tab.
+- The top bar folds its tools into a "..." menu one at a time as the window narrows; the window stops shrinking before anything would overlap.
 - Files load in the background with progress; images you leave stay decoded in a cache (size in Settings) and the folder's neighbours are decoded ahead, so Previous/Next is instant; the open file reloads when it changes on disk, a broken file shows what went wrong without stopping browsing. Recent files with thumbnails, paste from the clipboard.
 - One exe, static runtime, no installer. Windows 10/11 x64; Direct3D 11 on any GPU, with a software fallback (WARP).
 
