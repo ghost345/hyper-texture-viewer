@@ -562,19 +562,19 @@ bool slider(ImDrawList* dl, const char* id, float x, float cy, float width, floa
     return changed;
 }
 
-float segmentedWidth(const char* const* labels, int n, bool small) {
-    const float fs = small ? 11 : 12, pad = S(small ? 5 : 6), minW = S(small ? 20 : 22);
+float segmentedWidth(const char* const* labels, int n, bool compact) {
+    const float fs = compact ? 11 : 12, pad = S(compact ? 5 : 6), minW = S(compact ? 20 : 22);
     float total = 2 * line();
     for (int i = 0; i < n; ++i) total += std::max(minW, 2 * pad + textSize(fontMedium, fs, labels[i]).x) + (i ? line() : 0.0f);
     return total;
 }
 
 bool segmented(ImDrawList* dl, const char* id, float x, float cy, const char* const* labels, int n, int& value,
-               bool small, const char* const* tips, bool disabled) {
+               bool compact, const char* const* tips, bool disabled) {
     const Theme& t = T();
-    const float fs = small ? 11 : 12, pad = S(small ? 5 : 6), minW = S(small ? 20 : 22), h = S(small ? 20 : 22);
+    const float fs = compact ? 11 : 12, pad = S(compact ? 5 : 6), minW = S(compact ? 20 : 22), h = S(compact ? 20 : 22);
     const float alpha = disabled ? 0.38f : 1.0f;
-    const ImVec2 a(x, std::round(cy - h * 0.5f)), b(a.x + segmentedWidth(labels, n, small), a.y + h);
+    const ImVec2 a(x, std::round(cy - h * 0.5f)), b(a.x + segmentedWidth(labels, n, compact), a.y + h);
     bool changed = false;
     float bx = a.x + line();
     ImGui::PushID(id);

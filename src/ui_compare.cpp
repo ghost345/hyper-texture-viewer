@@ -63,7 +63,7 @@ void slotRow(ImDrawList* dl, float x0, float x1, float y, int i) {
 
     const ImVec2 ta(bb.x + S(8), std::round(cy - S(13))), tb(ta.x + S(26), ta.y + S(26));
     if (ID3D11ShaderResourceView* thumb = compareThumbnail(i - 1))
-        dl->AddImage(reinterpret_cast<ImTextureID>(thumb), ta, tb);
+        dl->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(thumb))), ta, tb);
     else dl->AddRectFilled(ta, tb, t.bar2);
     dl->AddRect(ta, tb, t.bd2, 0, 0, line());
 

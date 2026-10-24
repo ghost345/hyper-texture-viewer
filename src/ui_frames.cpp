@@ -104,7 +104,7 @@ void layersBody(ImDrawList* dl, ImVec2 p, float width) {
     const float h = S(34), cy = y + h * 0.5f;
     drawIcon(dl, Icon::Info, ImVec2(x0, std::round(cy - S(7))), S(14), t.tx2);
     const ImVec2 ta(x0 + S(14) + S(8), std::round(cy - S(13)));
-    if (ID3D11ShaderResourceView* thumb = compareThumbnail(-1)) dl->AddImage(reinterpret_cast<ImTextureID>(thumb), ta,
+    if (ID3D11ShaderResourceView* thumb = compareThumbnail(-1)) dl->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(thumb))), ta,
                                                                             ImVec2(ta.x + S(26), ta.y + S(26)));
     dl->AddRect(ta, ImVec2(ta.x + S(26), ta.y + S(26)), t.bd2, 0, 0, line());
     drawText(dl, fontRegular, 12, ta.x + S(26) + S(8), cy, t.tx, "Composite");

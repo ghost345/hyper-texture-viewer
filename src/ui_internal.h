@@ -146,10 +146,10 @@ float snapPosition(float p, std::initializer_list<float> targets, float widthPx)
 bool slider(ImDrawList* dl, const char* id, float x, float cy, float width, float& t, float fillFrom, bool* reset,
             float mark = -1.0f, float snap = -1.0f);
 
-// Segmented control (.seg); `small` is the 20 px panel variant. Returns true when the selection changed.
-float segmentedWidth(const char* const* labels, int n, bool small);
+// Segmented control (.seg); `compact` is the 20 px panel variant. Returns true when the selection changed.
+float segmentedWidth(const char* const* labels, int n, bool compact);
 bool segmented(ImDrawList* dl, const char* id, float x, float cy, const char* const* labels, int n, int& value,
-               bool small, const char* const* tips = nullptr, bool disabled = false);
+               bool compact, const char* const* tips = nullptr, bool disabled = false);
 // Checkbox with its label on the right. Returns true when clicked.
 bool checkbox(ImDrawList* dl, const char* id, float x, float cy, const char* label, bool& value,
               const char* tip = nullptr);
