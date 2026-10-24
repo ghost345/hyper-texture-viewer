@@ -521,17 +521,18 @@ LoadResult decodeImage(const uint8_t* data, size_t size, const std::string& exte
         r.error = "empty file";
         return r;
     }
+    if (extension == "exr") return loadExr(data, size);
+    if (extension == "avif") return loadAvif(data, size);
+    if (extension == "jxl") return loadJxl(data, size);
+    if (extension == "ktx" || extension == "ktx2") return loadKtx(data, size);
+    // The rest take their sizes as 32-bit values; the Windows codecs read bigger files.
     if (size > size_t(0x7fffffff)) {
         r.error = "files over 2 GB are not supported yet";
         return r;
     }
-    if (extension == "exr") return loadExr(data, size);
     if (extension == "dds") return loadDds(data, size);
     if (extension == "webp") return loadWebp(data, size);
     if (extension == "qoi") return loadQoi(data, size);
-    if (extension == "avif") return loadAvif(data, size);
-    if (extension == "jxl") return loadJxl(data, size);
-    if (extension == "ktx" || extension == "ktx2") return loadKtx(data, size);
     if (extension == "gif") return loadGif(data, size);
     r = loadStb(data, size, upper(extension == "jpeg" ? "jpg" : extension).c_str());
     if (r.ok && extension == "psd") readPsdLayers(data, size, r.image);

@@ -174,7 +174,7 @@ LoadResult loadExr(const uint8_t* data, size_t size) {
             continue;
         }
         const int64_t w = int64_t(window.max.x) - window.min.x + 1, h = int64_t(window.max.y) - window.min.y + 1;
-        if (w < 1 || h < 1 || w > 65536 || h > 65536 || w * h > (int64_t(1) << 28)) {
+        if (w < 1 || h < 1 || w > 65536 || h > 65536 || w * h > (int64_t(1) << 30)) {
             r.error = "EXR data window of " + std::to_string(w) + " \xC3\x97 " + std::to_string(h) + " is too large";
             return r;
         }

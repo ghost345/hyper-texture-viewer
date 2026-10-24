@@ -50,6 +50,18 @@ private:
     T* p_ = nullptr;
 };
 
+// An image's texture on the GPU: one, or for an image larger than a texture can be (or than one should be), a grid
+// of tiles, each drawn in a pass of its own.
+struct GpuTile {
+    Com<ID3D11ShaderResourceView> srv;
+    uint32_t x = 0, y = 0, width = 0, height = 0;  // the tile's area of the image
+};
+struct GpuImage {
+    std::vector<GpuTile> tiles;
+    explicit operator bool() const { return !tiles.empty(); }
+    void reset() { tiles.clear(); }
+};
+
 enum class Channel { RGB, R, G, B, A, Luminance };
 enum class AlphaBackground { Checker, Black, Grey, White, Custom, Count };
 enum class Tiling { Off, Seamless, Bordered };
@@ -60,7 +72,7 @@ enum class CompareMode { Split, Blend, Difference };
 struct CompareSlot {
     std::filesystem::path path;
     htv::Image image;  // size, format and description only: the pixels live in `srv`
-    Com<ID3D11ShaderResourceView> srv;
+    GpuImage srv;
     Com<ID3D11ShaderResourceView> thumbnail;
     int mips = 1;
     uint64_t fileSize = 0;
@@ -106,7 +118,7 @@ struct App {
     Com<ID3D11BlendState> blendFactor;  // Compare: Blend mode draws the second image at the blend factor
     Com<ID3D11Buffer> constants;
     Com<ID3D11SamplerState> trilinear;
-    Com<ID3D11ShaderResourceView> srv;
+    GpuImage srv;
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_10_0;
     bool warp = false;
     const char* swapEffect = "";
@@ -192,7 +204,7 @@ struct App {
     int matchMode = 0;            // whole colour (RGB), RGBA, R, G, B, A, luminance, hue, saturation
     int matchTolerance = 2;       // in 8-bit steps: values within N/255 match
     bool matchValid = false;      // matchMask and matchRegions are up to date
-    Com<ID3D11ShaderResourceView> matchMask;
+    GpuImage matchMask;  // in the shown image's tiles
     htv::MaskRegions matchRegions;
     int matchRegion = -1;         // the region the view went to last
 

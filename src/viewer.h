@@ -27,7 +27,7 @@ bool createRenderTarget();
 bool createPipeline(std::string& error);
 bool uploadImage(const htv::Image& img, std::string& error);
 // Creates a texture with mips for an image; uploadImage puts the shown image's in app.srv.
-bool createImageTexture(const htv::Image& img, Com<ID3D11ShaderResourceView>& srv, int& mips, std::string& error);
+bool createImageTexture(const htv::Image& img, GpuImage& srv, int& mips, std::string& error);
 // Uploads one surface (an animation frame) as the shown texture, replacing app.srv.
 bool uploadSurface(const htv::Surface& surface, htv::GpuFormat format, std::string& error);
 void releaseImage();

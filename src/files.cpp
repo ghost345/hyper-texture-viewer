@@ -19,6 +19,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <thread>
 
 #include "imgui.h"
@@ -147,7 +148,7 @@ bool prefetchStarted = false;
 std::atomic<int> compareGeneration[2];  // a new file for a Compare slot cancels the slot's load in progress
 
 // `foreground`: the user's request, which shows progress; otherwise a prefetch.
-void decode(LoadedFile& r, bool foreground) {
+void decodeUnguarded(LoadedFile& r, bool foreground) {
     const double t0 = nowMs();
     r.stamp = stampOf(r.path);
     r.fileSize = r.stamp.size;
@@ -188,6 +189,17 @@ void decode(LoadedFile& r, bool foreground) {
     r.alpha = htv::hasTranslucentPixels(r.image);
     r.ok = true;
     r.decodeMs = nowMs() - t0;
+}
+
+// An image larger than the memory can take fails to load instead of ending the program.
+void decode(LoadedFile& r, bool foreground) {
+    try {
+        decodeUnguarded(r, foreground);
+    } catch (const std::bad_alloc&) {
+        r.image = htv::Image();
+        r.ok = false;
+        r.error = "Not enough memory for this image.";
+    }
 }
 
 void workerLoop() {

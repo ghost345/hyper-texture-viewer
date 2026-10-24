@@ -757,6 +757,11 @@ std::vector<InfoSection> infoSections() {
                       std::max(1u, std::max(app.image.width, app.image.height) >> (app.image.mips.size() - 1)));
     else std::snprintf(mips, sizeof mips, "1 (%d made for display)", app.textureMips);
     format.rows.push_back({"Mip levels", mips});
+    if (app.srv.tiles.size() > 1) {
+        const htv::GpuTile& t = app.srv.tiles[0];
+        format.rows.push_back({"GPU tiles", std::to_string(app.srv.tiles.size()) + " of up to " + std::to_string(t.width) +
+                                                " \xC3\x97 " + std::to_string(t.height)});
+    }
     const htv::Image& img = app.image;
     if (hasLayers()) {
         std::string layers = std::string(htv::layerKindName(img.layerKind)) + " \xC2\xB7 " + std::to_string(img.layers.size());

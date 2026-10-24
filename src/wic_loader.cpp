@@ -220,7 +220,7 @@ LoadResult loadWithWic(const std::filesystem::path& path) {
         targets.push_back({GUID_WICPixelFormat32bppRGBA, GpuFormat::RGBA8Srgb, 4});
 
         for (const Target& t : targets) {
-            if (uint64_t(width) * height * t.bytes > 0x7fffffffull) {
+            if (uint64_t(width) * height * t.bytes > (uint64_t(1) << 34)) {
                 error = "image too large";
                 return false;
             }
@@ -234,7 +234,15 @@ LoadResult loadWithWic(const std::filesystem::path& path) {
             s.height = height;
             s.rowPitch = width * t.bytes;
             s.data.resize(size_t(s.rowPitch) * height);
-            if (FAILED(converter->CopyPixels(nullptr, s.rowPitch, UINT(s.data.size()), s.data.data()))) continue;
+            // In bands of rows: CopyPixels takes the buffer size as 32 bits.
+            const uint32_t band = std::max(1u, uint32_t((1u << 30) / s.rowPitch));
+            bool copied = true;
+            for (uint32_t y = 0; y < height && copied; y += band) {
+                const WICRect rect{0, INT(y), INT(width), INT(std::min(band, height - y))};
+                copied = SUCCEEDED(converter->CopyPixels(&rect, s.rowPitch, UINT(size_t(s.rowPitch) * UINT(rect.Height)),
+                                                         s.data.data() + size_t(y) * s.rowPitch));
+            }
+            if (!copied) continue;
             out.width = width;
             out.height = height;
             out.format = t.format;

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <new>
 
 #include "imgui.h"
 #include "backends/imgui_impl_dx11.h"
@@ -57,6 +58,12 @@ cbuffer View : register(b0) {
     uint srgb1;            // compare sRGB-encoded values: the GPU decoded the texture to linear
     uint srgb2;
     float diffGain;
+    float2 tileOrigin;     // large images come in tiles, one pass each: this pass's tile of the first image,
+    float2 tileSize;       // in its pixels
+    float2 tile2Origin;    // and of the second
+    float2 tile2Size;
+    uint firstPass;        // 1: the first tile of the first image, 2: of the second; they also draw what is outside
+    float3 padding2;
 };
 Texture2D<float4> tex : register(t0);
 Texture2D<float> mask : register(t1);
@@ -114,17 +121,30 @@ bool imagePos(float2 pos, out float2 ip) {
     return true;
 }
 
-// Whether the Color match mask is set under a target pixel.
+// Whether a texel is in a tile. A pass draws only the pixels whose texel is in its tile.
+bool inTile(int2 texel, float2 origin, float2 size) {
+    int2 t = texel - int2(origin);
+    return all(t >= 0) && all(t < int2(size));
+}
+
+// Whether the Color match mask is set under a target pixel. The mask comes in the image's tiles; a neighbour
+// across a tile's edge reads as the edge texel.
 bool matchedAt(float2 pos) {
     float2 ip;
     if (!imagePos(pos, ip)) return false;
-    return mask.Load(int3(clamp(floor(ip), 0, imageSize - 1), 0)) > 0.5;
+    int2 texel = int2(clamp(floor(ip), 0, imageSize - 1)) - int2(tileOrigin);
+    return mask.Load(int3(clamp(texel, 0, int2(tileSize) - 1), 0)) > 0.5;
 }
 
 float4 psMain(float4 pos : SV_Position) : SV_Target {
     float2 ip;
-    if (!imagePos(pos.xy, ip)) return background;
+    if (!imagePos(pos.xy, ip)) {
+        if (firstPass != 3) discard;
+        return background;
+    }
     int2 texel = int2(clamp(floor(ip), 0, imageSize - 1));
+    if (!inTile(texel, tileOrigin, tileSize)) discard;
+    int2 local = texel - int2(tileOrigin);
 
     // Color match: a dashed line, black on white, along the inside edge of the matching areas.
     if (matchOutline && matchedAt(pos.xy) &&
@@ -136,13 +156,13 @@ float4 psMain(float4 pos : SV_Position) : SV_Target {
 
     float4 c;
     if (forcedMip >= 0) {
-        c = tex.Load(int3(texel >> forcedMip, forcedMip));
+        c = tex.Load(int3(local >> forcedMip, forcedMip));
     } else if (zoom >= 1.0) {
         // Magnified or 1:1: exact texels, no filtering.
-        c = tex.Load(int3(texel, 0));
+        c = tex.Load(int3(local, 0));
     } else {
         // Minified: the mip chain averages all source pixels under each screen pixel.
-        c = tex.SampleLevel(trilinear, ip / imageSize, log2(1.0 / zoom));
+        c = tex.SampleLevel(trilinear, (ip - tileOrigin) / tileSize, log2(1.0 / zoom));
     }
     if (signedValues) c.rgb = c.rgb * 0.5 + 0.5;
     if (channels == 1) c = float4(c.rrr, 1);
@@ -196,7 +216,8 @@ float2 hueSaturation(float3 c) {
     return float2(hue, mx > 0 ? d / mx : 0);
 }
 
-// Color match mask: 1 where a texel is within the tolerance of the target.
+// Color match mask: 1 where a texel is within the tolerance of the target. Drawn a tile at a time, into the mask's
+// tile of the same size.
 float4 psMatch(float4 pos : SV_Position) : SV_Target {
     float4 c = tex.Load(int3(int2(pos.xy), 0));
     if (matchSrgb) c.rgb = srgbEncode(c.rgb);
@@ -230,16 +251,26 @@ float3 heat(float t) { return saturate(float3(t * 3, t * 3 - 1, t * 3 - 2)); }
 // Compare, Difference: |first - second| times the gain, through the heat ramp.
 float4 psDiff(float4 pos : SV_Position) : SV_Target {
     float2 ip;
-    if (!imagePos(pos.xy, ip)) return background;
+    if (!imagePos(pos.xy, ip)) {
+        if (firstPass != 3) discard;
+        return background;
+    }
+    int2 texel = int2(clamp(floor(ip), 0, imageSize - 1));
+    if (!inTile(texel, tileOrigin, tileSize)) discard;
     float2 ip2 = ip * scale2;
-    if (ip2.x >= image2Size.x || ip2.y >= image2Size.y) return background;
+    if (ip2.x >= image2Size.x || ip2.y >= image2Size.y) {
+        if (!(firstPass & 2)) discard;
+        return background;
+    }
+    int2 texel2 = int2(clamp(floor(ip2), 0, image2Size - 1));
+    if (!inTile(texel2, tile2Origin, tile2Size)) discard;
     float4 a, b;
     if (zoom >= 1.0) {
-        a = tex.Load(int3(clamp(floor(ip), 0, imageSize - 1), 0));
-        b = tex2.Load(int3(clamp(floor(ip2), 0, image2Size - 1), 0));
+        a = tex.Load(int3(texel - int2(tileOrigin), 0));
+        b = tex2.Load(int3(texel2 - int2(tile2Origin), 0));
     } else {
-        a = tex.SampleLevel(trilinear, ip / imageSize, log2(1.0 / zoom));
-        b = tex2.SampleLevel(trilinear, ip2 / image2Size, log2(scale2.x / zoom));
+        a = tex.SampleLevel(trilinear, (ip - tileOrigin) / tileSize, log2(1.0 / zoom));
+        b = tex2.SampleLevel(trilinear, (ip2 - tile2Origin) / tile2Size, log2(scale2.x / zoom));
     }
     float4 d = abs(storedValue(a, channels, srgb1) - storedValue(b, channels2, srgb2));
     float v = max(max(d.r, d.g), d.b);
@@ -254,17 +285,23 @@ float4 psDiff(float4 pos : SV_Position) : SV_Target {
 // Compare statistics: per-channel differences of mip 0 from imageOrigin on; -1 where the second image ends.
 float4 psDiffRead(float4 pos : SV_Position) : SV_Target {
     int2 p = clamp(int2(imageOrigin) + int2(pos.xy), 0, int2(imageSize) - 1);
+    if (!inTile(p, tileOrigin, tileSize)) discard;
     float2 p2 = floor((float2(p) + 0.5) * scale2);
-    if (p2.x >= image2Size.x || p2.y >= image2Size.y) return float4(-1, -1, -1, -1);
-    float4 a = storedValue(tex.Load(int3(p, 0)), channels, srgb1);
-    float4 b = storedValue(tex2.Load(int3(int2(p2), 0)), channels2, srgb2);
+    if (p2.x >= image2Size.x || p2.y >= image2Size.y) {
+        if (!(firstPass & 2)) discard;
+        return float4(-1, -1, -1, -1);
+    }
+    if (!inTile(int2(p2), tile2Origin, tile2Size)) discard;
+    float4 a = storedValue(tex.Load(int3(p - int2(tileOrigin), 0)), channels, srgb1);
+    float4 b = storedValue(tex2.Load(int3(int2(p2) - int2(tile2Origin), 0)), channels2, srgb2);
     return abs(a - b);
 }
 
 // Pixel readout for formats the CPU cannot decode: texels from imageOrigin on, as sampled.
 float4 psRead(float4 pos : SV_Position) : SV_Target {
     int2 p = clamp(int2(imageOrigin) + int2(pos.xy), 0, int2(imageSize) - 1);
-    return tex.Load(int3(p, 0));
+    if (!inTile(p, tileOrigin, tileSize)) discard;
+    return tex.Load(int3(p - int2(tileOrigin), 0));
 }
 )";
 
@@ -305,6 +342,12 @@ struct ViewConstants {
     uint32_t srgb1;
     uint32_t srgb2;
     float diffGain;
+    float tileOrigin[2];
+    float tileSize[2];
+    float tile2Origin[2];
+    float tile2Size[2];
+    uint32_t firstPass;
+    float padding2[3];
 };
 static_assert(sizeof(ViewConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
@@ -364,17 +407,14 @@ ViewConstants makeConstants(const htv::Image& image, float originX, float origin
     return c;
 }
 
-// `mask` is the Color match mask the outline reads, or none; `image` replaces the shown image, `second` is
-// Compare's second image.
-void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const ViewConstants& c, ID3D11PixelShader* ps,
-               ID3D11ShaderResourceView* mask = nullptr, ID3D11ShaderResourceView* image = nullptr,
-               ID3D11ShaderResourceView* second = nullptr) {
+// One full-viewport pass of `ps` with these textures in t0, t1 and t2.
+void drawPass(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const ViewConstants& c, ID3D11PixelShader* ps,
+              ID3D11ShaderResourceView* const (&srvs)[3]) {
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(app.context->Map(app.constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
     *static_cast<ViewConstants*>(m.pData) = c;
     app.context->Unmap(app.constants.get(), 0);
     ID3D11Buffer* cb = app.constants.get();
-    ID3D11ShaderResourceView* srvs[3] = {image ? image : app.srv.get(), mask, second};
     ID3D11SamplerState* sampler = app.trilinear.get();
     // Unbind the mask first: it may be the target of this draw.
     ID3D11ShaderResourceView* none = nullptr;
@@ -389,6 +429,35 @@ void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const V
     app.context->PSSetShaderResources(0, 3, srvs);
     app.context->PSSetSamplers(0, 1, &sampler);
     app.context->Draw(3, 0);
+}
+
+// `mask` is the Color match mask the outline reads, or none; `image` replaces the shown image, `second` is
+// Compare's second image. A pass for each tile (each pair of tiles with a second image); most images have one.
+void drawImage(ID3D11RenderTargetView* target, const D3D11_VIEWPORT& vp, const ViewConstants& c, ID3D11PixelShader* ps,
+               const GpuImage* mask = nullptr, const GpuImage* image = nullptr, const GpuImage* second = nullptr) {
+    const GpuImage& first = image ? *image : app.srv;
+    const size_t secondTiles = second ? second->tiles.size() : 1;
+    for (size_t i = 0; i < first.tiles.size(); ++i)
+        for (size_t j = 0; j < secondTiles; ++j) {
+            const GpuTile& t = first.tiles[i];
+            ViewConstants pass = c;
+            pass.tileOrigin[0] = float(t.x);
+            pass.tileOrigin[1] = float(t.y);
+            pass.tileSize[0] = float(t.width);
+            pass.tileSize[1] = float(t.height);
+            pass.firstPass = (i == 0 ? 1u : 0u) | (j == 0 ? 2u : 0u);
+            ID3D11ShaderResourceView* srvs[3] = {t.srv.get(), mask && i < mask->tiles.size() ? mask->tiles[i].srv.get() : nullptr,
+                                                 nullptr};
+            if (second) {
+                const GpuTile& t2 = second->tiles[j];
+                pass.tile2Origin[0] = float(t2.x);
+                pass.tile2Origin[1] = float(t2.y);
+                pass.tile2Size[0] = float(t2.width);
+                pass.tile2Size[1] = float(t2.height);
+                srvs[2] = t2.srv.get();
+            }
+            drawPass(target, vp, pass, ps, srvs);
+        }
 }
 
 // A render target of the given size and format with a CPU-readable copy.
@@ -432,6 +501,34 @@ struct Readback {
         return true;
     }
 };
+
+// Reads a width x height area through `draw` in strips of whole rows and hands each row to `row` as RGBA floats.
+// `draw(rtv, x0, y0, viewport)` renders the area from (x0, y0) on. Render targets are at most 8192 px wide, so
+// wider areas are read in column blocks and put back together.
+template <class Draw, class Row>
+bool readRows(int width, int height, Draw draw, Row row) {
+    const int block = std::min(width, 8192);
+    const int strip = std::clamp((1 << 20) / std::max(width, 1), 1, height);  // about 16 MB a strip
+    Readback rb;
+    if (!rb.create(block, strip, DXGI_FORMAT_R32G32B32A32_FLOAT)) return false;
+    std::vector<float> rows(block < width ? size_t(width) * strip * 4 : 0);
+    for (int y0 = 0; y0 < height; y0 += strip) {
+        const int n = std::min(strip, height - y0);
+        for (int x0 = 0; x0 < width; x0 += block) {
+            const int columns = std::min(block, width - x0);
+            draw(rb.rtv.get(), x0, y0, D3D11_VIEWPORT{0, 0, float(block), float(strip), 0, 1});
+            if (!rb.read([&](int y, const uint8_t* p) {
+                    if (y >= n) return;
+                    if (rows.empty()) row(reinterpret_cast<const float*>(p), width);
+                    else std::memcpy(&rows[(size_t(y) * width + x0) * 4], p, size_t(columns) * 16);
+                }))
+                return false;
+        }
+        if (!rows.empty())
+            for (int y = 0; y < n; ++y) row(&rows[size_t(y) * width * 4], width);
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -571,7 +668,7 @@ bool createPipeline(std::string& error) {
     return true;
 }
 
-bool createImageTexture(const htv::Image& img, Com<ID3D11ShaderResourceView>& out, int& mips, std::string& error) {
+bool createImageTexture(const htv::Image& img, GpuImage& out, int& mips, std::string& error) {
     const DXGI_FORMAT format = DXGI_FORMAT(img.format);
     const htv::FormatInfo& info = htv::formatInfo(img.format);
     UINT support = 0;
@@ -580,63 +677,94 @@ bool createImageTexture(const htv::Image& img, Com<ID3D11ShaderResourceView>& ou
         error = std::string(info.name) + " needs a Direct3D 11 class GPU";
         return false;
     }
-    const UINT maxSize = app.featureLevel >= D3D_FEATURE_LEVEL_11_0 ? 16384 : 8192;
-    if (img.width > maxSize || img.height > maxSize) {
-        error = "images over " + std::to_string(maxSize) + " px are not supported yet (tiling is planned)";
-        return false;
-    }
     if (info.compressed && (img.width % 4 || img.height % 4)) {
         error = "compressed textures must be a multiple of 4 px for now";
         return false;
     }
 
-    D3D11_TEXTURE2D_DESC d{};
-    d.Width = img.width;
-    d.Height = img.height;
-    d.ArraySize = 1;
-    d.Format = format;
-    d.SampleDesc.Count = 1;
-    d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    // Tiles no larger than a texture can be, and no larger than 512 MB: a GPU with 2 GB of memory takes no bigger
+    // resource. Tile sizes are multiples of 256 px, so the mips of neighbouring tiles line up.
+    const uint32_t maxSize = app.featureLevel >= D3D_FEATURE_LEVEL_11_0 ? 16384 : 8192;
+    const double bytesPerPixel = info.compressed ? info.bytes / 16.0 : double(info.bytes);
+    constexpr double kTileBytes = 512.0 * 1024 * 1024;
+    uint32_t tilesX = (img.width + maxSize - 1) / maxSize, tilesY = (img.height + maxSize - 1) / maxSize;
+    uint32_t tileW = img.width, tileH = img.height;
+    auto split = [](uint32_t size, uint32_t& count) {
+        if (count <= 1) return size;
+        const uint32_t tile = ((size + count - 1) / count + 255) / 256 * 256;
+        count = (size + tile - 1) / tile;
+        return tile;
+    };
+    for (;;) {
+        tileW = split(img.width, tilesX);
+        tileH = split(img.height, tilesY);
+        if (double(tileW) * tileH * bytesPerPixel <= kTileBytes || (tileW <= 256 && tileH <= 256)) break;
+        if (tileW >= tileH) ++tilesX;
+        else ++tilesY;
+    }
+    const bool tiled = tilesX * tilesY > 1;
 
-    const bool autoMips = img.mips.size() == 1 && (img.width > 1 || img.height > 1) &&
-                          (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN) && (support & D3D11_FORMAT_SUPPORT_RENDER_TARGET);
-    Com<ID3D11Texture2D> texture;
-    if (autoMips) {
-        d.MipLevels = 0;
-        d.BindFlags |= D3D11_BIND_RENDER_TARGET;
-        d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-        if (FAILED(app.device->CreateTexture2D(&d, nullptr, texture.put()))) {
-            error = "cannot create texture";
-            return false;
+    // Mips are generated where the GPU can, and for tiles always: the file's own chain covers the whole image.
+    const bool canGenerate = (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN) && (support & D3D11_FORMAT_SUPPORT_RENDER_TARGET);
+    const bool autoMips = (img.mips.size() == 1 || tiled) && (img.width > 1 || img.height > 1) && canGenerate;
+    const size_t fileMips = tiled ? 1 : img.mips.size();
+    GpuImage result;
+    mips = 0;
+    for (uint32_t ty = 0; ty < tilesY; ++ty)
+        for (uint32_t tx = 0; tx < tilesX; ++tx) {
+            GpuTile tile;
+            tile.x = tx * tileW;
+            tile.y = ty * tileH;
+            tile.width = std::min(tileW, img.width - tile.x);
+            tile.height = std::min(tileH, img.height - tile.y);
+            const htv::Surface& top = img.mips[0];
+            const size_t offset = info.compressed ? size_t(tile.y / 4) * top.rowPitch + size_t(tile.x / 4) * info.bytes
+                                                  : size_t(tile.y) * top.rowPitch + size_t(tile.x) * info.bytes;
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = tile.width;
+            d.Height = tile.height;
+            d.ArraySize = 1;
+            d.Format = format;
+            d.SampleDesc.Count = 1;
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            Com<ID3D11Texture2D> texture;
+            HRESULT hr;
+            if (autoMips) {
+                d.MipLevels = 0;
+                d.BindFlags |= D3D11_BIND_RENDER_TARGET;
+                d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+                hr = app.device->CreateTexture2D(&d, nullptr, texture.put());
+                if (SUCCEEDED(hr))
+                    app.context->UpdateSubresource(texture.get(), 0, nullptr, top.data.data() + offset, top.rowPitch, 0);
+            } else {
+                d.MipLevels = UINT(fileMips);
+                std::vector<D3D11_SUBRESOURCE_DATA> init(fileMips);
+                for (size_t i = 0; i < fileMips; ++i) {
+                    init[i].pSysMem = img.mips[i].data.data() + (i == 0 ? offset : 0);
+                    init[i].SysMemPitch = img.mips[i].rowPitch;
+                }
+                hr = app.device->CreateTexture2D(&d, init.data(), texture.put());
+            }
+            if (FAILED(hr)) {
+                error = hr == E_OUTOFMEMORY ? "not enough video memory for this image" : "cannot create texture";
+                return false;
+            }
+            texture->GetDesc(&d);
+            if (FAILED(app.device->CreateShaderResourceView(texture.get(), nullptr, tile.srv.put()))) {
+                error = "cannot create texture view";
+                return false;
+            }
+            if (autoMips) app.context->GenerateMips(tile.srv.get());
+            mips = mips ? std::min(mips, int(d.MipLevels)) : int(d.MipLevels);  // a smaller edge tile has fewer
+            result.tiles.push_back(std::move(tile));
         }
-        app.context->UpdateSubresource(texture.get(), 0, nullptr, img.mips[0].data.data(), img.mips[0].rowPitch, 0);
-    } else {
-        d.MipLevels = UINT(img.mips.size());
-        std::vector<D3D11_SUBRESOURCE_DATA> init(img.mips.size());
-        for (size_t i = 0; i < img.mips.size(); ++i) {
-            init[i].pSysMem = img.mips[i].data.data();
-            init[i].SysMemPitch = img.mips[i].rowPitch;
-        }
-        if (FAILED(app.device->CreateTexture2D(&d, init.data(), texture.put()))) {
-            error = "cannot create texture";
-            return false;
-        }
-    }
-    texture->GetDesc(&d);
-    Com<ID3D11ShaderResourceView> srv;
-    if (FAILED(app.device->CreateShaderResourceView(texture.get(), nullptr, srv.put()))) {
-        error = "cannot create texture view";
-        return false;
-    }
-    if (autoMips) app.context->GenerateMips(srv.get());
-    out = std::move(srv);
-    mips = int(d.MipLevels);
+    out = std::move(result);
     return true;
 }
 
 bool uploadImage(const htv::Image& img, std::string& error) {
-    Com<ID3D11ShaderResourceView> srv;
+    GpuImage srv;
     int mips = 1;
     if (!createImageTexture(img, srv, mips, error)) return false;
     app.srv = std::move(srv);
@@ -651,7 +779,7 @@ bool uploadSurface(const htv::Surface& surface, htv::GpuFormat format, std::stri
     one.height = surface.height;
     one.format = format;
     one.mips.push_back(surface);
-    Com<ID3D11ShaderResourceView> srv;
+    GpuImage srv;
     int mips = 1;
     if (!createImageTexture(one, srv, mips, error)) return false;
     app.srv = std::move(srv);
@@ -676,14 +804,14 @@ namespace {
 // An image Compare draws: A (0, the shown one), B (1) or C (2).
 struct CompareImage {
     const htv::Image* image = nullptr;
-    ID3D11ShaderResourceView* srv = nullptr;
+    const GpuImage* srv = nullptr;
     int generation = 0;
 };
 
 CompareImage layer(int i) {
-    if (i == 0) return {&app.image, app.hasImage ? app.srv.get() : nullptr, app.imageGeneration};
+    if (i == 0) return {&app.image, app.hasImage && app.srv ? &app.srv : nullptr, app.imageGeneration};
     const CompareSlot& s = app.compareSlots[i - 1];
-    return {&s.image, s.srv.get(), s.generation};
+    return {&s.image, s.srv ? &s.srv : nullptr, s.generation};
 }
 
 // Zoom and the top-left corner of a layer's shown area. B and C cover A's area when sizes are matched, and
@@ -733,13 +861,13 @@ void setSecond(ViewConstants& c, const CompareImage& first, const CompareImage& 
 void drawCompare(const UiColors& colors) {
     ID3D11RenderTargetView* target = app.rtv.get();
     const float vx0 = app.vpX, vx1 = app.vpX + app.vpW;
-    auto draw = [&](int i, float left, float right, ID3D11PixelShader* ps, ID3D11ShaderResourceView* second,
+    auto draw = [&](int i, float left, float right, ID3D11PixelShader* ps, const GpuImage* second,
                     const ViewConstants& c) {
         left = std::max(left, vx0);
         right = std::min(right, vx1);
         if (right <= left) return;
         D3D11_VIEWPORT vp{left, app.vpY, right - left, app.vpH, 0, 1};
-        drawImage(target, vp, c, ps, c.matchOutline ? app.matchMask.get() : nullptr, layer(i).srv, second);
+        drawImage(target, vp, c, ps, c.matchOutline ? &app.matchMask : nullptr, layer(i).srv, second);
     };
     if (app.compareMode == CompareMode::Split) {
         int ids[3];
@@ -805,39 +933,35 @@ void updateCompareStats() {
     std::copy(now, now + 5, key);
     app.compareStats = CompareStats();
 
-    // Strips of whole rows of the first image, as scanImageGpu reads.
+    // The first image's rows, as scanImageGpu reads them.
     const int w = int(a.image->width), h = int(a.image->height);
-    const int strip = std::clamp((1 << 20) / std::max(w, 1), 1, h);
-    Readback rb;
-    if (!rb.create(w, strip, DXGI_FORMAT_R32G32B32A32_FLOAT)) return;
     CompareStats st;
     double sum = 0, sumSq = 0;
-    for (int y0 = 0; y0 < h; y0 += strip) {
-        ViewConstants c{};
-        c.imageSize[0] = float(w);
-        c.imageSize[1] = float(h);
-        c.imageOrigin[1] = float(y0);
-        c.channels = uint32_t(htv::formatInfo(a.image->format).channels);
-        setSecond(c, a, b);
-        D3D11_VIEWPORT vp{0, 0, float(w), float(strip), 0, 1};
-        drawImage(rb.rtv.get(), vp, c, app.psDiffRead.get(), nullptr, a.srv, b.srv);
-        const int rows = std::min(strip, h - y0);
-        if (!rb.read([&](int y, const uint8_t* p) {
-                if (y >= rows) return;
-                const float* d = reinterpret_cast<const float*>(p);
-                for (int x = 0; x < w; ++x, d += 4) {
-                    if (d[0] < 0) continue;  // past the second image
-                    const double m = std::max({d[0], d[1], d[2]});
-                    if (!(m == m)) continue;  // NaN
-                    st.maxDelta = std::max(st.maxDelta, m);
-                    sum += double(d[0]) + d[1] + d[2];
-                    sumSq += double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2];
-                    ++st.pixels;
-                    if (m > 2.5 / 255.0) ++st.pixelsOver;
-                }
-            }))
-            return;
-    }
+    const bool ok = readRows(
+        w, h,
+        [&](ID3D11RenderTargetView* rtv, int x0, int y0, const D3D11_VIEWPORT& vp) {
+            ViewConstants c{};
+            c.imageSize[0] = float(w);
+            c.imageSize[1] = float(h);
+            c.imageOrigin[0] = float(x0);
+            c.imageOrigin[1] = float(y0);
+            c.channels = uint32_t(htv::formatInfo(a.image->format).channels);
+            setSecond(c, a, b);
+            drawImage(rtv, vp, c, app.psDiffRead.get(), nullptr, a.srv, b.srv);
+        },
+        [&](const float* d, int width) {
+            for (int x = 0; x < width; ++x, d += 4) {
+                if (d[0] < 0) continue;  // past the second image
+                const double m = std::max({d[0], d[1], d[2]});
+                if (!(m == m)) continue;  // NaN
+                st.maxDelta = std::max(st.maxDelta, m);
+                sum += double(d[0]) + d[1] + d[2];
+                sumSq += double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2];
+                ++st.pixels;
+                if (m > 2.5 / 255.0) ++st.pixelsOver;
+            }
+        });
+    if (!ok) return;
     if (st.pixels) {
         st.meanDelta = sum / (3.0 * double(st.pixels));
         st.mse = sumSq / (3.0 * double(st.pixels));
@@ -956,7 +1080,7 @@ void render() {
                                               std::round(kCheckerSizes[app.checkerSize] * app.scale), colors);
         // SV_Position is in window pixels whatever the viewport; the viewport only clips to the image area.
         D3D11_VIEWPORT vp{app.vpX, app.vpY, app.vpW, app.vpH, 0, 1};
-        drawImage(app.rtv.get(), vp, c, app.ps.get(), c.matchOutline ? app.matchMask.get() : nullptr);
+        drawImage(app.rtv.get(), vp, c, app.ps.get(), c.matchOutline ? &app.matchMask : nullptr);
     }
     ID3D11RenderTargetView* rtv = app.rtv.get();
     app.context->OMSetRenderTargets(1, &rtv, nullptr);
@@ -985,7 +1109,7 @@ void render() {
 
 namespace {
 
-std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, ID3D11ShaderResourceView* srv, int size,
+std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, const GpuImage& srv, int size,
                                        bool contain = false) {
     std::vector<uint8_t> out;
     static Readback rb;
@@ -1001,7 +1125,7 @@ std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, ID3D11ShaderReso
     c.matchOutline = 0;
     c.forcedMip = -1;
     D3D11_VIEWPORT vp{0, 0, float(size), float(size), 0, 1};
-    drawImage(rb.rtv.get(), vp, c, app.ps.get(), nullptr, srv);
+    drawImage(rb.rtv.get(), vp, c, app.ps.get(), nullptr, &srv);
     out.resize(size_t(size) * size * 4);
     if (!rb.read([&](int y, const uint8_t* row) { std::copy(row, row + size * 4, out.data() + size_t(y) * size * 4); }))
         out.clear();
@@ -1012,7 +1136,7 @@ std::vector<uint8_t> renderThumbnailOf(const htv::Image& image, ID3D11ShaderReso
 
 std::vector<uint8_t> renderThumbnail(int size) {
     if (!app.hasImage) return {};
-    return renderThumbnailOf(app.image, app.srv.get(), size);
+    return renderThumbnailOf(app.image, app.srv, size);
 }
 
 ID3D11ShaderResourceView* compareThumbnail(int slot) {
@@ -1022,7 +1146,7 @@ ID3D11ShaderResourceView* compareThumbnail(int slot) {
     if (slot < 0) {
         if (!app.hasImage) return nullptr;
         if (aGeneration != app.imageGeneration || aRotation != app.rotation) {
-            const std::vector<uint8_t> px = renderThumbnailOf(app.image, app.srv.get(), kSize);
+            const std::vector<uint8_t> px = renderThumbnailOf(app.image, app.srv, kSize);
             a = px.empty() ? Com<ID3D11ShaderResourceView>() : createTexture(px.data(), kSize, kSize);
             aGeneration = app.imageGeneration;
             aRotation = app.rotation;
@@ -1031,7 +1155,7 @@ ID3D11ShaderResourceView* compareThumbnail(int slot) {
     }
     CompareSlot& s = app.compareSlots[slot];
     if (s.srv && !s.thumbnail) {
-        const std::vector<uint8_t> px = renderThumbnailOf(s.image, s.srv.get(), kSize);
+        const std::vector<uint8_t> px = renderThumbnailOf(s.image, s.srv, kSize);
         if (!px.empty()) s.thumbnail = createTexture(px.data(), kSize, kSize);
     }
     return s.thumbnail.get();
@@ -1065,7 +1189,7 @@ ID3D11ShaderResourceView* layerThumbnail(int index) {
     const htv::Layer& l = app.image.layers[size_t(index)];
     const bool onScreen = l.mips.empty() && app.image.layerKind != htv::LayerKind::PsdLayers;
     if (onScreen && index == app.image.shownLayer) {
-        px = renderThumbnailOf(app.image, app.srv.get(), kSize);
+        px = renderThumbnailOf(app.image, app.srv, kSize);
     } else if (!l.mips.empty()) {
         // The smallest mip that still covers the thumbnail is enough.
         size_t level = 0;
@@ -1077,12 +1201,12 @@ ID3D11ShaderResourceView* layerThumbnail(int index) {
         one.format = l.format;
         one.maxValue = l.maxValue;
         one.mips.push_back(l.mips[level]);
-        Com<ID3D11ShaderResourceView> srv;
+        GpuImage srv;
         int mips = 1;
         std::string error;
         // PSD layers come in any shape: the whole of each fits in its square.
         if (createImageTexture(one, srv, mips, error))
-            px = renderThumbnailOf(one, srv.get(), kSize, app.image.layerKind == htv::LayerKind::PsdLayers);
+            px = renderThumbnailOf(one, srv, kSize, app.image.layerKind == htv::LayerKind::PsdLayers);
     }
     Com<ID3D11ShaderResourceView> texture;
     if (!px.empty()) texture = createTexture(px.data(), kSize, kSize);
@@ -1120,25 +1244,18 @@ bool readPixelsGpu(int x, int y, int n, float* rgba) {
 
 bool scanImageGpu(const std::function<void(const float* rgba, int width)>& row) {
     if (!app.hasImage || !app.srv || !app.psRead) return false;
-    // Strips of whole rows, about 16 MB each, so even an 8K image needs no big buffer.
     const int w = int(app.image.width), h = int(app.image.height);
-    const int strip = std::clamp((1 << 20) / std::max(w, 1), 1, h);
-    Readback rb;
-    if (!rb.create(w, strip, DXGI_FORMAT_R32G32B32A32_FLOAT)) return false;
-    for (int y0 = 0; y0 < h; y0 += strip) {
-        ViewConstants c{};
-        c.imageSize[0] = float(w);
-        c.imageSize[1] = float(h);
-        c.imageOrigin[1] = float(y0);
-        D3D11_VIEWPORT vp{0, 0, float(w), float(strip), 0, 1};
-        drawImage(rb.rtv.get(), vp, c, app.psRead.get());
-        const int rows = std::min(strip, h - y0);
-        if (!rb.read([&](int y, const uint8_t* p) {
-                if (y < rows) row(reinterpret_cast<const float*>(p), w);
-            }))
-            return false;
-    }
-    return true;
+    return readRows(
+        w, h,
+        [&](ID3D11RenderTargetView* rtv, int x0, int y0, const D3D11_VIEWPORT& vp) {
+            ViewConstants c{};
+            c.imageSize[0] = float(w);
+            c.imageSize[1] = float(h);
+            c.imageOrigin[0] = float(x0);
+            c.imageOrigin[1] = float(y0);
+            drawImage(rtv, vp, c, app.psRead.get());
+        },
+        row);
 }
 
 namespace {
@@ -1184,34 +1301,58 @@ void updateColorMatch() {
     std::copy(app.matchTarget, app.matchTarget + 4, target);
     app.matchValid = false;
 
-    // One byte per pixel: rendered on the GPU, read back for the count and the regions.
-    static Com<ID3D11Texture2D> texture, staging;
-    static Com<ID3D11RenderTargetView> rtv;
-    static int width = 0, height = 0;
-    const int w = int(app.image.width), h = int(app.image.height);
-    if (w != width || h != height || !rtv) {
-        width = height = 0;
+    // One byte per pixel, in the image's tiles: rendered on the GPU, read back for the count and the regions.
+    struct MaskTile {
+        Com<ID3D11Texture2D> texture, staging;
+        Com<ID3D11RenderTargetView> rtv;
+    };
+    static std::vector<MaskTile> tiles;
+    auto sameLayout = [] {
+        if (app.matchMask.tiles.size() != app.srv.tiles.size() || tiles.size() != app.srv.tiles.size()) return false;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            const GpuTile &m = app.matchMask.tiles[i], &t = app.srv.tiles[i];
+            if (m.x != t.x || m.y != t.y || m.width != t.width || m.height != t.height) return false;
+        }
+        return true;
+    };
+    if (!sameLayout()) {
         app.matchMask.reset();
-        rtv.reset();
-        D3D11_TEXTURE2D_DESC d{};
-        d.Width = UINT(w);
-        d.Height = UINT(h);
-        d.MipLevels = d.ArraySize = 1;
-        d.Format = DXGI_FORMAT_R8_UNORM;
-        d.SampleDesc.Count = 1;
-        d.Usage = D3D11_USAGE_DEFAULT;
-        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(app.device->CreateTexture2D(&d, nullptr, texture.put())) ||
-            FAILED(app.device->CreateRenderTargetView(texture.get(), nullptr, rtv.put())) ||
-            FAILED(app.device->CreateShaderResourceView(texture.get(), nullptr, app.matchMask.put())))
-            return;
-        d.Usage = D3D11_USAGE_STAGING;
-        d.BindFlags = 0;
-        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(app.device->CreateTexture2D(&d, nullptr, staging.put()))) return;
-        width = w;
-        height = h;
+        tiles.clear();
+        for (const GpuTile& t : app.srv.tiles) {
+            MaskTile m;
+            GpuTile shown;
+            shown.x = t.x;
+            shown.y = t.y;
+            shown.width = t.width;
+            shown.height = t.height;
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = t.width;
+            d.Height = t.height;
+            d.MipLevels = d.ArraySize = 1;
+            d.Format = DXGI_FORMAT_R8_UNORM;
+            d.SampleDesc.Count = 1;
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(app.device->CreateTexture2D(&d, nullptr, m.texture.put())) ||
+                FAILED(app.device->CreateRenderTargetView(m.texture.get(), nullptr, m.rtv.put())) ||
+                FAILED(app.device->CreateShaderResourceView(m.texture.get(), nullptr, shown.srv.put()))) {
+                app.matchMask.reset();
+                tiles.clear();
+                return;
+            }
+            d.Usage = D3D11_USAGE_STAGING;
+            d.BindFlags = 0;
+            d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (FAILED(app.device->CreateTexture2D(&d, nullptr, m.staging.put()))) {
+                app.matchMask.reset();
+                tiles.clear();
+                return;
+            }
+            tiles.push_back(std::move(m));
+            app.matchMask.tiles.push_back(std::move(shown));
+        }
     }
+    const int w = int(app.image.width), h = int(app.image.height);
     ViewConstants c{};
     c.imageSize[0] = float(w);
     c.imageSize[1] = float(h);
@@ -1221,13 +1362,36 @@ void updateColorMatch() {
     // Half a step more, so values that went through decoding and encoding still meet at ± 0.
     c.matchTolerance = (float(app.matchTolerance) + 0.5f) / 255.0f;
     c.matchSrgb = isSrgbFormat(app.image.format) ? 1u : 0u;
-    D3D11_VIEWPORT vp{0, 0, float(w), float(h), 0, 1};
-    drawImage(rtv.get(), vp, c, app.psMatch.get());
-    app.context->CopyResource(staging.get(), texture.get());
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        const GpuTile& t = app.srv.tiles[i];
+        D3D11_VIEWPORT vp{0, 0, float(t.width), float(t.height), 0, 1};
+        ID3D11ShaderResourceView* srvs[3] = {t.srv.get(), nullptr, nullptr};
+        drawPass(tiles[i].rtv.get(), vp, c, app.psMatch.get(), srvs);
+        app.context->CopyResource(tiles[i].staging.get(), tiles[i].texture.get());
+    }
     D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(app.context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &m))) return;
-    app.matchRegions = htv::findRegions(static_cast<const uint8_t*>(m.pData), w, h, m.RowPitch);
-    app.context->Unmap(staging.get(), 0);
+    if (tiles.size() == 1) {
+        if (FAILED(app.context->Map(tiles[0].staging.get(), 0, D3D11_MAP_READ, 0, &m))) return;
+        app.matchRegions = htv::findRegions(static_cast<const uint8_t*>(m.pData), w, h, m.RowPitch);
+        app.context->Unmap(tiles[0].staging.get(), 0);
+    } else {
+        // The tiles put back together for the regions.
+        std::vector<uint8_t> all;
+        try {
+            all.resize(size_t(w) * h);
+        } catch (const std::bad_alloc&) {
+            return;
+        }
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            const GpuTile& t = app.srv.tiles[i];
+            if (FAILED(app.context->Map(tiles[i].staging.get(), 0, D3D11_MAP_READ, 0, &m))) return;
+            for (uint32_t y = 0; y < t.height; ++y)
+                std::memcpy(&all[(size_t(t.y) + y) * w + t.x], static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch,
+                            t.width);
+            app.context->Unmap(tiles[i].staging.get(), 0);
+        }
+        app.matchRegions = htv::findRegions(all.data(), w, h, size_t(w));
+    }
     if (app.matchRegion >= int(app.matchRegions.boxes.size())) app.matchRegion = -1;
     app.matchValid = true;
 }

@@ -42,7 +42,7 @@ std::string slotDetail(int i) {
     return out;
 }
 
-bool slotReady(int i) { return i == 0 ? app.hasImage : app.compareSlots[i - 1].srv.get() != nullptr; }
+bool slotReady(int i) { return i == 0 ? app.hasImage : bool(app.compareSlots[i - 1].srv); }
 
 std::string pairLabel(int p) {
     const int a = kPairs[p][0], b = kPairs[p][1];

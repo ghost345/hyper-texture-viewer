@@ -304,7 +304,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
         } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
             img.width = info.xsize;
             img.height = info.ysize;
-            if (uint64_t(img.width) * img.height * 16 > 0x7fffffffull) {
+            if (uint64_t(img.width) * img.height * 16 > (uint64_t(1) << 34)) {
                 r.error = "image too large";
                 return r;
             }
