@@ -122,14 +122,14 @@ HICON loadAppIcon(int metric, UINT dpi) {
 }
 
 void setWindowIcons(HWND hwnd, UINT dpi) {
-    static HICON big = nullptr, small = nullptr;
+    static HICON bigIcon = nullptr, smallIcon = nullptr;  // `small` is a macro in the Windows headers
     HICON newBig = loadAppIcon(SM_CXICON, dpi), newSmall = loadAppIcon(SM_CXSMICON, dpi);
     SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(newBig));
     SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(newSmall));
-    if (big) DestroyIcon(big);
-    if (small) DestroyIcon(small);
-    big = newBig;
-    small = newSmall;
+    if (bigIcon) DestroyIcon(bigIcon);
+    if (smallIcon) DestroyIcon(smallIcon);
+    bigIcon = newBig;
+    smallIcon = newSmall;
 }
 
 void applyDpi(float scale) {
