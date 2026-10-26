@@ -17,6 +17,7 @@
 #include "backends/imgui_impl_dx11.h"
 #include "backends/imgui_impl_win32.h"
 #include "keys.h"
+#include "resource.h"
 #include "ui.h"
 #include "wic_loader.h"
 
@@ -99,6 +100,36 @@ void layout() {
 
 bool inViewport(int x, int y) {
     return x >= app.vpX && y >= app.vpY && x < app.vpX + app.vpW && y < app.vpY + app.vpH;
+}
+
+// The app icon at the two sizes Windows shows it in at this DPI. Each size in htv.ico is drawn on its own pixel
+// grid, so the small one is loaded at its size rather than shrunk from the big one.
+HICON loadAppIcon(int metric, UINT dpi) {
+    using MetricsFn = int(WINAPI*)(int, UINT);
+    using ScaleDownFn = HRESULT(WINAPI*)(HINSTANCE, PCWSTR, int, int, HICON*);
+    static const auto metricsForDpi = reinterpret_cast<MetricsFn>(
+        reinterpret_cast<void (*)()>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetSystemMetricsForDpi")));
+    static const auto scaleDown = [] {
+        HMODULE comctl = LoadLibraryW(L"comctl32.dll");
+        return comctl ? reinterpret_cast<ScaleDownFn>(reinterpret_cast<void (*)()>(GetProcAddress(comctl, "LoadIconWithScaleDown")))
+                      : nullptr;
+    }();
+    const int size = metricsForDpi ? metricsForDpi(metric, dpi) : MulDiv(GetSystemMetrics(metric), int(dpi), 96);
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    HICON icon = nullptr;
+    if (scaleDown && SUCCEEDED(scaleDown(instance, MAKEINTRESOURCEW(IDI_APPICON), size, size, &icon))) return icon;
+    return static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, size, size, LR_DEFAULTCOLOR));
+}
+
+void setWindowIcons(HWND hwnd, UINT dpi) {
+    static HICON big = nullptr, small = nullptr;
+    HICON newBig = loadAppIcon(SM_CXICON, dpi), newSmall = loadAppIcon(SM_CXSMICON, dpi);
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(newBig));
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(newSmall));
+    if (big) DestroyIcon(big);
+    if (small) DestroyIcon(small);
+    big = newBig;
+    small = newSmall;
 }
 
 void applyDpi(float scale) {
@@ -191,6 +222,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DPICHANGED: {
             const RECT* r = reinterpret_cast<const RECT*>(lp);
             applyDpi(float(HIWORD(wp)) / 96.0f);
+            setWindowIcons(hwnd, HIWORD(wp));
             SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
@@ -686,7 +718,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     wc.lpfnWndProc = windowProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APPICON));  // until the window has its DPI's sizes
     wc.lpszClassName = L"HyperTextureViewer";
     RegisterClassExW(&wc);
 
@@ -708,6 +740,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
 
     // The default size is 1280x800 at 100%, scaled for the monitor and kept on its work area.
     app.scale = ImGui_ImplWin32_GetDpiScaleForHwnd(app.hwnd);
+    setWindowIcons(app.hwnd, UINT(std::lround(app.scale * 96.0f)));
     {
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);

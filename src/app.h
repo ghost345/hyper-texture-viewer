@@ -281,6 +281,7 @@ void saveSettings();
 // settings.ini next to the exe instead of in %APPDATA%.
 bool portableMode();
 bool setPortableMode(bool on);  // false when the exe's folder is not writable
+bool registerFileTypes();  // Open with and Default Apps entries for the current user; false if any write failed
 void applyTheme();              // after themeMode changes, or Windows switches its theme
 void applyInterfaceScale();     // after interfaceScale changes
 void relistFolder();            // after folderSort changes

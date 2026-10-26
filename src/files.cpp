@@ -4,6 +4,7 @@
 
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 
 #include <algorithm>
@@ -1059,6 +1060,55 @@ bool setPortableMode(bool on) {
     }
     saveSettings();
     return true;
+}
+
+// For the current user only, no elevation: a ProgID with the app icon and the open command, the app in each
+// image type's Open with list, and its capabilities, so Windows Default Apps lists it for those types. Windows
+// lets only the user choose the default app, so nothing here takes a type over.
+bool registerFileTypes() {
+    wchar_t buf[MAX_PATH * 4];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
+    if (!n) return false;
+    const std::wstring exe(buf, n);
+    const std::wstring progId = L"HyperTextureViewer.Image";
+    bool ok = true;
+    auto setValue = [&](const std::wstring& key, const wchar_t* name, const std::wstring& value, DWORD type = REG_SZ) {
+        HKEY k = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) !=
+            ERROR_SUCCESS) {
+            ok = false;
+            return;
+        }
+        const DWORD bytes = type == REG_NONE ? 0 : DWORD((value.size() + 1) * sizeof(wchar_t));
+        if (RegSetValueExW(k, name, 0, type, reinterpret_cast<const BYTE*>(value.c_str()), bytes) != ERROR_SUCCESS)
+            ok = false;
+        RegCloseKey(k);
+    };
+    const std::wstring classes = L"Software\\Classes\\";
+    const std::wstring command = L"\"" + exe + L"\" \"%1\"";
+    const std::wstring icon = L"\"" + exe + L"\",0";
+    setValue(classes + progId, nullptr, L"Image");
+    setValue(classes + progId + L"\\DefaultIcon", nullptr, icon);
+    setValue(classes + progId + L"\\shell\\open\\command", nullptr, command);
+    const std::wstring appKey = classes + L"Applications\\" + fs::path(exe).filename().wstring();
+    setValue(appKey, L"FriendlyAppName", L"Hyper Texture Viewer");
+    setValue(appKey + L"\\DefaultIcon", nullptr, icon);
+    setValue(appKey + L"\\shell\\open\\command", nullptr, command);
+    const std::wstring caps = L"Software\\HyperTextureViewer\\Capabilities";
+    setValue(caps, L"ApplicationName", L"Hyper Texture Viewer");
+    setValue(caps, L"ApplicationDescription", L"Image viewer for texture artists");
+    std::vector<std::string> types = htv::supportedExtensions();
+    for (const std::string& e : htv::wicExtensions())
+        if (std::find(types.begin(), types.end(), e) == types.end()) types.push_back(e);
+    for (const std::string& e : types) {
+        const std::wstring ext = L"." + widen(e);
+        setValue(classes + ext + L"\\OpenWithProgids", progId.c_str(), L"", REG_NONE);
+        setValue(appKey + L"\\SupportedTypes", ext.c_str(), L"", REG_NONE);
+        setValue(caps + L"\\FileAssociations", ext.c_str(), progId);
+    }
+    setValue(L"Software\\RegisteredApplications", L"Hyper Texture Viewer", caps);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return ok;
 }
 
 void prefetchDone(LoadedFile* raw) {

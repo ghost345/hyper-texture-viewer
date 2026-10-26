@@ -223,8 +223,14 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
         r.x = controlX;
         r.cy = cy;
         if (r.button("assoc", Icon::Count, "Open Windows Default Apps\xE2\x80\xA6", kBordered,
-                     "Windows decides which app opens each file type", nullptr, 16, 24))
-            ShellExecuteW(app.hwnd, L"open", L"ms-settings:defaultapps", nullptr, nullptr, SW_SHOWNORMAL);
+                     "Adds Hyper Texture Viewer to Open with for the image types it reads (for you only), then opens "
+                     "Default Apps: Windows lets only you choose which app opens each type",
+                     nullptr, 16, 24)) {
+            registerFileTypes();
+            // Windows 11 opens the app's own page; older versions ignore the parameter and show the list.
+            ShellExecuteW(app.hwnd, L"open", L"ms-settings:defaultapps?registeredAppUser=Hyper%20Texture%20Viewer",
+                          nullptr, nullptr, SW_SHOWNORMAL);
+        }
         y += rowH;
     }
 }
