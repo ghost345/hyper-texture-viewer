@@ -64,6 +64,53 @@ struct Surface {
     std::vector<uint8_t> data;
 };
 
+// One frame of an animation (GIF, APNG, animated WebP, AVIF or JPEG XL): a full-canvas image in the image's
+// format and how long it stays.
+struct Frame {
+    Surface surface;
+    int delayMs = 0;
+};
+
+// A picture the file holds besides the one on screen: a cubemap face, a texture array or volume slice, a TIFF
+// page, an EXR layer or a PSD layer.
+struct Layer {
+    std::string name;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    GpuFormat format = GpuFormat::Unknown;
+    std::vector<Surface> mips;  // empty while this one is on screen (one-at-a-time kinds): Image::mips has them
+    float maxValue = 0.0f;
+    std::string detail;         // shown after the name when it tells layers apart, e.g. "RGBA half" or "512 × 256"
+    // PSD only: the layer's pixels (in the image's format) sit at x, y on the canvas.
+    int x = 0;
+    int y = 0;
+    float opacity = 1.0f;
+    bool visible = true;
+    bool visibleInFile = true;
+    bool group = false;         // a layer group: no pixels, hides or fades the layers inside it
+    int parent = -1;            // the group it is in
+    int depth = 0;              // how many groups deep
+    std::string blend;          // Photoshop's blend key: "norm", "mul ", "pass" (groups)...
+    bool clipped = false;       // a clipping mask on the layer below
+};
+
+// A line of the Info panel: "Camera", "Canon EOS R5".
+struct Property {
+    std::string key;
+    std::string value;
+};
+
+enum class LayerKind {
+    None,
+    CubeFaces,     // one at a time
+    ArraySlices,
+    VolumeSlices,
+    Pages,
+    IconSizes,
+    ExrLayers,
+    PsdLayers,     // composited: each has its own eye
+};
+
 struct Image {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -72,6 +119,16 @@ struct Image {
     std::string description;     // e.g. "EXR, half RGBA, PIZ"
     std::string note;            // what the prototype left out, e.g. "cubemap: face 0 of 6 shown"
     float maxValue = 0.0f;       // brightest RGB value for float images, 0 otherwise
+    float dpi = 0.0f;            // print resolution the file states, 0 when it states none
+    std::vector<Frame> frames;   // more than one: an animation. frame 0's pixels equal mips[0].
+    int loopCount = 0;           // 0 loops forever
+    std::vector<Layer> layers;   // more than one, or none. Listed top to bottom for PSD.
+    LayerKind layerKind = LayerKind::None;
+    int shownLayer = 0;          // one-at-a-time kinds: the layer in mips; PSD: unused
+    bool composited = false;     // PSD: mips[0] was rebuilt from the layers instead of being the file's own composite
+    Surface fileComposite;       // PSD: the file's own composite, for when every layer is back as saved
+    std::vector<Property> metadata;  // colour profile, EXIF, text chunks: the Info panel's Metadata section
+    std::vector<Property> exr;       // EXR header details: channels, windows, attributes
 };
 
 struct LoadResult {
@@ -88,6 +145,26 @@ const std::vector<std::string>& supportedExtensions();
 
 // Reads one pixel of mip 0 as floats. Returns false for compressed formats.
 bool readPixel(const Image& image, uint32_t x, uint32_t y, float rgba[4]);
+
+// Why the image looks like a normal map whose Z (blue) was left out to be rebuilt as sqrt(1 - x² - y²),
+// or empty when it doesn't. A guess from the format (two channels, e.g. BC5), the file name ("normal",
+// "nrm", "_n") and the colours (red and green around 0.5, blue empty: yellow-green instead of the bluish
+// tangent-space look). `name` is the file name, lower or upper case.
+std::string missingNormalZ(const Image& image, const std::string& name);
+
+// Puts layer `index` on screen for the one-at-a-time kinds: its pixels, size and format move into the image,
+// and the previous layer's go back to its entry. False when there is nothing to change.
+bool showLayer(Image& image, int index);
+
+// PSD: rebuilds mips[0] from the visible layers, blending each over the ones below as Normal (blend modes,
+// clipping and layer effects are not reproduced). False when the image has no PSD layers.
+bool compositeLayers(Image& image);
+
+// Whether a PSD layer shows: it and every group around it are visible.
+bool layerShows(const Image& image, int index);
+
+// "Cubemap", "Array", "Volume", "Pages", "Sizes", "EXR", "PSD".
+const char* layerKindName(LayerKind kind);
 
 uint16_t floatToHalf(float value);
 float halfToFloat(uint16_t value);
