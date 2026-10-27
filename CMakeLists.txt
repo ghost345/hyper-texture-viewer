@@ -116,6 +116,14 @@ if(HTV_WITH_AVIF)
     if(MSVC)
         # Meson finds Visual Studio itself; /MT matches this project's static runtime.
         list(APPEND dav1d_meson_args --vsenv -Db_vscrt=static_from_buildtype)
+    elseif(EMSCRIPTEN)
+        # WebAssembly: no assembly, and the emcc/emar wrappers as compiler and archiver.
+        list(REMOVE_ITEM dav1d_meson_args -Denable_asm=true)
+        set(dav1d_cross "${CMAKE_BINARY_DIR}/dav1d-cross.ini")
+        file(WRITE ${dav1d_cross} "[binaries]\nc = '${CMAKE_C_COMPILER}'\nar = '${CMAKE_AR}'\n"
+            "[built-in options]\nc_args = ['-O3']\n[host_machine]\nsystem = 'emscripten'\ncpu_family = 'wasm32'\n"
+            "cpu = 'wasm32'\nendian = 'little'\n")
+        list(APPEND dav1d_meson_args -Denable_asm=false --cross-file=${dav1d_cross})
     elseif(CMAKE_CROSSCOMPILING)
         set(dav1d_cross "${CMAKE_BINARY_DIR}/dav1d-cross.ini")
         file(WRITE ${dav1d_cross} "[binaries]\nc = '${CMAKE_C_COMPILER}'\nar = '${CMAKE_AR}'\n"

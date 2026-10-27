@@ -178,10 +178,10 @@ std::string relativeTime(int64_t when) {
 void emptyCard() {
     const Theme& t = T();
     const float W = S(480);
-    // The browser has no Windows codecs (TIFF, HEIC) and is built without AVIF.
+    // The browser has no Windows codecs (TIFF, HEIC).
     const std::string formats =
         kBrowser ? "EXR \xC2\xB7 HDR \xC2\xB7 DDS \xC2\xB7 KTX \xC2\xB7 KTX2 \xC2\xB7 TGA \xC2\xB7 PSD \xC2\xB7 PNG \xC2\xB7 JPG "
-                   "\xC2\xB7 BMP \xC2\xB7 GIF \xC2\xB7 WebP \xC2\xB7 JXL \xC2\xB7 QOI"
+                   "\xC2\xB7 BMP \xC2\xB7 GIF \xC2\xB7 WebP \xC2\xB7 AVIF \xC2\xB7 JXL \xC2\xB7 QOI"
                  : "EXR \xC2\xB7 HDR \xC2\xB7 DDS \xC2\xB7 KTX \xC2\xB7 KTX2 \xC2\xB7 TGA \xC2\xB7 TIFF \xC2\xB7 PSD \xC2\xB7 PNG "
                    "\xC2\xB7 JPG \xC2\xB7 BMP \xC2\xB7 GIF \xC2\xB7 WebP \xC2\xB7 AVIF \xC2\xB7 JXL \xC2\xB7 QOI \xC2\xB7 HEIC";
     const std::vector<std::string> formatLines = wrapLines(fontMono, 11, formats, W, " \xC2\xB7 ");
