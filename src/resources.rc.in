@@ -1,6 +1,22 @@
 #include "@CMAKE_SOURCE_DIR@/src/resource.h"
 
 IDI_APPICON ICON "@CMAKE_SOURCE_DIR@/res/htv.ico"
+IDI_FT_EXR ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_exr.ico"
+IDI_FT_HDR ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_hdr.ico"
+IDI_FT_DDS ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_dds.ico"
+IDI_FT_KTX ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_ktx.ico"
+IDI_FT_KTX2 ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_ktx2.ico"
+IDI_FT_PSD ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_psd.ico"
+IDI_FT_TIF ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_tif.ico"
+IDI_FT_TIFF ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_tiff.ico"
+IDI_FT_TGA ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_tga.ico"
+IDI_FT_PNG ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_png.ico"
+IDI_FT_JPG ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_jpg.ico"
+IDI_FT_BMP ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_bmp.ico"
+IDI_FT_GIF ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_gif.ico"
+IDI_FT_WEBP ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_webp.ico"
+IDI_FT_AVIF ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_avif.ico"
+IDI_FT_HEIC ICON "@CMAKE_SOURCE_DIR@/res/filetypes/htv_heic.ico"
 
 // Interface fonts, read with FindResource in ui.cpp. IDs: 101 Inter Regular, 102 Medium, 103 SemiBold, 104 JetBrains Mono.
 101 RCDATA "@CMAKE_SOURCE_DIR@/third_party/fonts/Inter-Regular.ttf"

@@ -25,6 +25,7 @@
 
 #include "imgui.h"
 #include "keys.h"
+#include "resource.h"
 #include "wic_loader.h"
 
 namespace fs = std::filesystem;
@@ -1062,15 +1063,23 @@ bool setPortableMode(bool on) {
     return true;
 }
 
-// For the current user only, no elevation: a ProgID with the app icon and the open command, the app in each
-// image type's Open with list, and its capabilities, so Windows Default Apps lists it for those types. Windows
-// lets only the user choose the default app, so nothing here takes a type over.
+// For the current user only, no elevation: a ProgID per image type with its "no preview" icon (a shared one with
+// the app icon for types without their own) and the open command, the app in each type's Open with list, and its
+// capabilities, so Windows Default Apps lists it for those types. Windows lets only the user choose the default
+// app, so nothing here takes a type over.
 bool registerFileTypes() {
     wchar_t buf[MAX_PATH * 4];
     const DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
     if (!n) return false;
     const std::wstring exe(buf, n);
-    const std::wstring progId = L"HyperTextureViewer.Image";
+    static const struct {
+        const char* ext;
+        int icon;
+    } kTypeIcons[] = {{"exr", IDI_FT_EXR},   {"hdr", IDI_FT_HDR}, {"dds", IDI_FT_DDS},   {"ktx", IDI_FT_KTX},
+                      {"ktx2", IDI_FT_KTX2}, {"psd", IDI_FT_PSD}, {"tif", IDI_FT_TIF},   {"tiff", IDI_FT_TIFF},
+                      {"tga", IDI_FT_TGA},   {"png", IDI_FT_PNG}, {"jpg", IDI_FT_JPG},   {"jpeg", IDI_FT_JPG},
+                      {"bmp", IDI_FT_BMP},   {"gif", IDI_FT_GIF}, {"webp", IDI_FT_WEBP}, {"avif", IDI_FT_AVIF},
+                      {"heic", IDI_FT_HEIC}};
     bool ok = true;
     auto setValue = [&](const std::wstring& key, const wchar_t* name, const std::wstring& value, DWORD type = REG_SZ) {
         HKEY k = nullptr;
@@ -1086,10 +1095,16 @@ bool registerFileTypes() {
     };
     const std::wstring classes = L"Software\\Classes\\";
     const std::wstring command = L"\"" + exe + L"\" \"%1\"";
-    const std::wstring icon = L"\"" + exe + L"\",0";
-    setValue(classes + progId, nullptr, L"Image");
-    setValue(classes + progId + L"\\DefaultIcon", nullptr, icon);
-    setValue(classes + progId + L"\\shell\\open\\command", nullptr, command);
+    // A negative index names an icon by its resource ID.
+    auto iconRef = [&](int id) { return L"\"" + exe + L"\",-" + std::to_wstring(id); };
+    const std::wstring icon = iconRef(IDI_APPICON);
+    auto addProgId = [&](const std::wstring& progId, const std::wstring& name, const std::wstring& progIcon) {
+        setValue(classes + progId, nullptr, name);
+        setValue(classes + progId + L"\\DefaultIcon", nullptr, progIcon);
+        setValue(classes + progId + L"\\shell\\open\\command", nullptr, command);
+    };
+    const std::wstring sharedProgId = L"HyperTextureViewer.Image";
+    addProgId(sharedProgId, L"Image", icon);
     const std::wstring appKey = classes + L"Applications\\" + fs::path(exe).filename().wstring();
     setValue(appKey, L"FriendlyAppName", L"Hyper Texture Viewer");
     setValue(appKey + L"\\DefaultIcon", nullptr, icon);
@@ -1102,7 +1117,17 @@ bool registerFileTypes() {
         if (std::find(types.begin(), types.end(), e) == types.end()) types.push_back(e);
     for (const std::string& e : types) {
         const std::wstring ext = L"." + widen(e);
+        std::wstring progId = sharedProgId;
+        for (const auto& t : kTypeIcons)
+            if (e == t.ext) {
+                std::string label = e == "jpeg" || e == "jpg" ? "JPEG" : e;
+                for (char& c : label) c = char(std::toupper(static_cast<unsigned char>(c)));
+                progId = L"HyperTextureViewer" + ext;
+                addProgId(progId, widen(label) + L" image", iconRef(t.icon));
+            }
         setValue(classes + ext + L"\\OpenWithProgids", progId.c_str(), L"", REG_NONE);
+        if (progId != sharedProgId)  // registered by an earlier version
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, (classes + ext + L"\\OpenWithProgids").c_str(), sharedProgId.c_str());
         setValue(appKey + L"\\SupportedTypes", ext.c_str(), L"", REG_NONE);
         setValue(caps + L"\\FileAssociations", ext.c_str(), progId);
     }
