@@ -4,6 +4,12 @@
 
 Fast image viewer for texture artists on Windows. Early prototype.
 
+## Download
+
+**[Download HyperTextureViewer-win64.zip](https://github.com/ghost345/hyper-texture-viewer/releases/latest/download/HyperTextureViewer-win64.zip)** (Windows 10/11, 64-bit). Unzip it anywhere and run `hyper-texture-viewer.exe`; there is no installer. Earlier versions are on the [Releases](https://github.com/ghost345/hyper-texture-viewer/releases) page.
+
+Windows may warn that the app is from an unknown publisher, since the exe is not code-signed: click "More info", then "Run anyway".
+
 ## What works
 
 - Formats: EXR (half, float and uint; scanline and tiled; every compression including DWAA/DWAB, B44, PXR24 and HTJ2K; layers and multipart), DDS (BC1-BC7 including BC6H, uncompressed formats, mip chains, cubemaps, arrays and volumes), Radiance HDR, PNG (8 and 16 bit; APNG: all frames), JPEG, WebP (animations: all frames), AVIF and JPEG XL (8-16 bit, float, HDR in PQ/HLG, BT.2020 and Display P3 converted for display; sequences and animations: all frames), KTX/KTX2 (mip chains, cubemaps, arrays and volumes, Basis Universal transcoded to BC7), QOI, TGA, BMP, PSD (composite and layers, 8 and 16 bit), GIF (all frames).

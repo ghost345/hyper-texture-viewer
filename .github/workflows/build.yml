@@ -4,10 +4,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # Publishing a release on GitHub builds the exe and attaches it to the release as a zip.
+  release:
+    types: [published]
 
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +50,15 @@ jobs:
           path: |
             build/Release/hyper-texture-viewer.exe
             bench.txt
+
+      - name: Attach the exe to the release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path build/Release/hyper-texture-viewer.exe -DestinationPath HyperTextureViewer-win64.zip
+          gh release upload "${{ github.event.release.tag_name }}" HyperTextureViewer-win64.zip --clobber
 
   loader-tests:
     # The loaders are platform independent; run them with sanitizers to catch memory errors in file parsing.
