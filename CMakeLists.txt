@@ -33,6 +33,9 @@ set(WEBP_BUILD_WEBPINFO OFF CACHE BOOL "" FORCE)
 set(WEBP_BUILD_LIBWEBPMUX OFF CACHE BOOL "" FORCE)
 set(WEBP_BUILD_WEBPMUX OFF CACHE BOOL "" FORCE)
 set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+if(EMSCRIPTEN)
+    set(WEBP_USE_THREAD OFF CACHE BOOL "" FORCE)  # pages have no threads without special server headers
+endif()
 FetchContent_Declare(libwebp
     GIT_REPOSITORY https://github.com/webmproject/libwebp.git
     GIT_TAG v1.5.0
@@ -87,6 +90,10 @@ if(HTV_WITH_KTX)
     # Basis Universal is only transcoded to BC formats here; drop the mobile targets from the transcoder.
     target_compile_definitions(ktx_read PRIVATE BASISD_SUPPORT_PVRTC1=0 BASISD_SUPPORT_PVRTC2=0 BASISD_SUPPORT_ATC=0
         BASISD_SUPPORT_ASTC=0 BASISD_SUPPORT_ETC2_EAC_A8=0 BASISD_SUPPORT_ETC2_EAC_RG11=0)
+    if(EMSCRIPTEN)
+        # libktx asks programs that link it for its own JavaScript build's allocator and GL emulation.
+        set_property(TARGET ktx_read PROPERTY INTERFACE_LINK_OPTIONS "")
+    endif()
 endif()
 
 if(HTV_WITH_AVIF)
@@ -217,6 +224,36 @@ if(WIN32)
     if(MINGW)
         target_link_options(hyper-texture-viewer PRIVATE -static -s)
     endif()
+endif()
+
+if(EMSCRIPTEN)
+    # The browser build: the same interface over WebGL 2, as a page for GitHub Pages (web/shell.html).
+    add_library(htv_imgui STATIC
+        third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(htv_imgui PUBLIC third_party/imgui)
+    target_compile_definitions(htv_imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_DEBUG_TOOLS)
+
+    add_executable(hyper-texture-viewer src/web/main_web.cpp src/web/render_web.cpp src/web/files_web.cpp src/view.cpp
+        src/ui.cpp src/ui_widgets.cpp src/ui_bars.cpp src/ui_views.cpp src/ui_panels.cpp src/ui_settings.cpp
+        src/ui_compare.cpp src/ui_frames.cpp src/keys.cpp src/icons.cpp)
+    target_compile_options(hyper-texture-viewer PRIVATE ${htv_options})
+    target_compile_definitions(hyper-texture-viewer PRIVATE HTV_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(hyper-texture-viewer PRIVATE htv_image htv_imgui)
+    set_target_properties(hyper-texture-viewer PROPERTIES OUTPUT_NAME index SUFFIX ".html")
+    target_link_options(hyper-texture-viewer PRIVATE
+        -sUSE_WEBGL2=1 -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB
+        -sSTACK_SIZE=1MB -sENVIRONMENT=web -sDISABLE_EXCEPTION_CATCHING=0
+        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
+        "-sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString,HEAPU8"
+        --shell-file ${CMAKE_SOURCE_DIR}/src/web/shell.html
+        "--embed-file=${CMAKE_SOURCE_DIR}/third_party/fonts/Inter-Regular.ttf@/fonts/Inter-Regular.ttf"
+        "--embed-file=${CMAKE_SOURCE_DIR}/third_party/fonts/Inter-Medium.ttf@/fonts/Inter-Medium.ttf"
+        "--embed-file=${CMAKE_SOURCE_DIR}/third_party/fonts/Inter-SemiBold.ttf@/fonts/Inter-SemiBold.ttf"
+        "--embed-file=${CMAKE_SOURCE_DIR}/third_party/fonts/JetBrainsMono-Regular.ttf@/fonts/JetBrainsMono-Regular.ttf")
+    set_property(TARGET hyper-texture-viewer APPEND PROPERTY LINK_DEPENDS ${CMAKE_SOURCE_DIR}/src/web/shell.html)
+    add_custom_command(TARGET hyper-texture-viewer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/res/htv_128.png $<TARGET_FILE_DIR:hyper-texture-viewer>/icon.png)
 endif()
 
 include(CTest)

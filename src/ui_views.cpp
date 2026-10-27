@@ -178,9 +178,12 @@ std::string relativeTime(int64_t when) {
 void emptyCard() {
     const Theme& t = T();
     const float W = S(480);
+    // The browser has no Windows codecs (TIFF, HEIC) and is built without AVIF.
     const std::string formats =
-        "EXR \xC2\xB7 HDR \xC2\xB7 DDS \xC2\xB7 KTX \xC2\xB7 KTX2 \xC2\xB7 TGA \xC2\xB7 TIFF \xC2\xB7 PSD \xC2\xB7 PNG "
-        "\xC2\xB7 JPG \xC2\xB7 BMP \xC2\xB7 GIF \xC2\xB7 WebP \xC2\xB7 AVIF \xC2\xB7 JXL \xC2\xB7 QOI \xC2\xB7 HEIC";
+        kBrowser ? "EXR \xC2\xB7 HDR \xC2\xB7 DDS \xC2\xB7 KTX \xC2\xB7 KTX2 \xC2\xB7 TGA \xC2\xB7 PSD \xC2\xB7 PNG \xC2\xB7 JPG "
+                   "\xC2\xB7 BMP \xC2\xB7 GIF \xC2\xB7 WebP \xC2\xB7 JXL \xC2\xB7 QOI"
+                 : "EXR \xC2\xB7 HDR \xC2\xB7 DDS \xC2\xB7 KTX \xC2\xB7 KTX2 \xC2\xB7 TGA \xC2\xB7 TIFF \xC2\xB7 PSD \xC2\xB7 PNG "
+                   "\xC2\xB7 JPG \xC2\xB7 BMP \xC2\xB7 GIF \xC2\xB7 WebP \xC2\xB7 AVIF \xC2\xB7 JXL \xC2\xB7 QOI \xC2\xB7 HEIC";
     const std::vector<std::string> formatLines = wrapLines(fontMono, 11, formats, W, " \xC2\xB7 ");
     const float formatsH = S(17) * float(formatLines.size());
 
@@ -248,8 +251,8 @@ void emptyCard() {
             if (rowHovered) dl->AddRectFilled(ra, rb, t.ctlh, S(3));
             const float rcy = y + S(20);
             const ImVec2 ta(x + S(8), std::round(rcy - S(14))), tb(ta.x + S(28), ta.y + S(28));
-            if (ID3D11ShaderResourceView* thumb = recentThumbnail(i))
-                dl->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(thumb))), ta, tb);
+            if (GpuView* thumb = recentThumbnail(i))
+                dl->AddImage(textureRef(thumb), ta, tb);
             else
                 dl->AddRectFilled(ta, tb, t.ctl);
             dl->AddRect(ta, tb, t.bd2, 0, 0, line());
@@ -316,7 +319,8 @@ void errorCard() {
         r.x = b.x + r.gap;
     }
     const bool hasFile = !app.path.empty() && !app.fromClipboard;
-    if (r.button("explorer", Icon::Count, "Show in Explorer", kBordered | (hasFile ? 0 : kDisabled), nullptr, nullptr, 16, 24, 10))
+    if (!kBrowser &&
+        r.button("explorer", Icon::Count, "Show in Explorer", kBordered | (hasFile ? 0 : kDisabled), nullptr, nullptr, 16, 24, 10))
         showInExplorer();
     if (r.button("copyerror", Icon::Copy, nullptr, kBordered, "Copy error text", nullptr, 14, 24)) {
         const std::string text = "Can't read " + utf8(app.path.wstring()) + ": " + app.error;
@@ -685,20 +689,6 @@ struct InfoSection {
     const char* note = nullptr;  // shown on the right of a section without rows
 };
 
-std::string fileTime(const fs::path& path, bool created) {
-    WIN32_FILE_ATTRIBUTE_DATA data;
-    SYSTEMTIME st;
-    FILETIME local;
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) ||
-        !FileTimeToLocalFileTime(created ? &data.ftCreationTime : &data.ftLastWriteTime, &local) ||
-        !FileTimeToSystemTime(&local, &st))
-        return "-";
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
-                  st.wSecond);
-    return buf;
-}
-
 std::string channelText() {
     using G = htv::GpuFormat;
     const htv::FormatInfo& info = htv::formatInfo(app.image.format);
@@ -734,7 +724,7 @@ std::vector<InfoSection> infoSections() {
         file.rows.push_back({"Path", utf8(path.wstring())});
         file.rows.push_back({"Size", formatBytes(size) + " \xC2\xB7 " + formatBytesExact(size)});
         file.rows.push_back({"Modified", fileTime(path, false)});
-        file.rows.push_back({"Created", fileTime(path, true)});
+        if (!kBrowser) file.rows.push_back({"Created", fileTime(path, true)});  // pages are told only the other
     }
     out.push_back(file);
     if (!app.hasImage) {

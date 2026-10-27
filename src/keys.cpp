@@ -4,7 +4,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "web/keycodes.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>

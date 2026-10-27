@@ -1,15 +1,20 @@
-// Viewer state shared by the window code (main.cpp) and the interface (ui.cpp).
+// Viewer state shared by the window code (main.cpp, or web/main_web.cpp in the browser) and the interface (ui.cpp).
 #pragma once
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 #include <d3d11.h>
+#else
+#include "web/keycodes.h"
+#endif
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,6 +23,15 @@
 
 namespace htv {
 
+// The browser build has no window of its own: nothing to keep on top, fade, let clicks through or register with
+// Explorer, and no folder to look into besides the files the page was given.
+#ifdef __EMSCRIPTEN__
+constexpr bool kBrowser = true;
+#else
+constexpr bool kBrowser = false;
+#endif
+
+#ifdef _WIN32
 template <class T>
 class Com {
 public:
@@ -50,10 +64,22 @@ private:
     T* p_ = nullptr;
 };
 
+// A texture the shaders and the interface read.
+using GpuView = ID3D11ShaderResourceView;
+using TextureRef = Com<ID3D11ShaderResourceView>;
+#else
+// A WebGL texture (web/render_web.cpp deletes it).
+struct GpuView {
+    unsigned texture = 0;
+    ~GpuView();
+};
+using TextureRef = std::unique_ptr<GpuView>;
+#endif
+
 // An image's texture on the GPU: one, or for an image larger than a texture can be (or than one should be), a grid
 // of tiles, each drawn in a pass of its own.
 struct GpuTile {
-    Com<ID3D11ShaderResourceView> srv;
+    TextureRef srv;
     uint32_t x = 0, y = 0, width = 0, height = 0;  // the tile's area of the image
 };
 struct GpuImage {
@@ -73,7 +99,7 @@ struct CompareSlot {
     std::filesystem::path path;
     htv::Image image;  // size, format and description only: the pixels live in `srv`
     GpuImage srv;
-    Com<ID3D11ShaderResourceView> thumbnail;
+    TextureRef thumbnail;
     int mips = 1;
     uint64_t fileSize = 0;
     bool loading = false;
@@ -93,11 +119,12 @@ enum class ColorFormat { Html, Hex, DelphiHex, VbHex, Rgb, RgbFloat, Hsv, Hsl, L
 struct RecentFile {
     std::filesystem::path path;
     int64_t openedAt = 0;  // Unix time
-    Com<ID3D11ShaderResourceView> thumbnail;
+    TextureRef thumbnail;
     bool thumbnailTried = false;
 };
 
 struct App {
+#ifdef _WIN32
     HWND hwnd = nullptr;
     Com<ID3D11Device> device;
     Com<ID3D11DeviceContext> context;
@@ -108,7 +135,9 @@ struct App {
     Com<ID3D11Texture2D> layer;
     bool rtvOnLayer = false;
     bool layeredStyle = false;  // WS_EX_LAYERED is set
+#endif
     std::string layerError;     // why the window couldn't be made translucent, shown under the opacity slider
+#ifdef _WIN32
     Com<ID3D11VertexShader> vs;
     Com<ID3D11PixelShader> ps;
     Com<ID3D11PixelShader> psRead;  // copies texels into a float target for the pixel readout
@@ -118,10 +147,13 @@ struct App {
     Com<ID3D11BlendState> blendFactor;  // Compare: Blend mode draws the second image at the blend factor
     Com<ID3D11Buffer> constants;
     Com<ID3D11SamplerState> trilinear;
+#endif
     GpuImage srv;
+#ifdef _WIN32
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_10_0;
     bool warp = false;
     const char* swapEffect = "";
+#endif
     int textureMips = 1;  // mip levels on the GPU, including generated ones
 
     // The open file and its folder.
@@ -249,11 +281,11 @@ struct App {
 
     // Panning.
     bool dragging = false;
-    POINT dragStart{};
+    float dragStartX = 0.0f, dragStartY = 0.0f;
     float dragOriginX = 0.0f, dragOriginY = 0.0f;
 
     // Benchmark mode: open the file, draw one frame, write timings and quit.
-    std::wstring benchPath;
+    std::filesystem::path benchPath;
     double tStart = 0, tDevice = 0, tLoad = 0, tUpload = 0;
     bool firstFrameDone = false;
 };
@@ -269,10 +301,13 @@ void reloadFile();
 void cancelLoading();
 void pasteFromClipboard();
 void copyFilePath();
+// When a file was created or last written, in local time as "2026-10-27 14:05:09"; "-" when unknown.
+std::string fileTime(const std::filesystem::path& path, bool created);
 void showInExplorer();
 void openRecent(int index);
-ID3D11ShaderResourceView* recentThumbnail(int index);
+GpuView* recentThumbnail(int index);
 void chooseCustomBackground();
+void chooseViewportColor();  // Settings: the colour around the image
 bool pickColor(float rgb[3]);  // the Windows colour dialog; false when cancelled
 void autoRange();
 // Per-channel statistics of the shown image for the Histogram panel, computed once when first needed.
@@ -297,6 +332,10 @@ void setOpacity(float opacity);
 // Clicks go through the window to whatever is below; Ctrl+Shift+T anywhere turns it off again.
 void setClickThrough(bool on);
 void toggleMaximize();
+void minimizeWindow();
+bool windowMaximized();
+void quitApp();
+void openDefaultApps();  // Windows Settings > Default Apps, after registerFileTypes
 void toggleBars();
 void imageSizeOnScreen(float& w, float& h);  // after rotation, in image pixels; one copy when tiling
 // The area the image covers in window pixels: the image itself, or the 3x3 tiling preview around it.
@@ -327,15 +366,16 @@ void selectLayer(int index);  // one-at-a-time kinds: shows that layer instead
 // when it already was alone.
 void setLayerVisible(int index, bool visible, bool solo = false);
 // A 64 px thumbnail of a layer, made on first use.
-ID3D11ShaderResourceView* layerThumbnail(int index);
+GpuView* layerThumbnail(int index);
 // Compare: slot 0 is B, 1 is C. Loads in the background; an empty path clears the slot.
 void loadCompareSlot(int slot, const std::filesystem::path& path);
 bool pickImageFile(std::filesystem::path& out);  // the Open dialog; false when cancelled
+void pickCompareFile(int slot);  // the Open dialog for a Compare slot; loads the file chosen
 void updateCompareStats();  // recomputes the pair's difference statistics when the images or the pair changed
 // The images Split shows, left to right: 0 for A, 1 for B, 2 for C. Returns how many.
 int compareLayers(int* out);
 // A thumbnail of A (slot -1), B (0) or C (1), as the view shows it.
-ID3D11ShaderResourceView* compareThumbnail(int slot);
+GpuView* compareThumbnail(int slot);
 double nowMs();
 
 }  // namespace htv

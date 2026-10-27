@@ -1,0 +1,47 @@
+name: web
+
+# Builds the browser version with Emscripten and, on main, publishes it to GitHub Pages.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.13
+
+      - name: Build
+        run: |
+          emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHTV_WITH_AVIF=OFF -DBUILD_TESTING=OFF
+          cmake --build build --parallel 4 --target hyper-texture-viewer
+          mkdir site
+          cp build/index.html build/index.js build/index.wasm build/icon.png site/
+          ls -l site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

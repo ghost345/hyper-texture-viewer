@@ -8,6 +8,8 @@ Fast image viewer for texture artists on Windows. Early prototype.
 
 **[Download HyperTextureViewer-win64.zip](https://github.com/ghost345/hyper-texture-viewer/releases/latest/download/HyperTextureViewer-win64.zip)** (Windows 10/11, 64-bit). Unzip it anywhere and run `hyper-texture-viewer.exe`; there is no installer. Earlier versions are on the [Releases](https://github.com/ghost345/hyper-texture-viewer/releases) page.
 
+**[Open in the browser](https://ghost345.github.io/hyper-texture-viewer/)**: the same viewer without installing anything (Chrome, Edge, Firefox or Safari with WebGL 2). Files are opened locally and never uploaded. The browser version has no TIFF, HEIC or AVIF, and no window options such as always on top.
+
 Windows may warn that the app is from an unknown publisher, since the exe is not code-signed: click "More info", then "Run anyway".
 
 ## What works
@@ -66,6 +68,15 @@ ctest --test-dir build -C Release
 ```
 
 MinGW-w64 works too and produces a static exe. The app icon is `res/htv.ico`, made by `res/make_icon.py` (from `res/eye_contours.json`) with every size drawn on its own pixel grid, and the per-format file icons in `res/filetypes` by `res/make_filetype_icons.py`: change the scripts, not the .ico files. GitHub Actions builds every push, runs the tests and measures start-up time on sample images (`--bench <file>` writes timings and exits after the first frame).
+
+The browser version builds with Emscripten (WebGL 2); the `web` workflow publishes it to GitHub Pages from main:
+
+```
+emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release -DHTV_WITH_AVIF=OFF
+cmake --build build-web --target hyper-texture-viewer
+```
+
+Serve `build-web` over HTTP (for example `python -m http.server`) and open `index.html`.
 
 ## Third-party code
 

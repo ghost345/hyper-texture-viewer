@@ -18,17 +18,15 @@ void uiInit() {
     io.LogFilename = nullptr;
     io.ConfigWindowsMoveFromTitleBarOnly = false;
 
-    // Fonts are linked into the exe as resources (resources.rc).
+    // Fonts are linked into the program (resources.rc, or embedded files in the browser).
     auto load = [&](int id, float* emFactor) -> ImFont* {
-        HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10));  // RT_RCDATA
-        HGLOBAL mem = res ? LoadResource(nullptr, res) : nullptr;
-        void* data = mem ? LockResource(mem) : nullptr;
-        if (!data) return nullptr;
-        const DWORD size = SizeofResource(nullptr, res);
+        const void* data = nullptr;
+        size_t size = 0;
+        if (!fontResource(id, data, size)) return nullptr;
         if (emFactor) *emFactor = lineHeightInEm(static_cast<const uint8_t*>(data), size);
         ImFontConfig cfg;
         cfg.FontDataOwnedByAtlas = false;
-        return io.Fonts->AddFontFromMemoryTTF(data, int(size), 13.0f, &cfg);
+        return io.Fonts->AddFontFromMemoryTTF(const_cast<void*>(data), int(size), 13.0f, &cfg);
     };
     fontRegular = load(101, &emRegular);
     fontMedium = load(102, nullptr);
@@ -198,7 +196,7 @@ void runAction(Action a) {
         case Action::ClickThrough: setClickThrough(!app.clickThrough); break;
         case Action::Settings: app.showSettings = !app.showSettings; break;
         case Action::Help: app.showHelp = !app.showHelp; break;
-        case Action::Quit: DestroyWindow(app.hwnd); break;
+        case Action::Quit: quitApp(); break;
         case Action::Count: break;
     }
 }
@@ -229,7 +227,8 @@ bool uiKeyDown(int vk) {
         else if (app.showFrames) app.showFrames = false;
         else if (app.showInfo) app.showInfo = false;
         else if (app.showHistogram) app.showHistogram = false;
-        else DestroyWindow(app.hwnd);
+        else if (!kBrowser) quitApp();  // a browser tab is closed by the browser
+        else return false;
         return true;
     }
     const Action a = actionFor(pressed);

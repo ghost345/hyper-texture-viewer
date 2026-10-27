@@ -1,6 +1,7 @@
 // Interface building blocks: tokens, text, tooltips, menus and controls drawn in the design's style.
 
 #include "ui_internal.h"
+#include "viewer.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -128,13 +129,7 @@ std::string formatBytesExact(uint64_t n) {
     return out + " B";
 }
 
-std::string utf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(size_t(n), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), out.data(), n, nullptr, nullptr);
-    return out;
-}
+std::string utf8(const std::wstring& w) { return narrow(w); }
 
 std::string fileName() {
     if (app.fromClipboard && !app.loading && app.error.empty()) return "Clipboard";
@@ -508,13 +503,19 @@ void tipArea(const char* id, ImRect r, const char* text, const char* key, bool a
 }
 
 float mouseClientX() {
+#ifdef _WIN32
     POINT p;
-    if (!GetCursorPos(&p) || !ScreenToClient(app.hwnd, &p)) return ImGui::GetIO().MousePos.x;
-    return float(p.x);
+    if (GetCursorPos(&p) && ScreenToClient(app.hwnd, &p)) return float(p.x);
+#endif
+    return ImGui::GetIO().MousePos.x;
 }
 
 bool leftButtonHeld() {
+#ifdef _WIN32
     return GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON) & 0x8000;
+#else
+    return ImGui::IsMouseDown(ImGuiMouseButton_Left);  // the page sees the button even outside it while dragging
+#endif
 }
 
 float snapPosition(float p, std::initializer_list<float> targets, float widthPx) {

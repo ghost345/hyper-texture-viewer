@@ -62,8 +62,8 @@ void slotRow(ImDrawList* dl, float x0, float x1, float y, int i) {
              t.tx, kSlotNames[i]);
 
     const ImVec2 ta(bb.x + S(8), std::round(cy - S(13))), tb(ta.x + S(26), ta.y + S(26));
-    if (ID3D11ShaderResourceView* thumb = compareThumbnail(i - 1))
-        dl->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(thumb))), ta, tb);
+    if (GpuView* thumb = compareThumbnail(i - 1))
+        dl->AddImage(textureRef(thumb), ta, tb);
     else dl->AddRectFilled(ta, tb, t.bar2);
     dl->AddRect(ta, tb, t.bd2, 0, 0, line());
 
@@ -117,10 +117,7 @@ void slotRow(ImDrawList* dl, float x0, float x1, float y, int i) {
         endMenu();
     }
     ImGui::PopID();
-    if (choose) {
-        std::filesystem::path p;
-        if (pickImageFile(p)) chosen = p;
-    }
+    if (choose) pickCompareFile(i - 1);
     if (clear) loadCompareSlot(i - 1, {});
     else if (!chosen.empty()) loadCompareSlot(i - 1, chosen);
 }

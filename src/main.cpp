@@ -87,21 +87,6 @@ double lastInputMs = 0;  // frames keep coming for a moment after input, for hov
 bool redraw = false;     // something changed outside of input, e.g. a load finished
 bool spaceDown = false;  // Space + drag pans, like the left button alone
 
-void layout() {
-    const float top = app.showBars ? uiTopBarHeight() : 0.0f;
-    const float bottom = app.showBars ? uiBottomBarHeight() : 0.0f;
-    // The rulers take a strip off the top and left of the image area.
-    const float ruler = app.ruler && app.showBars ? std::round(18 * app.scale) : 0.0f;
-    app.vpX = ruler;
-    app.vpY = top + ruler;
-    app.vpW = std::max(1.0f, float(app.winW) - ruler);
-    app.vpH = std::max(1.0f, float(app.winH) - top - bottom - ruler);
-}
-
-bool inViewport(int x, int y) {
-    return x >= app.vpX && y >= app.vpY && x < app.vpX + app.vpW && y < app.vpY + app.vpH;
-}
-
 // The app icon at the two sizes Windows shows it in at this DPI. Each size in htv.ico is drawn on its own pixel
 // grid, so the small one is loaded at its size rather than shrunk from the big one.
 HICON loadAppIcon(int metric, UINT dpi) {
@@ -141,7 +126,8 @@ int resizeBorder() { return int(std::round(5 * app.scale)); }
 
 void startDrag(LPARAM lp) {
     app.dragging = true;
-    app.dragStart = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    app.dragStartX = float(GET_X_LPARAM(lp));
+    app.dragStartY = float(GET_Y_LPARAM(lp));
     app.dragOriginX = app.originX;
     app.dragOriginY = app.originY;
     SetCapture(app.hwnd);
@@ -371,8 +357,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             app.mouseX = GET_X_LPARAM(lp);
             app.mouseY = GET_Y_LPARAM(lp);
             if (app.dragging) {
-                app.originX = app.dragOriginX + float(app.mouseX - app.dragStart.x);
-                app.originY = app.dragOriginY + float(app.mouseY - app.dragStart.y);
+                app.originX = app.dragOriginX + float(app.mouseX) - app.dragStartX;
+                app.originY = app.dragOriginY + float(app.mouseY) - app.dragStartY;
                 app.fit = false;
             }
             return 0;
@@ -437,32 +423,27 @@ void enableDpiAwareness() {
 
 void requestRedraw() { redraw = true; }
 
-void relayout() {
-    layout();
-    if (app.fit) fitToWindow();
+bool fontResource(int id, const void*& data, size_t& size) {
+    HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10));  // RT_RCDATA
+    HGLOBAL mem = res ? LoadResource(nullptr, res) : nullptr;
+    data = mem ? LockResource(mem) : nullptr;
+    size = data ? SizeofResource(nullptr, res) : 0;
+    return data != nullptr;
 }
 
-void toggleRuler() {
-    app.ruler = !app.ruler;
-    relayout();
+void quitApp() { DestroyWindow(app.hwnd); }
+
+void minimizeWindow() { ShowWindow(app.hwnd, SW_MINIMIZE); }
+
+bool windowMaximized() { return IsZoomed(app.hwnd) != FALSE; }
+
+void openDefaultApps() {
+    // Windows 11 opens the app's own page; older versions ignore the parameter and show the list.
+    ShellExecuteW(app.hwnd, L"open", L"ms-settings:defaultapps?registeredAppUser=Hyper%20Texture%20Viewer", nullptr,
+                  nullptr, SW_SHOWNORMAL);
 }
 
 // ---- actions ----
-
-bool isSrgbFormat(htv::GpuFormat f) {
-    using G = htv::GpuFormat;
-    return f == G::RGBA8Srgb || f == G::BGRA8Srgb || f == G::BC1Srgb || f == G::BC2Srgb || f == G::BC3Srgb ||
-           f == G::BC7Srgb;
-}
-
-bool isFloatFormat(const htv::FormatInfo& info) { return info.linear && !isSrgbFormat(info.format); }
-
-bool isHighPrecision(const htv::Image& image) {
-    using G = htv::GpuFormat;
-    const G f = image.format;
-    return isFloatFormat(htv::formatInfo(f)) || f == G::RGBA16Unorm || f == G::RG16Unorm || f == G::R16Unorm ||
-           f == G::RGB10A2;
-}
 
 bool pickImageFile(std::filesystem::path& out) {
     Com<IFileOpenDialog> dialog;
@@ -497,119 +478,9 @@ void showOpenDialog() {
     if (pickImageFile(path)) openPath(path);
 }
 
-void imageSizeOnScreen(float& w, float& h) {
-    w = float(app.rotation & 1 ? app.image.height : app.image.width);
-    h = float(app.rotation & 1 ? app.image.width : app.image.height);
-}
-
-// The origin is always the original image; tiling adds a copy on every side of it.
-void shownArea(float& x0, float& y0, float& x1, float& y1) {
-    float w, h;
-    imageSizeOnScreen(w, h);
-    const int around = app.tiling != Tiling::Off ? 1 : 0;
-    x0 = app.originX - around * w * app.zoom;
-    y0 = app.originY - around * h * app.zoom;
-    x1 = app.originX + (1 + around) * w * app.zoom;
-    y1 = app.originY + (1 + around) * h * app.zoom;
-}
-
-void fitToWindow() {
-    if (!app.hasImage) return;
-    float w, h;
-    imageSizeOnScreen(w, h);
-    // The design leaves a 16 px margin around a fitted image; the clean view fills the window.
-    const float margin = app.showBars ? std::round(16 * app.scale) : 0.0f;
-    float z = std::min((app.vpW - 2 * margin) / w, (app.vpH - 2 * margin) / h);
-    if (z > 1.0f) z = std::floor(z);  // small textures grow in whole steps so pixels stay square
-    app.zoom = std::max(z, 1.0f / 256.0f);
-    app.originX = app.vpX + std::round((app.vpW - w * app.zoom) * 0.5f);
-    app.originY = app.vpY + std::round((app.vpH - h * app.zoom) * 0.5f);
-}
-
-void zoomAt(float newZoom, float x, float y) {
-    if (!app.hasImage) return;
-    newZoom = std::clamp(newZoom, 1.0f / 256.0f, 256.0f);
-    app.originX = std::round(x - (x - app.originX) * newZoom / app.zoom);
-    app.originY = std::round(y - (y - app.originY) * newZoom / app.zoom);
-    app.zoom = newZoom;
-    app.fit = false;
-}
-
-void zoomCentered(float newZoom) { zoomAt(newZoom, app.vpX + app.vpW * 0.5f, app.vpY + app.vpH * 0.5f); }
-
-void rotate(int quarterTurns) {
-    // Keep the image centre where it is on screen.
-    float w, h;
-    imageSizeOnScreen(w, h);
-    const float cx = app.originX + w * app.zoom * 0.5f, cy = app.originY + h * app.zoom * 0.5f;
-    app.rotation = (app.rotation + quarterTurns + 4) % 4;
-    if (app.fit) {
-        fitToWindow();
-        return;
-    }
-    imageSizeOnScreen(w, h);
-    app.originX = std::round(cx - w * app.zoom * 0.5f);
-    app.originY = std::round(cy - h * app.zoom * 0.5f);
-}
-
-bool windowToPixel(float wx, float wy, int& x, int& y) {
-    if (!app.hasImage) return false;
-    float x0, y0, x1, y1;
-    shownArea(x0, y0, x1, y1);
-    if (wx < x0 || wy < y0 || wx >= x1 || wy >= y1) return false;
-    const int sw = int(app.rotation & 1 ? app.image.height : app.image.width);
-    const int sh = int(app.rotation & 1 ? app.image.width : app.image.height);
-    const int u = int(std::floor((wx - x0) / app.zoom)), v = int(std::floor((wy - y0) / app.zoom));
-    int du = std::min(u, 3 * sw - 1) % sw, dv = std::min(v, 3 * sh - 1) % sh;
-    if (app.flipH) du = sw - 1 - du;
-    if (app.flipV) dv = sh - 1 - dv;
-    switch (app.rotation) {
-        case 0: x = du; y = dv; break;
-        case 1: x = dv; y = sw - 1 - du; break;
-        case 2: x = sw - 1 - du; y = sh - 1 - dv; break;
-        default: x = sh - 1 - dv; y = du; break;
-    }
-    return true;
-}
-
-void imageRectToWindow(float x0, float y0, float x1, float y1, float& wx0, float& wy0, float& wx1, float& wy1) {
-    const float sw = float(app.rotation & 1 ? app.image.height : app.image.width);
-    const float sh = float(app.rotation & 1 ? app.image.width : app.image.height);
-    // The inverse of windowToPixel for each corner, on continuous coordinates.
-    auto toShown = [&](float x, float y, float& u, float& v) {
-        switch (app.rotation) {
-            case 0: u = x; v = y; break;
-            case 1: u = sw - y; v = x; break;
-            case 2: u = sw - x; v = sh - y; break;
-            default: u = y; v = sh - x; break;
-        }
-        if (app.flipH) u = sw - u;
-        if (app.flipV) v = sh - v;
-    };
-    float u0, v0, u1, v1;
-    toShown(x0, y0, u0, v0);
-    toShown(x1, y1, u1, v1);
-    wx0 = app.originX + std::min(u0, u1) * app.zoom;
-    wx1 = app.originX + std::max(u0, u1) * app.zoom;
-    wy0 = app.originY + std::min(v0, v1) * app.zoom;
-    wy1 = app.originY + std::max(v0, v1) * app.zoom;
-}
-
-void showMatchRegion(int index) {
-    if (index < 0 || index >= int(app.matchRegions.boxes.size())) return;
-    app.matchRegion = index;
-    const htv::MaskRegion& r = app.matchRegions.boxes[size_t(index)];
-    float x0, y0, x1, y1;
-    imageRectToWindow(float(r.x0), float(r.y0), float(r.x1), float(r.y1), x0, y0, x1, y1);
-    // Zoom out until the region takes at most 80% of the viewport; never zoom in.
-    const float room = std::min(app.vpW * 0.8f / std::max(x1 - x0, 1.0f), app.vpH * 0.8f / std::max(y1 - y0, 1.0f));
-    if (room < 1.0f) {
-        zoomAt(app.zoom * room, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
-        imageRectToWindow(float(r.x0), float(r.y0), float(r.x1), float(r.y1), x0, y0, x1, y1);
-    }
-    app.originX += std::round(app.vpX + app.vpW * 0.5f - (x0 + x1) * 0.5f);
-    app.originY += std::round(app.vpY + app.vpH * 0.5f - (y0 + y1) * 0.5f);
-    app.fit = false;
+void pickCompareFile(int slot) {
+    std::filesystem::path path;
+    if (pickImageFile(path)) loadCompareSlot(slot, path);
 }
 
 void setTopmost(bool on) {
@@ -640,14 +511,6 @@ void setClickThrough(bool on) {
     applyLayering();
 }
 
-void applyInterfaceScale() {
-    app.scale = app.interfaceScale > 0 ? app.interfaceScale : app.dpiScale;
-    uiSetScale(app.scale);
-    layout();
-    if (app.fit && app.hasImage) fitToWindow();
-    redraw = true;
-}
-
 void applyTheme() {
     bool dark = app.themeMode != 1;
     if (app.themeMode == 2) {
@@ -661,14 +524,6 @@ void applyTheme() {
 }
 
 void toggleMaximize() { ShowWindow(app.hwnd, IsZoomed(app.hwnd) ? SW_RESTORE : SW_MAXIMIZE); }
-
-void toggleBars() {
-    app.showBars = !app.showBars;
-    const float top = app.vpY;
-    layout();
-    if (app.fit) fitToWindow();
-    else app.originY += app.vpY - top;  // the image stays put on screen
-}
 
 }  // namespace htv
 

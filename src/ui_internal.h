@@ -54,6 +54,14 @@ std::string formatZoom(float zoom);
 std::string formatBytes(uint64_t n);
 std::string formatBytesExact(uint64_t n);  // "1 398 256 B"
 std::string utf8(const std::wstring& w);
+// A texture for ImGui to draw: Direct3D takes the view itself, WebGL the texture's name.
+inline ImTextureRef textureRef(GpuView* view) {
+#ifdef _WIN32
+    return ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(view)));
+#else
+    return ImTextureRef(ImTextureID(view->texture));
+#endif
+}
 std::string fileName();  // the current file's name, or "Clipboard"
 std::string rgbaOrder(std::string text);  // EXR lists channels alphabetically: "A,B,G,R" reads as "RGBA"
 
