@@ -581,7 +581,7 @@ void moreMenuItems(const TopLayout& L) {
         toggleFramesOrLayers();
     if (item(Tool::Compare, 4) && menuItem({"Compare", keyText(Action::Compare), app.compare, !off, false, Icon::Compare}))
         toggleCompare();
-    if (item(Tool::OnTop, 5) && menuItem({"Always on top", keyText(Action::AlwaysOnTop), app.topmost, true, false, Icon::OnTop}))
+    if (!kBrowser && item(Tool::OnTop, 5) && menuItem({"Always on top", keyText(Action::AlwaysOnTop), app.topmost, true, false, Icon::OnTop}))
         setTopmost(!app.topmost);
     if (item(Tool::Settings, 6) && menuItem({"Settings", keyText(Action::Settings), app.showSettings, true, false, Icon::Settings}))
         app.showSettings = !app.showSettings;
@@ -605,7 +605,8 @@ void compareGroup(Row& r, const TopLayout& L) {
     }
 }
 
-void rightGroup(Row& r, const TopLayout& L) {
+// Always on top, Transparent to mouse and opacity: what the window does on the desktop.
+void windowTools(Row& r, const TopLayout& L) {
     if (L.shows(Tool::OnTop) &&
         r.button("ontop", Icon::OnTop, nullptr, app.topmost ? kOn : 0, "Always on top", keyText(Action::AlwaysOnTop)))
         setTopmost(!app.topmost);
@@ -627,6 +628,10 @@ void rightGroup(Row& r, const TopLayout& L) {
                                "Window opacity", "Alt+Wheel"),
                       "opacity menu");
     if (!r.measure) opacityPopup(ImVec2(r.x - r.gap, r.cy + S(16)));
+}
+
+void rightGroup(Row& r, const TopLayout& L) {
+    if (!kBrowser) windowTools(r, L);
     if (L.shows(Tool::Settings) &&
         r.button("settings", Icon::Settings, nullptr, app.showSettings ? kOn : 0, "Settings", keyText(Action::Settings)))
         app.showSettings = !app.showSettings;
@@ -639,10 +644,11 @@ void rightGroup(Row& r, const TopLayout& L) {
 
 // Minimise, maximise and close (.wc): 40 wide, the bar's height, no gap between them.
 float windowButtons(Row& r) {
+    if (kBrowser) return 0;  // the browser has its own
     const float w = S(40), h = topBarH - line();
     if (r.measure) return 3 * w;
     const Theme& t = T();
-    const Icon icons[3] = {Icon::Minimize, IsZoomed(app.hwnd) ? Icon::Restore : Icon::Maximize, Icon::Close};
+    const Icon icons[3] = {Icon::Minimize, windowMaximized() ? Icon::Restore : Icon::Maximize, Icon::Close};
     const char* ids[3] = {"min", "max", "close"};
     for (int i = 0; i < 3; ++i) {
         const ImVec2 a(r.x + i * w, 0), b(a.x + w, h);
@@ -657,9 +663,9 @@ float windowButtons(Row& r) {
         drawIcon(r.dl, icons[i], ImVec2(a.x + std::round((w - S(14)) * 0.5f), std::round((h - S(14)) * 0.5f)), S(14), fg, 1.2f);
         r.hole(ImRect(a, b));
         if (pressed) {
-            if (i == 0) ShowWindow(app.hwnd, SW_MINIMIZE);
+            if (i == 0) minimizeWindow();
             else if (i == 1) toggleMaximize();
-            else PostMessageW(app.hwnd, WM_CLOSE, 0, 0);
+            else quitApp();
         }
     }
     return 3 * w;

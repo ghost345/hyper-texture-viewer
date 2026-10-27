@@ -26,39 +26,12 @@
 #include "imgui.h"
 #include "keys.h"
 #include "resource.h"
+#include "ui.h"
 #include "wic_loader.h"
 
 namespace fs = std::filesystem;
 
 namespace htv {
-
-enum class OpenMode { New, Browse, Reload };
-
-// When a file was last written, to notice it changing on disk.
-struct FileStamp {
-    uint64_t writeTime = 0, size = 0;
-    bool exists = false;
-    bool operator==(const FileStamp& o) const { return writeTime == o.writeTime && size == o.size && exists == o.exists; }
-    bool operator!=(const FileStamp& o) const { return !(*this == o); }
-};
-
-struct LoadedFile {
-    int generation = 0;
-    OpenMode mode = OpenMode::New;
-    fs::path path;
-    bool clipboard = false;
-    bool ok = false;
-    std::string error;
-    std::string format;  // extension in capitals, for the error card
-    htv::Image image;
-    htv::ImageStats stats;
-    bool channelStats = false;  // the Histogram panel is open: per-channel statistics too
-    bool alpha = false;
-    uint64_t fileSize = 0;
-    FileStamp stamp;
-    double decodeMs = 0;
-    int compareSlot = -1;  // a Compare slot's file (0 B, 1 C) instead of the shown image
-};
 
 namespace {
 
@@ -470,7 +443,6 @@ fs::path settingsFile() {
 }
 
 constexpr int kThumbnailSize = 64;
-constexpr int kMaxRecent = 10;
 
 fs::path thumbnailFile(const fs::path& image) {
     const fs::path dir = folderIn(L"LOCALAPPDATA");
@@ -528,6 +500,20 @@ void showResult(const std::string& error) {
 
 }  // namespace
 
+std::string fileTime(const fs::path& path, bool created) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    SYSTEMTIME st;
+    FILETIME local;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) ||
+        !FileTimeToLocalFileTime(created ? &data.ftCreationTime : &data.ftLastWriteTime, &local) ||
+        !FileTimeToSystemTime(&local, &st))
+        return "-";
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+                  st.wSecond);
+    return buf;
+}
+
 bool isSupported(const fs::path& p) {
     const std::string ext = lowerExtension(p);
     const auto& wic = htv::wicExtensions();
@@ -575,38 +561,7 @@ void finishLoad(LoadedFile* raw) {
     }
     shownStamp = f->stamp;
     shownFormat = f->format;
-    app.image = std::move(f->image);
-    app.stats = std::move(f->stats);
-    app.imageAlpha = f->alpha;
-    app.hasImage = true;
-    ++app.fileGeneration;
-    app.frameIndex = 0;
-    app.frameShownMs = nowMs();
-    if (!isAnimation() && !hasLayers()) app.showFrames = false;
-    app.fromClipboard = f->clipboard;
-    app.shownPath = f->path;
-    app.fileSize = f->fileSize;
-    app.error.clear();
-    app.normalHint = htv::missingNormalZ(app.image, f->clipboard ? std::string() : narrow(f->path.filename().wstring()));
-    if (f->mode != OpenMode::Reload) app.normalHintDismissed = false;
-    if (f->mode != OpenMode::Reload) app.dataIsLinear = isFloatFormat(htv::formatInfo(app.image.format));
-    if (app.forcedMip >= app.textureMips) app.forcedMip = -1;
-    if (app.pixelLocked) {
-        app.lockedX = std::min(app.lockedX, int(app.image.width) - 1);
-        app.lockedY = std::min(app.lockedY, int(app.image.height) - 1);
-    }
-    // A reload keeps zoom and position; a new file is fitted when Fit is on, or always when Settings says so.
-    if (f->mode != OpenMode::Reload && !app.keepView) app.fit = true;
-    if (app.fit && !(f->mode == OpenMode::Reload && sameSize)) fitToWindow();
-    if (f->mode != OpenMode::Reload && !app.keepExposure) {
-        app.exposure = 0.0f;
-        app.blackPoint = 0.0f;
-        app.whitePoint = 1.0f;
-    }
-    if (f->mode == OpenMode::Reload) {
-        app.toastUntilMs = nowMs() + 4000.0;
-        app.toastName = narrow(f->path.filename().wstring());
-    }
+    adoptLoaded(*f, sameSize);
     const std::wstring title = f->clipboard ? std::wstring(L"Clipboard") : f->path.filename().wstring();
     SetWindowTextW(app.hwnd, (title + L" - Hyper Texture Viewer").c_str());  // taskbar name
     if (!f->clipboard && app.benchPath.empty()) {
@@ -674,112 +629,6 @@ void compareSlotLoaded(LoadedFile* raw) {
     s.generation = ++compareGeneration[slot];
     if (f->path != app.shownPath) cacheInsert(std::move(f));
     requestRedraw();
-}
-
-bool isAnimation() { return app.hasImage && app.image.frames.size() > 1; }
-
-void showFrame(int index) {
-    if (!isAnimation()) return;
-    const int n = int(app.image.frames.size());
-    index = ((index % n) + n) % n;
-    std::string error;
-    if (!uploadSurface(app.image.frames[size_t(index)].surface, app.image.format, error)) return;
-    app.frameIndex = index;
-    app.frameShownMs = nowMs();
-    if (app.pixelLocked) app.imageAlpha = app.imageAlpha;  // readouts refresh on the new generation
-    requestRedraw();
-}
-
-bool hasLayers() {
-    if (!app.hasImage) return false;
-    const htv::Image& img = app.image;
-    return img.layers.size() > 1 || (img.layerKind == htv::LayerKind::PsdLayers && !img.layers.empty());
-}
-
-// The image's pixels changed in place (another layer, or the layers composited again): upload them and
-// refresh what was worked out from them.
-static void layerChanged(bool sizeChanged) {
-    std::string error;
-    if (!uploadImage(app.image, error)) return;
-    if (isHighPrecision(app.image) || app.stats.channelsValid) app.stats = htv::computeStats(app.image, app.stats.channelsValid);
-    else app.stats = htv::ImageStats();
-    app.imageAlpha = htv::hasTranslucentPixels(app.image);
-    app.normalHint = app.fromClipboard ? std::string() : htv::missingNormalZ(app.image, narrow(app.shownPath.filename().wstring()));
-    if (app.forcedMip >= app.textureMips) app.forcedMip = -1;
-    if (app.pixelLocked) {
-        app.lockedX = std::min(app.lockedX, int(app.image.width) - 1);
-        app.lockedY = std::min(app.lockedY, int(app.image.height) - 1);
-    }
-    if (sizeChanged && app.fit) fitToWindow();
-    requestRedraw();
-}
-
-void selectLayer(int index) {
-    if (!hasLayers()) return;
-    const int n = int(app.image.layers.size());
-    index = ((index % n) + n) % n;
-    const uint32_t w = app.image.width, h = app.image.height;
-    if (!htv::showLayer(app.image, index)) return;
-    layerChanged(w != app.image.width || h != app.image.height);
-}
-
-void setLayerVisible(int index, bool visible, bool solo) {
-    htv::Image& img = app.image;
-    if (!hasLayers() || img.layerKind != htv::LayerKind::PsdLayers || index < 0 || index >= int(img.layers.size())) return;
-    // Alt+click, as in Photoshop: the layer alone (with the groups around it and what is inside it), and the
-    // same again puts every eye back as it was.
-    static std::vector<bool> beforeSolo, soloState;
-    static int soloIndex = -1;
-    static fs::path soloPath;
-    auto state = [&] {
-        std::vector<bool> v;
-        for (const htv::Layer& l : img.layers) v.push_back(l.visible);
-        return v;
-    };
-    auto contains = [&](int outer, int i) {  // `i` is `outer` or inside it
-        for (int p = i; p >= 0; p = img.layers[size_t(p)].parent)
-            if (p == outer) return true;
-        return false;
-    };
-    if (solo && soloPath == app.shownPath && soloIndex == index && state() == soloState && beforeSolo.size() == img.layers.size()) {
-        for (size_t i = 0; i < img.layers.size(); ++i) img.layers[i].visible = beforeSolo[i];
-        soloIndex = -1;
-    } else if (solo) {
-        beforeSolo = state();
-        for (int i = 0; i < int(img.layers.size()); ++i) {
-            htv::Layer& l = img.layers[size_t(i)];
-            if (contains(i, index)) l.visible = true;   // the layer and the groups around it
-            else if (!contains(index, i)) l.visible = false;  // inside it: as they were
-        }
-        soloIndex = index;
-        soloPath = app.shownPath;
-        soloState = state();
-    } else {
-        img.layers[size_t(index)].visible = visible;
-    }
-    if (htv::compositeLayers(img)) layerChanged(false);
-}
-
-// How long a frame stays, as browsers play it: GIFs saved with 0 or 10 ms mean "as fast as possible",
-// which every browser shows as 100 ms, and the animations are made to look right there.
-static double frameDelayMs(int index) {
-    const int delay = app.image.frames[size_t(index)].delayMs;
-    return delay <= 10 ? 100.0 : double(delay);
-}
-
-void advanceFrame() {
-    if (!isAnimation() || !app.framePlaying) return;
-    // Frames follow a clock of their own: each one is due a delay after the previous one was due, not after
-    // it went up, so the timer's coarse ticks don't add up into a slower animation.
-    double due = app.frameShownMs + frameDelayMs(app.frameIndex);
-    const double now = nowMs();
-    if (now + 1.0 < due) return;
-    int next = app.frameIndex + 1;
-    const int n = int(app.image.frames.size());
-    while (now >= due + frameDelayMs(next % n) && next - app.frameIndex < n) due += frameDelayMs(next++ % n);  // skip what was missed
-    if (now - due > 1000.0) due = now;  // after a stall, start over instead of racing to catch up
-    showFrame(next);
-    app.frameShownMs = due;
 }
 
 void openStartupFile(const fs::path& path) { requestOpen(path, OpenMode::New); }
@@ -942,45 +791,20 @@ bool pickColor(float rgb[3]) {
     return true;
 }
 
+void chooseViewportColor() {
+    float rgb[3];
+    const UiColors colors = uiColors();
+    std::copy(colors.viewport, colors.viewport + 3, rgb);
+    if (!pickColor(rgb)) return;
+    std::copy(rgb, rgb + 3, app.viewportColor);
+    app.customViewport = true;
+    saveSettings();
+}
+
 void chooseCustomBackground() {
     if (!pickColor(app.customBackground)) return;
     app.alphaBackground = AlphaBackground::Custom;
     app.ignoreAlpha = false;
-}
-
-// Black and white points from the luminance percentiles, ignoring the darkest and brightest few pixels.
-void autoRange() {
-    if (!app.stats.valid) return;
-    app.blackPoint = app.stats.percentile(0.001);
-    app.whitePoint = std::max(app.stats.percentile(0.995), app.blackPoint * 1.01f + 1e-6f);
-}
-
-void ensureChannelStats() {
-    if (!app.hasImage || app.stats.channelsValid) return;
-    static int triedGeneration = -1;  // a failed GPU read is not retried every frame
-    if (triedGeneration == app.imageGeneration) return;
-    triedGeneration = app.imageGeneration;
-    const htv::FormatInfo& info = htv::formatInfo(app.image.format);
-    if (!info.compressed) {
-        app.stats = htv::computeStats(app.image, true);
-        return;
-    }
-    // The GPU decodes sRGB formats to linear; the histogram shows stored values like for every other format.
-    const bool srgb = isSrgbFormat(app.image.format);
-    auto stored = [srgb](float v) {
-        if (!srgb) return v;
-        v = std::clamp(v, 0.0f, 1.0f);
-        return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-    };
-    htv::StatsBuilder builder(true);
-    const bool ok = scanImageGpu([&](const float* p, int width) {
-        for (int x = 0; x < width; ++x, p += 4) {
-            const float r = stored(p[0]);
-            if (info.channels == 1) builder.add(r, r, r);
-            else builder.add(r, stored(p[1]), info.channels == 2 ? 0.0f : stored(p[2]));
-        }
-    });
-    if (ok) app.stats = builder.finish();
 }
 
 void saveOnExit() {
@@ -1000,43 +824,7 @@ void loadSettings() {
         const size_t eq = s.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = s.substr(0, eq), value = s.substr(eq + 1);
-        auto flag = [&](const char* name, bool& out) {
-            if (key == name) out = value == "1";
-            return key == name;
-        };
-        if (key == "theme") {
-            app.themeMode = value == "light" ? 1 : value == "system" ? 2 : 0;
-        } else if (key == "scale") {
-            const float v = std::strtof(value.c_str(), nullptr);
-            app.interfaceScale = v >= 1.0f && v <= 2.0f ? v : 0.0f;
-        } else if (key == "viewport") {
-            unsigned rgb = 0;
-            app.customViewport = std::sscanf(value.c_str(), "%x", &rgb) == 1;
-            for (int i = 0; i < 3; ++i) app.viewportColor[i] = float((rgb >> (16 - 8 * i)) & 0xff) / 255.0f;
-        } else if (key == "checker") {
-            app.checkerSize = std::clamp(std::atoi(value.c_str()), 0, 2);
-        } else if (flag("keep_view", app.keepView) || flag("keep_exposure", app.keepExposure) ||
-                   flag("auto_reload", app.autoReload) || flag("single_instance", app.singleInstance)) {
-        } else if (key == "sort") {
-            app.folderSort = std::clamp(std::atoi(value.c_str()), 0, 4);
-        } else if (key == "ruler_unit") {
-            app.rulerUnit = std::clamp(std::atoi(value.c_str()), 0, 2);
-        } else if (key == "ruler_dpi") {
-            const float v = std::strtof(value.c_str(), nullptr);
-            if (v >= 1.0f && v <= 100000.0f) app.rulerDpi = v;
-        } else if (key == "cache_mb") {
-            app.cacheMB = std::clamp(std::atoi(value.c_str()), 0, 65536);
-        } else if (key == "prefetch") {
-            app.prefetch = std::clamp(std::atoi(value.c_str()), 0, 2);
-        } else if (htv::bindingFromSettings(key, value)) {
-        } else if (key == "recent" && app.recent.size() < kMaxRecent) {
-            const size_t tab = value.find('\t');
-            if (tab == std::string::npos) continue;
-            RecentFile r;
-            r.openedAt = std::strtoll(value.substr(0, tab).c_str(), nullptr, 10);
-            r.path = widen(value.substr(tab + 1));
-            app.recent.push_back(std::move(r));
-        }
+        applySetting(key, value);
     }
     std::fclose(f);
 }
@@ -1163,21 +951,7 @@ void saveSettings() {
     const fs::path file = settingsFile();
     FILE* f = file.empty() ? nullptr : _wfopen(file.c_str(), L"wb");
     if (!f) return;
-    static const char* themes[] = {"dark", "light", "system"};
-    std::fprintf(f, "theme=%s\n", themes[std::clamp(app.themeMode, 0, 2)]);
-    if (app.interfaceScale > 0) std::fprintf(f, "scale=%.2f\n", double(app.interfaceScale));
-    if (app.customViewport) {
-        int rgb = 0;
-        for (int i = 0; i < 3; ++i) rgb = rgb << 8 | int(std::round(std::clamp(app.viewportColor[i], 0.0f, 1.0f) * 255));
-        std::fprintf(f, "viewport=%06X\n", rgb);
-    }
-    std::fprintf(f, "checker=%d\nkeep_view=%d\nkeep_exposure=%d\nauto_reload=%d\nsort=%d\nsingle_instance=%d\n",
-                 app.checkerSize, app.keepView, app.keepExposure, app.autoReload, app.folderSort, app.singleInstance);
-    std::fprintf(f, "cache_mb=%d\nprefetch=%d\n", app.cacheMB, app.prefetch);
-    std::fprintf(f, "ruler_unit=%d\nruler_dpi=%g\n", app.rulerUnit, double(app.rulerDpi));
-    std::fputs(htv::bindingsToSettings().c_str(), f);
-    for (const RecentFile& r : app.recent)
-        std::fprintf(f, "recent=%lld\t%s\n", static_cast<long long>(r.openedAt), narrow(r.path.wstring()).c_str());
+    std::fputs(settingsText().c_str(), f);
     std::fclose(f);
 }
 

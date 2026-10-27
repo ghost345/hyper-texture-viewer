@@ -218,16 +218,22 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
 #else
     LoadResult r;
     JxlDecoder* dec = JxlDecoderCreate(nullptr);
+#ifdef __EMSCRIPTEN__
+    void* runner = nullptr;  // the browser build has no threads: the decoder works on the caller's
+    const bool runnerOk = true;
+#else
     void* runner = JxlResizableParallelRunnerCreate(nullptr);
+    const bool runnerOk = runner != nullptr;
+#endif
     struct Guard {
         JxlDecoder* d;
         void* r;
         ~Guard() {
             JxlDecoderDestroy(d);
-            JxlResizableParallelRunnerDestroy(r);
+            if (r) JxlResizableParallelRunnerDestroy(r);
         }
     } guard{dec, runner};
-    if (!dec || !runner || JxlDecoderSetParallelRunner(dec, JxlResizableParallelRunner, runner) != JXL_DEC_SUCCESS ||
+    if (!dec || !runnerOk || (runner && JxlDecoderSetParallelRunner(dec, JxlResizableParallelRunner, runner) != JXL_DEC_SUCCESS) ||
         JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE) !=
             JXL_DEC_SUCCESS ||
         JxlDecoderSetInput(dec, data, size) != JXL_DEC_SUCCESS) {
@@ -254,8 +260,9 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
         }
         if (status == JXL_DEC_BASIC_INFO) {
             JxlDecoderGetBasicInfo(dec, &info);
-            JxlResizableParallelRunnerSetThreads(
-                runner, JxlResizableParallelRunnerSuggestThreads(info.xsize, info.ysize));
+            if (runner)
+                JxlResizableParallelRunnerSetThreads(
+                    runner, JxlResizableParallelRunnerSuggestThreads(info.xsize, info.ysize));
             hdr = info.exponent_bits_per_sample > 0 || info.bits_per_sample > 16 || info.intensity_target > 255.0f;
             if (hdr) {
                 // Ask for linear sRGB primaries; lossy (XYB) files honour this, others keep their own encoding.

@@ -3,8 +3,6 @@
 #include "ui.h"
 #include "ui_internal.h"
 
-#include <shellapi.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -47,9 +45,13 @@ std::string scaleLabel(float v) {
 }
 
 uint64_t physicalMemory() {
+#ifndef _WIN32
+    return 0;  // the browser doesn't say
+#else
     MEMORYSTATUSEX m{};
     m.dwLength = sizeof(m);
     return GlobalMemoryStatusEx(&m) ? m.ullTotalPhys : 0;
+#endif
 }
 
 void leftColumn(ImDrawList* dl, float x, float y, float w) {
@@ -100,14 +102,7 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
                                   int(colors.viewport[2] * 255 + 0.5f), 255);
         const ImVec2 sa(controlX, std::round(cy - S(11))), sb(sa.x + S(22), sa.y + S(22));
         ImGui::SetCursorScreenPos(sa);
-        if (ImGui::InvisibleButton("viewport", ImVec2(S(22), S(22)))) {
-            float rgb[3] = {colors.viewport[0], colors.viewport[1], colors.viewport[2]};
-            if (pickColor(rgb)) {
-                std::copy(rgb, rgb + 3, app.viewportColor);
-                app.customViewport = true;
-                saveSettings();
-            }
-        }
+        if (ImGui::InvisibleButton("viewport", ImVec2(S(22), S(22)))) chooseViewportColor();
         requestTip(ImRect(sa, sb), "Colour around the image", nullptr, true);
         dl->AddRectFilled(sa, sb, vp);
         dl->AddRect(sa, sb, ImGui::IsItemHovered() ? t.tx3 : t.bd2, 0, 0, line());
@@ -142,8 +137,9 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
                "Off: every file opens fitted to the window");
         option("keep exposure", "Keep exposure and range when switching files", app.keepExposure,
                "Off: exposure and range reset for every file");
-        option("reload", "Reload automatically when the file changes on disk", app.autoReload,
-               "Zoom, position and exposure stay as they are");
+        if (!kBrowser)  // a page is not told when a file changes
+            option("reload", "Reload automatically when the file changes on disk", app.autoReload,
+                   "Zoom, position and exposure stay as they are");
         const float cy = y + rowH * 0.5f;
         rowLabel(dl, x, cy, "Sort folder by");
         static const char* sorts[] = {"Name (natural)", "Name", "Date modified", "Size", "Type"};
@@ -166,8 +162,8 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
         y += rowH;
     }
 
-    y = groupHeading(dl, x, y, w, "Application");
-    {
+    y = groupHeading(dl, x, y, w, kBrowser ? "Memory" : "Application");
+    if (!kBrowser) {
         float cy = y + rowH * 0.5f;
         if (checkbox(dl, "single", x, cy, "Single instance \xE2\x80\x94 open new files in the existing window",
                      app.singleInstance, "Takes effect the next time a file is opened from Explorer"))
@@ -181,8 +177,9 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
         note(dl, x + S(14) + S(8) + textSize(fontRegular, 12, "Portable mode").x + S(12), cy,
              portableFailed ? "the exe's folder is not writable" : "settings.ini next to the .exe");
         y += rowH;
-
-        cy = y + rowH * 0.5f;
+    }
+    {
+        float cy = y + rowH * 0.5f;
         rowLabel(dl, x, cy, "Image cache");
         const uint64_t ram = physicalMemory();
         const int maxMB = int(std::clamp<uint64_t>(ram / 2 / (1024 * 1024), 512, 32768) / 256 * 256);
@@ -206,8 +203,9 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
         }
         requestTip(ImRect(ImVec2(controlX, cy - S(10)), ImVec2(controlX + sw, cy + S(10))), tip.c_str(), nullptr, true);
         y += rowH;
-
-        cy = y + rowH * 0.5f;
+    }
+    if (!kBrowser) {  // the browser decodes on the page's only thread: no decoding ahead
+        float cy = y + rowH * 0.5f;
         rowLabel(dl, x, cy, "Prefetch neighbours");
         static const char* prefetch[] = {"Off", "\xC2\xB1" "1", "\xC2\xB1" "2"};
         static const char* prefetchTips[] = {"Decode only the file shown", "Decode the next and previous file ahead",
@@ -227,9 +225,7 @@ void leftColumn(ImDrawList* dl, float x, float y, float w) {
                      "Default Apps: Windows lets only you choose which app opens each type",
                      nullptr, 16, 24)) {
             registerFileTypes();
-            // Windows 11 opens the app's own page; older versions ignore the parameter and show the list.
-            ShellExecuteW(app.hwnd, L"open", L"ms-settings:defaultapps?registeredAppUser=Hyper%20Texture%20Viewer",
-                          nullptr, nullptr, SW_SHOWNORMAL);
+            openDefaultApps();
         }
         y += rowH;
     }

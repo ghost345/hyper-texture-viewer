@@ -154,8 +154,8 @@ void layerRow(ImDrawList* dl, int i, float x0, float y, float width, bool psd) {
     if (l.group) {
         drawIcon(dl, Icon::Folder, ImVec2(ta.x + S(5), ta.y + S(5)), S(16), shown ? t.tx2 : t.tx3);
     } else {
-        if (ID3D11ShaderResourceView* thumb = layerThumbnail(i))
-            dl->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(thumb))), ta, ImVec2(ta.x + S(26), ta.y + S(26)));
+        if (GpuView* thumb = layerThumbnail(i))
+            dl->AddImage(textureRef(thumb), ta, ImVec2(ta.x + S(26), ta.y + S(26)));
         dl->AddRect(ta, ImVec2(ta.x + S(26), ta.y + S(26)), t.bd2, 0, 0, line());
     }
     const std::string detail = layerDetail(l, psd);

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyper Texture Viewer</title>
+<link rel="icon" type="image/png" href="icon.png">
+<meta name="description" content="Image viewer for texture artists: EXR, HDR, DDS, KTX, PSD and more, right in the browser. Files never leave your computer.">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1b; color: #ddd;
+               font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: light) { html, body { background: #e8e8e8; color: #222; } }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+  #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center;
+            padding: 16px; pointer-events: none; }
+  #status.error { color: #e57373; pointer-events: auto; }
+  #drop { position: fixed; inset: 8px; border: 2px dashed #3d8bfd; border-radius: 8px; display: none;
+          pointer-events: none; background: rgba(61, 139, 253, 0.08); }
+  body.dragging #drop { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="drop"></div>
+<div id="status">Loading Hyper Texture Viewer…</div>
+<input id="files" type="file" multiple hidden>
+<input id="color" type="color" hidden>
+<script>
+'use strict';
+// The page side of the viewer: File objects by handle, the Open dialog, drag and drop, paste and colours. Files are
+// read here and their bytes handed to the program; nothing is uploaded anywhere.
+var Module = {
+  canvas: document.getElementById('canvas'),
+  htvFiles: [],
+  htvReady() { document.getElementById('status').remove(); },
+  htvFail(message) {
+    const s = document.getElementById('status');
+    s.textContent = message;
+    s.className = 'error';
+  },
+  // Hands files to the program: purpose 0 opens them as the folder to browse, 1 and 2 load Compare's B or C.
+  htvAddFiles(entries, purpose, first) {
+    Module._htv_files_begin(purpose);
+    for (const { file, path } of entries) {
+      const handle = Module.htvFiles.push(file) - 1;
+      const p = stringToNewUTF8(path);
+      Module._htv_files_add(handle, p, file.size, file.lastModified || 0);
+      Module._free(p);
+    }
+    const f = stringToNewUTF8(first || '');
+    Module._htv_files_end(f);
+    Module._free(f);
+  },
+  async htvReadFile(handle, request) {
+    const file = Module.htvFiles[handle];
+    let ptr = 0, size = 0, error = '';
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      ptr = Module._malloc(Math.max(bytes.length, 1));
+      if (!ptr) throw new Error('Not enough memory for this file.');
+      HEAPU8.set(bytes, ptr);
+      size = bytes.length;
+    } catch (e) {
+      error = e && e.name === 'NotReadableError' ? 'The file changed or moved since it was opened; open it again.'
+                                                 : (e && e.message) || 'The file cannot be read.';
+    }
+    const err = stringToNewUTF8(error);
+    Module._htv_file_data(request, ptr, size, err);
+    Module._free(err);
+  },
+  htvPickFiles(purpose) {
+    const input = document.getElementById('files');
+    input.multiple = purpose === 0;
+    input.onchange = () => {
+      const entries = [...input.files].map(file => ({ file, path: file.name }));
+      input.value = '';
+      if (entries.length) Module.htvAddFiles(entries, purpose, entries.length === 1 ? entries[0].path : '');
+    };
+    input.click();
+  },
+  htvPickColor(purpose, rgb) {
+    const input = document.getElementById('color');
+    input.value = '#' + rgb.toString(16).padStart(6, '0');
+    input.onchange = () => Module._htv_color_picked(purpose, parseInt(input.value.slice(1), 16));
+    input.click();
+  },
+  async htvPasteFromClipboard() {
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find(t => t.startsWith('image/'));
+        if (type) return htvPasteBlob(await item.getType(type), type);
+      }
+    } catch (e) {}
+  },
+  print: text => console.log(text),
+  printErr: text => console.warn(text),
+};
+
+function htvExtension(type) {
+  return ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/bmp': 'bmp',
+            'image/avif': 'avif', 'image/jxl': 'jxl' })[type] || 'png';
+}
+
+async function htvPasteBlob(blob, type) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const ptr = Module._malloc(Math.max(bytes.length, 1));
+  HEAPU8.set(bytes, ptr);
+  const ext = stringToNewUTF8(htvExtension(type));
+  Module._htv_paste(ptr, bytes.length, ext);
+  Module._free(ext);
+}
+
+document.addEventListener('paste', e => {
+  for (const item of e.clipboardData ? e.clipboardData.items : []) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      e.preventDefault();
+      htvPasteBlob(item.getAsFile(), item.type);
+      return;
+    }
+  }
+});
+
+// Drag and drop: files, and folders with everything inside them.
+async function htvWalk(entry, prefix, out) {
+  if (entry.isFile) {
+    const file = await new Promise((ok, fail) => entry.file(ok, fail));
+    out.push({ file, path: prefix + file.name });
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    for (;;) {
+      const batch = await new Promise((ok, fail) => reader.readEntries(ok, fail));
+      if (!batch.length) break;
+      for (const child of batch) await htvWalk(child, prefix + entry.name + '/', out);
+    }
+  }
+}
+
+let dragDepth = 0;
+document.addEventListener('dragenter', e => { e.preventDefault(); if (++dragDepth === 1) document.body.classList.add('dragging'); });
+document.addEventListener('dragleave', e => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', async e => {
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dragging');
+  const items = [...e.dataTransfer.items].filter(i => i.kind === 'file');
+  const entries = items.map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  const out = [];
+  if (entries.length) {
+    for (const entry of entries) await htvWalk(entry, '', out);
+  } else {
+    for (const file of e.dataTransfer.files) out.push({ file, path: file.name });
+  }
+  // One file dropped opens it with its siblings unknown; one folder opens its first image.
+  const single = entries.length === 1 && entries[0].isFile;
+  if (out.length) Module.htvAddFiles(out, 0, single ? out[0].path : '');
+});
+
+// A colour scheme change matters for the "System" theme.
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => Module._htv_theme_changed());
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
