@@ -8,7 +8,7 @@ Fast image viewer for texture artists on Windows. Early prototype.
 
 **[Download HyperTextureViewer-win64.zip](https://github.com/ghost345/hyper-texture-viewer/releases/latest/download/HyperTextureViewer-win64.zip)** (Windows 10/11, 64-bit). Unzip it anywhere and run `hyper-texture-viewer.exe`; there is no installer. Earlier versions are on the [Releases](https://github.com/ghost345/hyper-texture-viewer/releases) page.
 
-**[Open in the browser](https://ghost345.github.io/hyper-texture-viewer/)**: the same viewer without installing anything (Chrome, Edge, Firefox or Safari with WebGL 2). Files are opened locally and never uploaded. The browser version has no TIFF, HEIC or AVIF, and no window options such as always on top.
+**[Open in the browser](https://ghost345.github.io/hyper-texture-viewer/)**: the same viewer without installing anything (Chrome, Edge, Firefox or Safari with WebGL 2). Files are opened locally and never uploaded. The browser version has no TIFF or HEIC, and no window options such as always on top.
 
 Windows may warn that the app is from an unknown publisher, since the exe is not code-signed: click "More info", then "Run anyway".
 
@@ -72,7 +72,7 @@ MinGW-w64 works too and produces a static exe. The app icon is `res/htv.ico`, ma
 The browser version builds with Emscripten (WebGL 2); the `web` workflow publishes it to GitHub Pages from main:
 
 ```
-emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release -DHTV_WITH_AVIF=OFF
+emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
 cmake --build build-web --target hyper-texture-viewer
 ```
 

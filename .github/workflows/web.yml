@@ -20,9 +20,13 @@ jobs:
         with:
           version: 6.0.13
 
+      # dav1d (the AV1 decoder behind AVIF) builds with meson.
+      - name: Install meson
+        run: pip install meson ninja
+
       - name: Build
         run: |
-          emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHTV_WITH_AVIF=OFF -DBUILD_TESTING=OFF
+          emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
           cmake --build build --parallel 4 --target hyper-texture-viewer
           mkdir site
           cp build/index.html build/index.js build/index.wasm build/icon.png site/
