@@ -173,7 +173,7 @@ void mousePos(const EmscriptenMouseEvent* e, int& x, int& y) {
 void updateCursor() {
     static std::string current;
     std::string want = "default";
-    if (app.matchPicking && app.hasImage && !uiMouse()) want = "crosshair";
+    if (app.colorMatch && app.hasImage && !uiMouse() && !app.dragging && !spaceDown) want = "crosshair";
     else if ((app.dragging || spaceDown) && app.hasImage && !uiMouse()) want = "move";
     if (want != current) {
         current = want;
@@ -213,40 +213,14 @@ EM_BOOL onMouseDown(int, const EmscriptenMouseEvent* e, void*) {
     setModifiers(e->ctrlKey, e->shiftKey, e->altKey);
     if (e->button <= 2) io.AddMouseButtonEvent(e->button == 0 ? 0 : e->button == 1 ? 2 : 1, true);
     if (uiMouse() || !inViewport(x, y)) return EM_TRUE;
-    if (e->button == 0) {
-        if (app.matchPicking || (e->altKey && app.colorMatch)) {
-            int px, py;
-            if (windowToPixel(float(x), float(y), px, py) && setMatchTarget(px, py)) {
-                app.matchPicking = false;
-                app.colorMatch = true;
-            }
-            return EM_TRUE;
-        }
-        if (e->ctrlKey) {
-            int px, py;
-            if (app.pixelLocked) app.pixelLocked = false;
-            else if (windowToPixel(float(x), float(y), px, py)) {
-                app.pixelLocked = true;
-                app.lockedX = px;
-                app.lockedY = py;
-            }
-            return EM_TRUE;
-        }
-    }
-    if (e->button == 0 || e->button == 1) {
-        app.dragging = true;
-        app.dragStartX = float(x);
-        app.dragStartY = float(y);
-        app.dragOriginX = app.originX;
-        app.dragOriginY = app.originY;
-    }
+    if (e->button == 0 || e->button == 1) startPan(float(x), float(y), e->button == 0 && !spaceDown);
     return EM_TRUE;
 }
 
 EM_BOOL onMouseUp(int, const EmscriptenMouseEvent* e, void*) {
     input();
     if (e->button <= 2) ImGui::GetIO().AddMouseButtonEvent(e->button == 0 ? 0 : e->button == 1 ? 2 : 1, false);
-    if (e->button == 0 || e->button == 1) app.dragging = false;
+    if (e->button == 0 || e->button == 1) endPan();
     return EM_FALSE;
 }
 
@@ -258,11 +232,7 @@ EM_BOOL onMouseMove(int, const EmscriptenMouseEvent* e, void*) {
     const bool inside = x >= 0 && y >= 0 && x < app.winW && y < app.winH;
     app.mouseX = inside || app.dragging ? x : -1;
     app.mouseY = inside || app.dragging ? y : -1;
-    if (app.dragging) {
-        app.originX = app.dragOriginX + float(x) - app.dragStartX;
-        app.originY = app.dragOriginY + float(y) - app.dragStartY;
-        app.fit = false;
-    }
+    movePan(float(x), float(y));
     return EM_FALSE;
 }
 
@@ -279,9 +249,8 @@ EM_BOOL onDoubleClick(int, const EmscriptenMouseEvent* e, void*) {
     input();
     int x, y;
     mousePos(e, x, y);
-    if (uiMouse() || !inViewport(x, y) || e->ctrlKey || e->button != 0) return EM_FALSE;
-    app.fit = true;
-    fitToWindow();
+    if (uiMouse() || !inViewport(x, y) || e->button != 0) return EM_FALSE;
+    imageDoubleClicked();
     return EM_TRUE;
 }
 

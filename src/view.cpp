@@ -159,6 +159,84 @@ bool windowToPixel(float wx, float wy, int& x, int& y) {
     return true;
 }
 
+namespace {
+bool lockedBeforeClick = false;  // for the double-click: whether its first click moved a lock or made one
+double lastClickMs = -1e9;
+float lastClickX = 0.0f, lastClickY = 0.0f;
+
+void imageClicked(float wx, float wy) {
+    // The second click of a double-click is the double-click's, not another lock.
+    const double now = nowMs();
+    const float slop = 4.0f * app.dpiScale;
+    const bool second = now - lastClickMs < 500.0 && std::fabs(wx - lastClickX) <= slop && std::fabs(wy - lastClickY) <= slop;
+    lastClickMs = second ? -1e9 : now;
+    lastClickX = wx;
+    lastClickY = wy;
+    if (second) return;
+    int x, y;
+    if (!windowToPixel(wx, wy, x, y)) return;
+    if (app.colorMatch) {
+        setMatchTarget(x, y);
+        return;
+    }
+    lockedBeforeClick = app.pixelLocked;
+    app.pixelLocked = true;
+    app.lockedX = x;
+    app.lockedY = y;
+}
+}  // namespace
+
+void startPan(float wx, float wy, bool left) {
+    app.dragging = true;
+    app.dragClick = left;
+    app.dragStartX = wx;
+    app.dragStartY = wy;
+    app.dragOriginX = app.originX;
+    app.dragOriginY = app.originY;
+}
+
+void movePan(float wx, float wy) {
+    if (!app.dragging) return;
+    // A click may wobble a little; the view starts following once the mouse has clearly moved.
+    if (app.dragClick) {
+        const float slop = 3.0f * app.dpiScale;
+        if (std::fabs(wx - app.dragStartX) <= slop && std::fabs(wy - app.dragStartY) <= slop) return;
+        app.dragClick = false;
+    }
+    app.originX = app.dragOriginX + wx - app.dragStartX;
+    app.originY = app.dragOriginY + wy - app.dragStartY;
+    app.fit = false;
+}
+
+void endPan() {
+    if (!app.dragging) return;
+    app.dragging = false;
+    if (app.dragClick) imageClicked(app.dragStartX, app.dragStartY);
+    app.dragClick = false;
+}
+
+void imageDoubleClicked() {
+    // Unlocks the pixel. When its first click made the lock rather than moving one, the double-click was
+    // meant as before: fit to the window. Clicks under Color match pick the target and lock nothing.
+    const bool unlock = app.pixelLocked && (app.colorMatch || lockedBeforeClick);
+    app.pixelLocked = false;
+    lockedBeforeClick = false;
+    lastClickMs = -1e9;
+    if (unlock) return;
+    app.fit = true;
+    fitToWindow();
+}
+
+void syncMatchAverage() {
+    if (app.colorMatch && !app.averageBeforeMatch) {
+        app.averageBeforeMatch = app.averageSize;
+        app.averageSize = 1;
+    } else if (!app.colorMatch && app.averageBeforeMatch) {
+        app.averageSize = app.averageBeforeMatch;
+        app.averageBeforeMatch = 0;
+    }
+}
+
 void imageRectToWindow(float x0, float y0, float x1, float y1, float& wx0, float& wy0, float& wx1, float& wy1) {
     const float sw = float(app.rotation & 1 ? app.image.height : app.image.width);
     const float sh = float(app.rotation & 1 ? app.image.width : app.image.height);

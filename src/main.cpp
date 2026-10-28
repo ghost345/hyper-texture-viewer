@@ -124,12 +124,8 @@ void applyDpi(float scale) {
 
 int resizeBorder() { return int(std::round(5 * app.scale)); }
 
-void startDrag(LPARAM lp) {
-    app.dragging = true;
-    app.dragStartX = float(GET_X_LPARAM(lp));
-    app.dragStartY = float(GET_Y_LPARAM(lp));
-    app.dragOriginX = app.originX;
-    app.dragOriginY = app.originY;
+void startDrag(LPARAM lp, bool click) {
+    startPan(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), click);
     SetCapture(app.hwnd);
 }
 
@@ -288,27 +284,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONDOWN:
             if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-            if (app.matchPicking || (GetKeyState(VK_MENU) < 0 && app.colorMatch)) {
-                // Color match target: the eyedropper, or Alt+click while the panel is open.
-                int x, y;
-                if (windowToPixel(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), x, y) && setMatchTarget(x, y)) {
-                    app.matchPicking = false;
-                    app.colorMatch = true;
-                }
-                return 0;
-            }
-            if (wp & MK_CONTROL) {
-                // Ctrl+click locks the readout to this pixel, or releases it.
-                int x, y;
-                if (app.pixelLocked) app.pixelLocked = false;
-                else if (windowToPixel(float(GET_X_LPARAM(lp)), float(GET_Y_LPARAM(lp)), x, y)) {
-                    app.pixelLocked = true;
-                    app.lockedX = x;
-                    app.lockedY = y;
-                }
-                return 0;
-            }
-            startDrag(lp);
+            startDrag(lp, !spaceDown);
             return 0;
         case WM_RBUTTONDOWN:
             startWindowMove();
@@ -331,19 +307,18 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_MBUTTONDOWN:
             if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
-            startDrag(lp);
+            startDrag(lp, false);
             return 0;
         case WM_LBUTTONUP:
         case WM_MBUTTONUP:
             if (app.dragging) {
-                app.dragging = false;
+                endPan();
                 ReleaseCapture();
             }
             return 0;
         case WM_LBUTTONDBLCLK:
-            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) || (wp & MK_CONTROL)) return 0;
-            app.fit = true;
-            fitToWindow();
+            if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
+            imageDoubleClicked();
             return 0;
         case WM_MOUSEMOVE:
             if (movingWindow) {
@@ -356,17 +331,13 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             app.mouseX = GET_X_LPARAM(lp);
             app.mouseY = GET_Y_LPARAM(lp);
-            if (app.dragging) {
-                app.originX = app.dragOriginX + float(app.mouseX) - app.dragStartX;
-                app.originY = app.dragOriginY + float(app.mouseY) - app.dragStartY;
-                app.fit = false;
-            }
+            movePan(float(app.mouseX), float(app.mouseY));
             return 0;
         case WM_MOUSELEAVE:
             app.mouseX = app.mouseY = -1;
             return 0;
         case WM_SETCURSOR:
-            if (LOWORD(lp) == HTCLIENT && app.matchPicking && app.hasImage && !uiMouse) {
+            if (LOWORD(lp) == HTCLIENT && app.colorMatch && app.hasImage && !uiMouse && !app.dragging && !spaceDown) {
                 SetCursor(LoadCursorW(nullptr, IDC_CROSS));
                 return TRUE;
             }

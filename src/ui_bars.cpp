@@ -1282,13 +1282,17 @@ void statusRow(ImDrawList* dl, float y0, float W) {
     }
     if (r.button("copy", Icon::Copy, nullptr, px.readable ? 0 : kDisabled, "Copy value", keyText(Action::CopyValue), 14, 20)) copyColorValue();
     if (r.button("lock", Icon::Pin, nullptr, app.pixelLocked ? kOn : (px.valid ? 0 : kDisabled),
-                 app.pixelLocked ? "Unlock pixel" : "Lock pixel", "Ctrl+Click", 14, 20))
+                 app.pixelLocked ? "Unlock pixel (or double-click the image)" : "Lock pixel: click the image",
+                 app.pixelLocked ? "Dbl-click" : "Click", 14, 20))
         toggleLock(px);
     r.separator(14, 6);
     r.field("avg label", "Avg", fontMono, 12, t.tx3, "Average color over an area around the pixel");
     std::snprintf(buf, sizeof buf, "%d\xC3\x97%d", app.averageSize, app.averageSize);
     ImRect ar;
-    toggleMenuOnPress(r.dropdown("avg", buf, fontRegular, 11, 18, 6, 3, "Average over an area", nullptr, &ar, false,
+    toggleMenuOnPress(r.dropdown("avg", buf, fontRegular, 11, 18, 6, 3,
+                                 app.colorMatch ? "Average over an area: 1\xC3\x97" "1 while Color match is on"
+                                                : "Average over an area",
+                                 nullptr, &ar, app.colorMatch,
                                  "5\xC3\x97" "5"),
                       "avg menu");
     if (beginMenu("avg menu", ImVec2(ar.Min.x, ar.Min.y - S(4)), ImVec2(0, 1))) {
