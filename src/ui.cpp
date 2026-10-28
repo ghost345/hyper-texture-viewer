@@ -85,6 +85,7 @@ bool uiIsCaption(float x, float y) {
 }
 
 void uiFrame() {
+    syncMatchAverage();
     const Theme& t = T();
     ImGuiStyle& st = ImGui::GetStyle();
     st.Colors[ImGuiCol_Text] = ImGui::ColorConvertU32ToFloat4(t.tx);
@@ -221,7 +222,6 @@ bool uiKeyDown(int vk) {
         if (app.loading) cancelLoading();
         else if (app.showSettings) app.showSettings = false;
         else if (app.showHelp) app.showHelp = false;
-        else if (app.matchPicking) app.matchPicking = false;
         else if (app.colorMatch) app.colorMatch = false;
         else if (app.compare) app.compare = false;
         else if (app.showFrames) app.showFrames = false;

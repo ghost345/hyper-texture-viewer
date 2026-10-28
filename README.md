@@ -24,7 +24,7 @@ Windows may warn that the app is from an unknown publisher, since the exe is not
 - Alpha over a checkerboard (three sizes), black, grey, white or a custom colour.
 - Pixel readout: coordinates, value in nine formats (click to copy), 3x3 and 5x5 averages, locked pixel, pixel grid, rulers (Ctrl+U) in pixels, centimetres or inches at the file's resolution or one set by hand; a dashed outline always marks the pixels the readout reads.
 - Histogram panel: RGB overlaid, one channel, luminance or a parade, linear or log counts; HDR images on an axis in stops; mean, min and max per channel.
-- Color match (`M`): dashed outline around every pixel within ± N of a target colour, compared by whole colour, one channel, luminance, hue or saturation; pixel count, share of the image and regions, with `,` / `.` to step the view through the regions. Alt+click or the eyedropper picks the target.
+- Color match (`M`): dashed outline around every pixel within ± N of a target colour, compared by whole colour, one channel, luminance, hue or saturation; pixel count, share of the image and regions, with `,` / `.` to step the view through the regions. While it is on, a click on the image picks the target (Avg is 1×1 meanwhile).
 - Compare (`Ctrl+K`): up to three images (A is the shown one, B and C are other files) as split shutters you drag on the image, a blend slider, or a difference through a heat ramp with adjustable gain and Max Δ / Mean Δ / Pixels Δ>2 / PSNR.
 - Frames (`L` on a GIF, APNG, or animated WebP, AVIF or JPEG XL): play, pause (Space), step (`,` / `.`) and scrub the frames, with the frame delay and loop count; delays play as in browsers (0 or 10 ms as 100 ms).
 - Layers (`L` on a file with layers): cube faces, array and volume slices (DDS, KTX), TIFF pages, icon sizes and EXR layers are listed with thumbnails and shown one at a time (`,` / `.` step). PSD layers and groups each have an eye: hiding one composites the rest again (blend modes as Normal), Alt+click shows a layer alone, and with every eye as saved the file's own composite is back.
@@ -42,13 +42,13 @@ All shortcuts are listed in the app under F1. The most used:
 | --- | --- |
 | Mouse wheel | Zoom around the cursor (stops at 100%) |
 | Left drag, Space + drag, middle drag | Pan |
-| `F`, double click | Fit to window |
+| `F`, double click | Fit to window (a double click on a locked pixel unlocks it instead) |
 | `1` `2` `4` `8` | Zoom 100%, 200%, 400%, 800% |
 | Left / Right, PgUp / PgDn, Home / End | Previous / next / first / last image in the folder |
 | `R` `G` `B` `A` `Y`, `C` | One channel or luminance (press again to go back), all channels |
 | Ctrl + wheel, `-` / `=`, `0` | HDR exposure, reset |
 | Ctrl+A, `Z` | Auto range, show clipping |
-| Ctrl + click, Ctrl+C | Lock the readout to a pixel, copy its value |
+| Click, Ctrl+C | Lock the readout to a pixel, copy its value |
 | `T`, Shift+A, Shift+L | Tiling, alpha background, sRGB/linear |
 | Right drag, Alt + drag | Move the window |
 | Tab, `I`, Ctrl+H, F1, Ctrl+, | Hide bars, info panel, histogram, shortcuts, settings |

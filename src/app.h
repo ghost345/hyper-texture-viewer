@@ -227,10 +227,10 @@ struct App {
     int lockedX = 0, lockedY = 0;
     ColorFormat colorFormat = ColorFormat::Html;
     int averageSize = 1;  // 1, 3 or 5
+    int averageBeforeMatch = 0;  // Avg chosen before Color match forced 1x1; 0 when not forced
 
     // Color match (M): outlines the pixels within a tolerance of a target colour.
     bool colorMatch = false;
-    bool matchPicking = false;    // the next click on the image sets the target
     bool matchHasTarget = false;
     float matchTarget[4] = {};    // as psMatch compares: sRGB formats re-encoded, one- and two-channel data expanded
     int matchMode = 0;            // whole colour (RGB), RGBA, R, G, B, A, luminance, hue, saturation
@@ -281,6 +281,7 @@ struct App {
 
     // Panning.
     bool dragging = false;
+    bool dragClick = false;  // a left press that is still a click: it has not moved far enough to pan
     float dragStartX = 0.0f, dragStartY = 0.0f;
     float dragOriginX = 0.0f, dragOriginY = 0.0f;
 
@@ -342,6 +343,12 @@ void imageSizeOnScreen(float& w, float& h);  // after rotation, in image pixels;
 void shownArea(float& x0, float& y0, float& x1, float& y1);
 // Image pixel under a window position, honouring rotation, flips and tiling. False outside the image.
 bool windowToPixel(float wx, float wy, int& x, int& y);
+// Mouse on the image. A left press that ends without panning is a click: with Color match on it picks the
+// target, otherwise it locks the readout to that pixel. Double-click unlocks, or fits the image to the window.
+void startPan(float wx, float wy, bool left);
+void movePan(float wx, float wy);
+void endPan();
+void imageDoubleClicked();
 // The window rectangle an image rectangle (in image pixels, x1 and y1 exclusive) covers on the original copy.
 void imageRectToWindow(float x0, float y0, float x1, float y1, float& wx0, float& wy0, float& wx1, float& wy1);
 
@@ -353,6 +360,8 @@ bool isHighPrecision(const htv::Image& image);     // float or 16-bit: shows the
 bool readPixelsGpu(int x, int y, int n, float* rgba);
 // Color match: the target becomes the pixel at (x, y); the mask and its regions follow on the next frame.
 bool setMatchTarget(int x, int y);
+// Avg is 1x1 while Color match is on, and goes back to the chosen size when it is off. Once a frame.
+void syncMatchAverage();
 void updateColorMatch();  // rebuilds the mask when the image, target, mode or tolerance changed
 void showMatchRegion(int index);  // centres the view on a region, zooming out when it does not fit
 // Animations: the current image has more than one frame.

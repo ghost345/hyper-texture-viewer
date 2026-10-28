@@ -273,18 +273,16 @@ void histogramPanel() {
 // ---- Color match ----
 
 void toggleColorMatch() {
-    if (app.colorMatch || app.matchPicking) {
-        app.colorMatch = app.matchPicking = false;
+    if (app.colorMatch) {
+        app.colorMatch = false;
         return;
     }
     if (!app.hasImage) return;
     app.colorMatch = true;
-    // The target: the locked pixel, the pixel under the cursor, or the next click on the image.
+    // The target: the locked pixel or the pixel under the cursor; otherwise the next click on the image.
     int x = app.lockedX, y = app.lockedY;
-    if (app.pixelLocked ? setMatchTarget(x, y)
-                        : windowToPixel(float(app.mouseX), float(app.mouseY), x, y) && setMatchTarget(x, y))
-        return;
-    if (!app.matchHasTarget) app.matchPicking = true;
+    if (app.pixelLocked) setMatchTarget(x, y);
+    else if (windowToPixel(float(app.mouseX), float(app.mouseY), x, y)) setMatchTarget(x, y);
 }
 
 void stepMatchRegion(int delta) {
@@ -326,7 +324,7 @@ void colorMatchPanel() {
     panelHeader(dl, p, width, hh, "Color match", 12, 9);
     if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(3) - S(20), std::round(p.y + (hh - line() - S(20)) * 0.5f)),
                     20, 14, "Close", keyText(Action::ColorMatch)))
-        app.colorMatch = app.matchPicking = false;
+        app.colorMatch = false;
 
     const float x0 = p.x + S(10), x1 = p.x + width - S(10), controlX = x0 + S(86);
     const float rowH = S(22), gap = S(8);
@@ -343,7 +341,7 @@ void colorMatchPanel() {
     };
     const bool eightBit = !isHighPrecision(app.image);
 
-    // Target: swatch, value and the eyedropper.
+    // Target: swatch and value; a click on the image picks it.
     float cy = y + rowH * 0.5f;
     label("Target", cy, "The colour pixels are compared with");
     {
@@ -372,15 +370,10 @@ void colorMatchPanel() {
         }
         const float tx = sb.x + S(8);
         drawText(dl, fontMono, 12, tx, cy, app.matchHasTarget ? t.tx : t.tx3,
-                 ellipsize(fontMono, 12, text, x1 - S(22) - S(8) - tx).c_str());
-        tipArea("target", ImRect(sa, ImVec2(x1 - S(22) - S(8), sb.y)),
-                app.matchHasTarget ? "Target colour, as stored in the file" : "Pick a pixel on the image");
-        r.x = x1 - S(22);
-        r.cy = cy;
-        if (r.button("pick", Icon::ColorMatch, nullptr, kBordered | (app.matchPicking ? kOn : 0),
-                     app.matchPicking ? "Click a pixel on the image (Esc cancels)" : "Pick the target from the image",
-                     "Alt+Click", 14, 22, 3))
-            app.matchPicking = !app.matchPicking;
+                 ellipsize(fontMono, 12, text, x1 - tx).c_str());
+        tipArea("target", ImRect(sa, ImVec2(x1, sb.y)),
+                app.matchHasTarget ? "Target colour, as stored in the file. Click the image to pick another"
+                                   : "Click a pixel on the image");
     }
     y += rowH + gap;
 
