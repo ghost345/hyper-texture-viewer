@@ -357,7 +357,8 @@ void fileGroup(Row& r, const TopLayout& L) {
         }
         r.x += S(14) + r.gap + S(6);
     }
-    if (app.folderIndex >= 0 && L.counter) {
+    // The browser only knows the files it was given, so the count would not be the folder's.
+    if (!kBrowser && app.folderIndex >= 0 && L.counter) {
         char pos[32];
         std::snprintf(pos, sizeof pos, "%d / %d", app.folderIndex + 1, int(app.folder.size()));
         r.field("counter", pos, fontMono, 12, t.tx3, "Position in the folder", nullptr);
