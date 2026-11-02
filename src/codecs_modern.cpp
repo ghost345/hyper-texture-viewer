@@ -136,46 +136,73 @@ LoadResult loadAvif(const uint8_t* data, size_t size) {
                                 : im->colorPrimaries == AVIF_COLOR_PRIMARIES_SMPTE432 ? Primaries::DisplayP3
                                                                                       : Primaries::Bt709;
 
-    avifRGBImage rgb;
-    avifRGBImageSetDefaults(&rgb, im);
-    rgb.format = AVIF_RGB_FORMAT_RGBA;
-    rgb.depth = im->depth > 8 ? 16 : 8;
-    rgb.rowBytes = 0;
-    rgb.pixels = nullptr;
-    std::vector<uint8_t> buffer(size_t(im->width) * im->height * 4 * (rgb.depth / 8));
-    rgb.pixels = buffer.data();
-    rgb.rowBytes = im->width * 4 * (rgb.depth / 8);
-    res = avifImageYUVToRGB(im, &rgb);
-    if (res != AVIF_RESULT_OK) {
-        r.error = std::string("cannot convert AVIF colours: ") + avifResultToString(res);
-        return r;
-    }
+    const bool wide = pq || hlg || linear || primaries != Primaries::Bt709;
+    // One decoded image to a surface: HDR or wide gamut as linear BT.709 half floats, the rest as stored.
+    auto convert = [&](const avifImage* frame, Surface& out, float& maxValue) {
+        avifRGBImage rgb;
+        avifRGBImageSetDefaults(&rgb, frame);
+        rgb.format = AVIF_RGB_FORMAT_RGBA;
+        rgb.depth = frame->depth > 8 ? 16 : 8;
+        std::vector<uint8_t> buffer(size_t(frame->width) * frame->height * 4 * (rgb.depth / 8));
+        rgb.pixels = buffer.data();
+        rgb.rowBytes = frame->width * 4 * (rgb.depth / 8);
+        res = avifImageYUVToRGB(frame, &rgb);
+        if (res != AVIF_RESULT_OK) return false;
+        const size_t pixels = size_t(frame->width) * frame->height;
+        if (wide) {
+            std::vector<float> encoded(pixels * 4);
+            const float scale = rgb.depth == 16 ? 1.0f / 65535.0f : 1.0f / 255.0f;
+            for (size_t i = 0; i < pixels * 4; ++i)
+                encoded[i] = (rgb.depth == 16 ? reinterpret_cast<const uint16_t*>(buffer.data())[i] : buffer[i]) * scale;
+            out = surfaceFor(GpuFormat::RGBA16F, frame->width, frame->height);
+            const Transfer transfer = pq ? Transfer::Pq : hlg ? Transfer::Hlg : linear ? Transfer::Linear : Transfer::Srgb;
+            maxValue = encodedToLinearHalf(encoded.data(), pixels, transfer, primaries,
+                                           reinterpret_cast<uint16_t*>(out.data.data()));
+        } else {
+            out = surfaceFor(rgb.depth == 16 ? GpuFormat::RGBA16Unorm : GpuFormat::RGBA8Srgb, frame->width, frame->height);
+            std::memcpy(out.data.data(), buffer.data(), out.data.size());
+            maxValue = 0.0f;
+        }
+        return true;
+    };
 
     Image& img = r.image;
     img.width = im->width;
     img.height = im->height;
-    const size_t pixels = size_t(im->width) * im->height;
-    if (pq || hlg || linear || primaries != Primaries::Bt709) {
-        // HDR or wide gamut: decode to linear BT.709 light and keep it as half floats.
-        std::vector<float> encoded(pixels * 4);
-        const float scale = rgb.depth == 16 ? 1.0f / 65535.0f : 1.0f / 255.0f;
-        for (size_t i = 0; i < pixels * 4; ++i)
-            encoded[i] = (rgb.depth == 16 ? reinterpret_cast<const uint16_t*>(buffer.data())[i] : buffer[i]) * scale;
-        img.format = GpuFormat::RGBA16F;
-        Surface s = surfaceFor(img.format, img.width, img.height);
-        const Transfer transfer = pq ? Transfer::Pq : hlg ? Transfer::Hlg : linear ? Transfer::Linear : Transfer::Srgb;
-        img.maxValue = encodedToLinearHalf(encoded.data(), pixels, transfer, primaries,
-                                           reinterpret_cast<uint16_t*>(s.data.data()));
-        img.mips.push_back(std::move(s));
-    } else {
-        img.format = rgb.depth == 16 ? GpuFormat::RGBA16Unorm : GpuFormat::RGBA8Srgb;
-        Surface s = surfaceFor(img.format, img.width, img.height);
-        std::memcpy(s.data.data(), buffer.data(), s.data.size());
-        img.mips.push_back(std::move(s));
+    img.format = wide ? GpuFormat::RGBA16F : im->depth > 8 ? GpuFormat::RGBA16Unorm : GpuFormat::RGBA8Srgb;
+    Surface first;
+    if (!convert(im, first, img.maxValue)) {
+        r.error = std::string("cannot convert AVIF colours: ") + avifResultToString(res);
+        return r;
     }
+    // An image sequence: every frame, as long as they fit in memory. (decoder->image, and `im`, now changes
+    // with each frame; its colour properties and metadata stay those of the sequence.)
+    if (decoder->imageCount > 1) {
+        img.frames.push_back({first, int(std::lround(decoder->imageTiming.duration * 1000.0))});
+        const size_t frameBytes = first.data.size();
+        while (img.frames.size() < 4096 && frameBytes * (img.frames.size() + 1) < (size_t(1) << 31) &&
+               avifDecoderNextImage(decoder) == AVIF_RESULT_OK) {
+            const avifImage* frame = decoder->image;
+            Frame f;
+            float m = 0.0f;
+            if (frame->width != img.width || frame->height != img.height || !convert(frame, f.surface, m)) break;
+            f.delayMs = int(std::lround(decoder->imageTiming.duration * 1000.0));
+            img.maxValue = std::max(img.maxValue, m);
+            img.frames.push_back(std::move(f));
+        }
+        img.loopCount = decoder->repetitionCount >= 0 ? decoder->repetitionCount + 1 : 0;
+        if (img.frames.size() < size_t(decoder->imageCount))
+            img.note = std::to_string(img.frames.size()) + " of " + std::to_string(decoder->imageCount) + " frames read";
+        if (img.frames.size() == 1) img.frames.clear();
+    }
+    img.mips.push_back(std::move(first));
     img.description = "AVIF, " + std::to_string(im->depth) + " bit" + (pq ? ", PQ HDR" : hlg ? ", HLG HDR" : "") +
                       primariesName(primaries) + (im->alphaPlane ? ", alpha" : "");
-    if (decoder->imageCount > 1) img.note = "sequence: frame 1 of " + std::to_string(decoder->imageCount) + " shown";
+    if (im->icc.size) {
+        const std::string profile = iccDescription(im->icc.data, im->icc.size);
+        if (!profile.empty()) img.metadata.push_back({"Color profile", profile});
+    }
+    if (im->exif.size) readExif(im->exif.data, im->exif.size, img);
     r.ok = true;
     return r;
 #endif
@@ -201,7 +228,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
         }
     } guard{dec, runner};
     if (!dec || !runner || JxlDecoderSetParallelRunner(dec, JxlResizableParallelRunner, runner) != JXL_DEC_SUCCESS ||
-        JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FULL_IMAGE) !=
+        JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE) !=
             JXL_DEC_SUCCESS ||
         JxlDecoderSetInput(dec, data, size) != JXL_DEC_SUCCESS) {
         r.error = "cannot start the JPEG XL decoder";
@@ -217,6 +244,7 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
     std::vector<float> floats;
     Image& img = r.image;
     Surface s;
+    int delayMs = 0;
 
     for (;;) {
         const JxlDecoderStatus status = JxlDecoderProcessInput(dec);
@@ -257,11 +285,26 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
                             : ce.primaries == JXL_PRIMARIES_P3 ? Primaries::DisplayP3
                                                                : Primaries::Bt709;
                 if (transfer == Transfer::Pq || transfer == Transfer::Hlg) hdr = true;
+            } else {  // an ICC profile instead of an encoding JPEG XL describes itself
+                size_t iccSize = 0;
+#if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 9, 0)
+                if (JxlDecoderGetICCProfileSize(dec, JXL_COLOR_PROFILE_TARGET_DATA, &iccSize) == JXL_DEC_SUCCESS && iccSize) {
+                    std::vector<uint8_t> icc(iccSize);
+                    if (JxlDecoderGetColorAsICCProfile(dec, JXL_COLOR_PROFILE_TARGET_DATA, icc.data(), iccSize) == JXL_DEC_SUCCESS) {
+#else
+                if (JxlDecoderGetICCProfileSize(dec, nullptr, JXL_COLOR_PROFILE_TARGET_DATA, &iccSize) == JXL_DEC_SUCCESS && iccSize) {
+                    std::vector<uint8_t> icc(iccSize);
+                    if (JxlDecoderGetColorAsICCProfile(dec, nullptr, JXL_COLOR_PROFILE_TARGET_DATA, icc.data(), iccSize) == JXL_DEC_SUCCESS) {
+#endif
+                        const std::string profile = iccDescription(icc.data(), icc.size());
+                        if (!profile.empty()) img.metadata.push_back({"Color profile", profile});
+                    }
+                }
             }
         } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
             img.width = info.xsize;
             img.height = info.ysize;
-            if (uint64_t(img.width) * img.height * 16 > 0x7fffffffull) {
+            if (uint64_t(img.width) * img.height * 16 > (uint64_t(1) << 34)) {
                 r.error = "image too large";
                 return r;
             }
@@ -287,27 +330,53 @@ LoadResult loadJxl(const uint8_t* data, size_t size) {
                     return r;
                 }
             }
-        } else if (status == JXL_DEC_FULL_IMAGE || status == JXL_DEC_SUCCESS) {
-            break;  // the first frame is enough
+        } else if (status == JXL_DEC_FRAME) {
+            JxlFrameHeader header;
+            if (info.have_animation && JxlDecoderGetFrameHeader(dec, &header) == JXL_DEC_SUCCESS &&
+                info.animation.tps_numerator)
+                delayMs = int(std::lround(double(header.duration) * 1000.0 * info.animation.tps_denominator /
+                                          info.animation.tps_numerator));
+        } else if (status == JXL_DEC_FULL_IMAGE) {
+            // The frame just decoded, as a surface: HDR as linear half floats, the rest as stored.
+            Surface frame;
+            float m = 0.0f;
+            if (hdr) {
+                frame = surfaceFor(GpuFormat::RGBA16F, img.width, img.height);
+                m = encodedToLinearHalf(floats.data(), size_t(img.width) * img.height, transfer, primaries,
+                                        reinterpret_cast<uint16_t*>(frame.data.data()));
+            } else {
+                frame = s;
+            }
+            img.maxValue = std::max(img.maxValue, m);
+            if (!info.have_animation) {
+                img.mips.push_back(std::move(frame));
+                break;
+            }
+            // An animation: every frame, as long as they fit in memory.
+            img.frames.push_back({std::move(frame), delayMs});
+            if (img.frames.size() >= 4096 || img.frames[0].surface.data.size() * (img.frames.size() + 1) >= (size_t(1) << 31)) {
+                img.note = std::to_string(img.frames.size()) + " frames read: the rest do not fit in memory";
+                break;
+            }
+        } else if (status == JXL_DEC_SUCCESS) {
+            break;
         }
     }
-    if (img.width == 0) {
+    if (img.width == 0 || (img.mips.empty() && img.frames.empty())) {
         r.error = "JPEG XL file has no image";
         return r;
     }
-    if (hdr) {
-        img.format = GpuFormat::RGBA16F;
-        s = surfaceFor(img.format, img.width, img.height);
-        img.maxValue = encodedToLinearHalf(floats.data(), size_t(img.width) * img.height, transfer, primaries,
-                                           reinterpret_cast<uint16_t*>(s.data.data()));
+    if (hdr) img.format = GpuFormat::RGBA16F;
+    if (!img.frames.empty()) {
+        img.mips.push_back(img.frames[0].surface);
+        img.loopCount = int(info.animation.num_loops);
+        if (img.frames.size() == 1) img.frames.clear();
     }
-    img.mips.push_back(std::move(s));
     img.description = "JPEG XL, " + std::to_string(info.bits_per_sample) + " bit" +
                       (info.exponent_bits_per_sample ? " float" : "") +
                       (transfer == Transfer::Pq ? ", PQ HDR" : transfer == Transfer::Hlg ? ", HLG HDR" : "") +
                       (info.uses_original_profile ? ", lossless/original colours" : ", lossy") +
                       (info.alpha_bits ? ", alpha" : "");
-    if (info.have_animation) img.note = "animation: first frame shown";
     r.ok = true;
     return r;
 #endif
@@ -449,46 +518,84 @@ LoadResult loadKtx(const uint8_t* data, size_t size) {
     img.height = tex->baseHeight;
     img.format = format;
     const uint8_t* base = ktxTexture_GetData(tex);
-    for (uint32_t level = 0; level < tex->numLevels; ++level) {
-        const uint32_t w = std::max(1u, img.width >> level), h = std::max(1u, img.height >> level);
-        ktx_size_t offset = 0;
-        if (ktxTexture_GetImageOffset(tex, level, 0, 0, &offset) != KTX_SUCCESS) break;
-        Surface s;
-        s.width = w;
-        s.height = h;
-        size_t rows = h;
-        if (info.compressed) {
-            s.rowPitch = std::max(1u, (w + 3) / 4) * info.bytes;
-            rows = std::max(1u, (h + 3) / 4);
-        } else {
-            s.rowPitch = ktxTexture_GetRowPitch(tex, level);  // includes KTX1 row padding
+    // One picture's mip chain: a face of an array layer, or a depth slice (level 0 only).
+    auto readMips = [&](uint32_t layer, uint32_t faceSlice, uint32_t levels) {
+        std::vector<Surface> mips;
+        for (uint32_t level = 0; level < levels; ++level) {
+            const uint32_t w = std::max(1u, img.width >> level), h = std::max(1u, img.height >> level);
+            ktx_size_t offset = 0;
+            if (ktxTexture_GetImageOffset(tex, level, layer, faceSlice, &offset) != KTX_SUCCESS) break;
+            Surface s;
+            s.width = w;
+            s.height = h;
+            size_t rows = h;
+            if (info.compressed) {
+                s.rowPitch = std::max(1u, (w + 3) / 4) * info.bytes;
+                rows = std::max(1u, (h + 3) / 4);
+            } else {
+                s.rowPitch = ktxTexture_GetRowPitch(tex, level);  // includes KTX1 row padding
+            }
+            const size_t bytes = s.rowPitch * rows;
+            if (offset + bytes > ktxTexture_GetDataSize(tex)) break;
+            s.data.assign(base + offset, base + offset + bytes);
+            mips.push_back(std::move(s));
         }
-        const size_t bytes = s.rowPitch * rows;
-        if (offset + bytes > ktxTexture_GetDataSize(tex)) break;
-        s.data.assign(base + offset, base + offset + bytes);
-        img.mips.push_back(std::move(s));
-    }
-    if (img.mips.empty()) {
-        r.error = "KTX file has no image data";
-        return r;
-    }
-    if (format == GpuFormat::RGBA16F || format == GpuFormat::RGBA32F) {
+        return mips;
+    };
+    auto maxOf = [&](const std::vector<Surface>& mips) {
+        if (format != GpuFormat::RGBA16F && format != GpuFormat::RGBA32F) return 0.0f;
+        Image probe;
+        probe.width = img.width;
+        probe.height = img.height;
+        probe.format = format;
+        probe.mips.push_back(mips[0]);
         float px[4], m = 0.0f;
         for (uint32_t y = 0; y < img.height; ++y)
             for (uint32_t x = 0; x < img.width; ++x)
-                if (readPixel(img, x, y, px))
+                if (readPixel(probe, x, y, px))
                     for (int c = 0; c < 3; ++c)
                         if (std::isfinite(px[c])) m = std::max(m, px[c]);
-        img.maxValue = m;
+        return m;
+    };
+
+    const bool volume = tex->numDimensions == 3 && tex->baseDepth > 1;
+    const uint32_t faces = tex->numFaces, layers = std::max(1u, tex->numLayers);
+    std::vector<std::vector<Surface>> pictures;
+    std::vector<std::string> names;
+    static const char* kFaceNames[6] = {"+X", "\xE2\x88\x92X", "+Y", "\xE2\x88\x92Y", "+Z", "\xE2\x88\x92Z"};
+    for (uint32_t layer = 0; layer < std::min(layers, 2048u); ++layer)
+        for (uint32_t f = 0; f < (volume ? std::min(tex->baseDepth, 2048u) : faces); ++f) {
+            std::vector<Surface> mips = readMips(layer, f, volume ? 1 : tex->numLevels);
+            if (mips.empty()) continue;
+            pictures.push_back(std::move(mips));
+            if (tex->isCubemap)
+                names.push_back(layers > 1 ? "Cube " + std::to_string(layer) + " " + kFaceNames[f % 6] : kFaceNames[f % 6]);
+            else
+                names.push_back("Slice " + std::to_string(volume ? f : layer));
+        }
+    if (pictures.empty()) {
+        r.error = "KTX file has no image data";
+        return r;
     }
+    if (pictures.size() > 1) {
+        img.layerKind = volume ? LayerKind::VolumeSlices : tex->isCubemap ? LayerKind::CubeFaces : LayerKind::ArraySlices;
+        for (size_t i = 0; i < pictures.size(); ++i) {
+            Layer l;
+            l.name = names[i];
+            l.width = img.width;
+            l.height = img.height;
+            l.format = format;
+            l.maxValue = maxOf(pictures[i]);
+            if (i > 0) l.mips = std::move(pictures[i]);
+            img.layers.push_back(std::move(l));
+        }
+        img.maxValue = img.layers[0].maxValue;
+    } else {
+        img.maxValue = maxOf(pictures[0]);
+    }
+    img.mips = std::move(pictures[0]);
     img.description = container + ", " + info.name + encoding + ", " + std::to_string(img.mips.size()) +
                       (img.mips.size() == 1 ? " mip" : " mips");
-    if (tex->isCubemap)
-        img.note = "cubemap: face 0 of 6 shown";
-    else if (tex->numLayers > 1)
-        img.note = "array: layer 0 of " + std::to_string(tex->numLayers) + " shown";
-    else if (tex->baseDepth > 1)
-        img.note = "volume: slice 0 shown";
     r.ok = true;
     return r;
 #endif

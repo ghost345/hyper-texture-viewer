@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HyperTextureViewer LANGUAGES C CXX)
+project(HyperTextureViewer VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -147,15 +147,36 @@ if(HTV_WITH_AVIF)
     FetchContent_MakeAvailable(libavif)
 endif()
 
+# OpenEXR: only the Core C library is linked (EXCLUDE_FROM_ALL keeps the C++ libraries out of the build). It reads
+# every compression, DWAA/DWAB and HTJ2K included, with its own vendored libdeflate and OpenJPH; Imath is fetched.
+set(OPENEXR_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(OPENEXR_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL_PKG_CONFIG OFF CACHE BOOL "" FORCE)
+set(OPENEXR_TEST_LIBRARIES OFF CACHE BOOL "" FORCE)
+set(OPENEXR_TEST_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_TEST_PYTHON OFF CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_DEFLATE ON CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_OPENJPH ON CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_IMATH ON CACHE BOOL "" FORCE)
+FetchContent_Declare(openexr
+    GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/openexr.git
+    GIT_TAG v3.4.9
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(openexr)
+
 unset(BUILD_TESTING)
 
 # Loaders and their third-party decoders, kept free of Windows APIs so tests run anywhere.
 find_package(Threads REQUIRED)
-add_library(htv_image STATIC src/image.cpp)
+add_library(htv_image STATIC src/image.cpp src/psd.cpp src/apng.cpp src/metadata.cpp src/exr.cpp src/stats.cpp)
 target_compile_options(htv_image PRIVATE ${htv_options})
 target_include_directories(htv_image PUBLIC src third_party)
 target_sources(htv_image PRIVATE src/codecs_modern.cpp)
-target_link_libraries(htv_image PUBLIC Threads::Threads PRIVATE webpdemux webp)
+target_link_libraries(htv_image PUBLIC Threads::Threads PRIVATE webpdemux webp OpenEXR::OpenEXRCore)
 if(HTV_WITH_JXL)
     target_compile_definitions(htv_image PRIVATE HTV_HAVE_JXL)
     target_link_libraries(htv_image PRIVATE jxl jxl_threads)
@@ -174,10 +195,25 @@ if(MSVC)
 endif()
 
 if(WIN32)
-    add_executable(hyper-texture-viewer WIN32 src/main.cpp src/wic_loader.cpp)
+    # Dear ImGui with its Win32 and Direct3D 11 backends. The backend's D3DCompile calls are renamed so they go
+    # through the viewer's lazily loaded d3dcompiler_47.dll instead of adding it to the import table.
+    add_library(htv_imgui STATIC
+        third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
+        third_party/imgui/backends/imgui_impl_dx11.cpp)
+    target_include_directories(htv_imgui PUBLIC third_party/imgui)
+    target_compile_definitions(htv_imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_DEBUG_TOOLS
+        PRIVATE IMGUI_IMPL_WIN32_DISABLE_GAMEPAD D3DCompile=htvD3DCompile UNICODE _UNICODE)
+    target_link_libraries(htv_imgui PUBLIC d3d11 dwmapi imm32)
+
+    # Interface fonts (Inter, JetBrains Mono) are linked in as resources.
+    configure_file(src/resources.rc.in ${CMAKE_BINARY_DIR}/resources.rc @ONLY)
+    add_executable(hyper-texture-viewer WIN32 src/main.cpp src/render.cpp src/files.cpp src/ui.cpp src/ui_widgets.cpp
+        src/ui_bars.cpp src/ui_views.cpp src/ui_panels.cpp src/ui_settings.cpp src/ui_compare.cpp src/ui_frames.cpp src/keys.cpp src/icons.cpp src/wic_loader.cpp ${CMAKE_BINARY_DIR}/resources.rc)
     target_compile_options(hyper-texture-viewer PRIVATE ${htv_options})
-    target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE)
-    target_link_libraries(hyper-texture-viewer PRIVATE htv_image d3d11 dxgi shlwapi windowscodecs ole32)
+    target_compile_definitions(hyper-texture-viewer PRIVATE UNICODE _UNICODE HTV_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(hyper-texture-viewer PRIVATE htv_image htv_imgui d3d11 dxgi dwmapi shlwapi windowscodecs ole32
+        comdlg32)
     if(MINGW)
         target_link_options(hyper-texture-viewer PRIVATE -static -s)
     endif()
@@ -192,6 +228,7 @@ if(BUILD_TESTING)
     endif()
     # The tests encode WebP samples, so they link libwebp's encoder too.
     target_link_libraries(htv_tests PRIVATE htv_image webp)
+    target_compile_definitions(htv_tests PRIVATE HTV_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
     if(HTV_WITH_JXL)
         target_compile_definitions(htv_tests PRIVATE HTV_HAVE_JXL)
         target_link_libraries(htv_tests PRIVATE jxl)
