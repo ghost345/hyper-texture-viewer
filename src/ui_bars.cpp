@@ -307,12 +307,14 @@ const Tool kHideOrder[] = {Tool::Help,      Tool::Settings, Tool::Ruler, Tool::G
                            Tool::Compare,   Tool::ActualSize, Tool::Zoom, Tool::TexMode,   Tool::Channels};
 constexpr int kHideable = int(sizeof kHideOrder / sizeof kHideOrder[0]);
 
-// How the bar fits the window: the first `hidden` tools of kHideOrder sit in the "..." menu; once they all
-// do, the file name gets shorter and at last the folder counter goes.
+// How the bar fits the window. The file name has the upper row to itself and takes what the row leaves
+// (`nameMax`); at its shortest the folder counter goes. In the lower row the first `hidden` tools of
+// kHideOrder sit in the "..." menu.
 struct TopLayout {
     int hidden = 0;
     float nameMax = 240;
     bool counter = true;
+    bool noName = false;     // measure the name row without the name, to see what is left for it
     bool worstCase = false;  // measure the widest the bar can get at this layout, whatever the file
 
     bool shows(Tool tool) const {
@@ -332,7 +334,7 @@ void fileGroup(Row& r, const TopLayout& L) {
     const std::string name = fileName();
     const bool none = name.empty();
     const std::string shown = ellipsize(fontMedium, 13, none ? std::string("No image") : name, S(L.nameMax));
-    const float nameW = L.worstCase ? S(L.nameMax) : textSize(fontMedium, 13, shown.c_str()).x;
+    const float nameW = L.noName ? 0.0f : L.worstCase ? S(L.nameMax) : textSize(fontMedium, 13, shown.c_str()).x;
     const bool loading = isLoadingVisible();
     const bool failed = (!app.error.empty() && !app.loading) || L.worstCase;
     if (!r.measure) {
@@ -367,7 +369,6 @@ void fileGroup(Row& r, const TopLayout& L) {
 
 void viewGroup(Row& r, const TopLayout& L) {
     const int off = noImage() ? kDisabled : 0;
-    r.separator(16, 5);
     if (r.button("fit", Icon::Fit, nullptr, (app.fit && !off ? kOn : 0) | off, "Fit to window", keyText(Action::Fit))) {
         app.fit = true;
         fitToWindow();
@@ -638,14 +639,16 @@ void rightGroup(Row& r, const TopLayout& L) {
     if (L.shows(Tool::Help) &&
         r.button("help", Icon::Help, nullptr, app.showHelp ? kOn : 0, "Keyboard shortcuts", keyText(Action::Help)))
         app.showHelp = !app.showHelp;
-    r.separator(16, 5);
-    r.x -= S(5) + r.gap;  // the last separator has no right margin
+    r.x += S(6) - r.gap;  // the margin to the window edge
 }
 
-// Minimise, maximise and close (.wc): 40 wide, the bar's height, no gap between them.
+// The upper row: Open, Previous, Next and the file name, with the window buttons on the right.
+float nameRowH() { return std::round(topBarH * 0.5f); }
+
+// Minimise, maximise and close (.wc): 40 wide, the upper row's height, no gap between them.
 float windowButtons(Row& r) {
     if (kBrowser) return 0;  // the browser has its own
-    const float w = S(40), h = topBarH - line();
+    const float w = S(40), h = nameRowH() - line();
     if (r.measure) return 3 * w;
     const Theme& t = T();
     const Icon icons[3] = {Icon::Minimize, windowMaximized() ? Icon::Restore : Icon::Maximize, Icon::Close};
@@ -671,8 +674,8 @@ float windowButtons(Row& r) {
     return 3 * w;
 }
 
+// The lower row starts at the same place whatever the file is called, so the tools never move.
 void leftGroups(Row& r, const TopLayout& L) {
-    fileGroup(r, L);
     viewGroup(r, L);
     channelsGroup(r, L);
     backgroundGroup(r, L);
@@ -745,54 +748,73 @@ float topBarMinWidth() { return tightestWidth; }
 void topBar() {
     const Theme& t = T();
     const float W = float(app.winW);
+    const float h1 = nameRowH();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(W, topBarH));
     ImGui::Begin("##top", nullptr, kBarFlags);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, topBarH), t.bar);
+    dl->AddRectFilled(ImVec2(0, h1 - line()), ImVec2(W, h1), t.bd);
     dl->AddRectFilled(ImVec2(0, topBarH - line()), ImVec2(W, topBarH), t.bd);
 
     Row r;
     r.dl = dl;
-    r.cy = (topBarH - line()) * 0.5f;
     r.gap = S(2);
     r.topBar = true;
 
-    // Find the widest layout that fits, measuring without drawing.
-    auto width = [&](const TopLayout& L) {
+    // Upper row: what is left after the buttons, the counter and the window buttons goes to the name.
+    auto nameRowWidth = [&](const TopLayout& L) {
+        r.measure = true;
+        r.x = 0;
+        fileGroup(r, L);
+        return S(6) + r.x + S(8) + windowButtons(r);
+    };
+    // Lower row: tools go into "..." one at a time until it fits.
+    auto toolRowWidth = [&](const TopLayout& L) {
         r.measure = true;
         r.x = 0;
         leftGroups(r, L);
         float w = S(6) + r.x + S(8);
         r.x = 0;
         rightGroup(r, L);
-        w += r.x + windowButtons(r);
-        return w;
+        return w + r.x;
     };
-    // Tools go into "..." one at a time, then the file name gives up width down to 60 px, then the counter goes.
     TopLayout L;
-    while (L.hidden < kHideable && width(L) > W) ++L.hidden;
-    while (L.nameMax > 60.0f && width(L) > W) L.nameMax = std::max(60.0f, L.nameMax - 4.0f);
-    if (width(L) > W) L.counter = false;
-    // The window can't get narrower than the bar at its tightest.
+    while (L.hidden < kHideable && toolRowWidth(L) > W) ++L.hidden;
+    TopLayout bare = L;
+    bare.noName = true;
+    float room = (W - nameRowWidth(bare)) / S(1);
+    if (room < 60.0f) {
+        L.counter = bare.counter = false;
+        room = (W - nameRowWidth(bare)) / S(1);
+    }
+    L.nameMax = std::max(60.0f, std::floor(room));
+
+    // The window can't get narrower than either row at its tightest.
     TopLayout tightest;
     tightest.hidden = kHideable;
     tightest.nameMax = 60.0f;
     tightest.counter = false;
     tightest.worstCase = true;
-    tightestWidth = std::ceil(width(tightest));
-    TopLayout right = L;
+    tightestWidth = std::ceil(std::max(nameRowWidth(tightest), toolRowWidth(tightest)));
+
     r.measure = true;
     r.x = 0;
-    rightGroup(r, right);
-    const float rightW = r.x + windowButtons(r);
+    rightGroup(r, L);
+    const float rightW = r.x;
 
     r.measure = false;
+    r.cy = (h1 - line()) * 0.5f;
+    r.x = S(6);
+    fileGroup(r, L);
+    r.x = W - (kBrowser ? 0.0f : 3 * S(40));
+    windowButtons(r);
+
+    r.cy = h1 + (topBarH - h1 - line()) * 0.5f;
     r.x = S(6);
     leftGroups(r, L);
     r.x = W - rightW;
     rightGroup(r, L);
-    windowButtons(r);
     ImGui::End();
 }
 

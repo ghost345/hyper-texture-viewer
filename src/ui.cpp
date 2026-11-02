@@ -55,7 +55,7 @@ void uiSetScale(float dpiScale) {
     st.ScaleAllSizes(s);
     st.FontSizeBase = 13.0f;
     st.FontScaleDpi = s;
-    topBarH = S(32);
+    topBarH = 2 * std::round(S(32));  // two rows: the file name, then the tools
     bottomBarH = line() + S(sliderRowHeight()) + S(24);
 }
 
