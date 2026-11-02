@@ -392,6 +392,7 @@ void ensureChannelStats() {
         return;
     }
     // The GPU decodes sRGB formats to linear; the histogram shows stored values like for every other format.
+    // (Alpha is never sRGB-encoded.)
     const bool srgb = isSrgbFormat(app.image.format);
     auto stored = [srgb](float v) {
         if (!srgb) return v;
@@ -403,7 +404,7 @@ void ensureChannelStats() {
         for (int x = 0; x < width; ++x, p += 4) {
             const float r = stored(p[0]);
             if (info.channels == 1) builder.add(r, r, r);
-            else builder.add(r, stored(p[1]), info.channels == 2 ? 0.0f : stored(p[2]));
+            else builder.add(r, stored(p[1]), info.channels == 2 ? 0.0f : stored(p[2]), info.channels == 4 ? p[3] : 1.0f);
         }
     });
     if (ok) app.stats = builder.finish();

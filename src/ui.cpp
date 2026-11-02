@@ -112,6 +112,7 @@ void uiFrame() {
     }
     infoPanel();
     histogramPanel();
+    averageColorPanel();
     colorMatchPanel();
     comparePanel();
     framesPanel();
@@ -188,6 +189,7 @@ void runAction(Action a) {
             else stepMatchRegion(+1);
             break;
         case Action::Histogram: app.showHistogram = !app.showHistogram; break;
+        case Action::AverageColor: app.showAverage = !app.showAverage; break;
         case Action::Info: app.showInfo = !app.showInfo; break;
         case Action::Layers: toggleFramesOrLayers(); break;
         case Action::Compare: toggleCompare(); break;
@@ -227,6 +229,7 @@ bool uiKeyDown(int vk) {
         else if (app.showFrames) app.showFrames = false;
         else if (app.showInfo) app.showInfo = false;
         else if (app.showHistogram) app.showHistogram = false;
+        else if (app.showAverage) app.showAverage = false;
         else if (!kBrowser) quitApp();  // a browser tab is closed by the browser
         else return false;
         return true;

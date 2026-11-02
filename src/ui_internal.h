@@ -197,6 +197,7 @@ void viewportOverlays();  // grid, tile borders, pixel outline, and the empty, e
 void notices();           // "Reloaded", the clean-mode hint
 void infoPanel();
 void histogramPanel();  // ui_panels.cpp
+void averageColorPanel();
 void colorMatchPanel();
 // M: opens Color match on the locked pixel or the one under the cursor (else waits for a click), or closes it.
 void toggleColorMatch();
@@ -214,6 +215,10 @@ void opacityPopup(ImVec2 anchorRightBottom);
 bool isLoadingVisible();  // a load has run long enough to show its progress
 
 void copyColorValue();
+// The pixel readout's colour formats (ui_bars.cpp): `display` is the sRGB colour in 0..1, `raw` the stored values.
+std::string formatColor(const float display[4], const float raw[4], ColorFormat f);
+float srgbEncode(float v);
+extern const char* kColorFormatNames[];
 void toggleLockPixel();  // the pixel under the cursor
 void copyAllColorFormats();
 void cycleAlphaBackground();

@@ -933,6 +933,7 @@ const std::vector<HelpGroup>& helpColumn(int c) {
            {"Color match", {}, {A::ColorMatch}},
            {"Previous / next match region", {}, {A::MatchPrevRegion, A::MatchNextRegion}},
            {"Histogram / Info / Layers", {}, {A::Histogram, A::Info, A::Layers}},
+           {"Average color", {}, {A::AverageColor}},
            {"Compare", {}, {A::Compare}}}},
          {"Window",
           {{"Always on top", {}, {A::AlwaysOnTop}},
