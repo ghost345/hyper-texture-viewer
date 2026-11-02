@@ -143,6 +143,12 @@ void startWindowMove() {
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // The pan ends before ImGui sees the button go up: ImGui releases the mouse capture then, and the
+    // WM_CAPTURECHANGED that follows would cancel the pan before it could end as a click.
+    if ((msg == WM_LBUTTONUP || msg == WM_MBUTTONUP) && app.dragging) {
+        endPan();
+        ReleaseCapture();
+    }
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
     if ((msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
         msg == WM_NCMOUSEMOVE || msg == WM_MOUSELEAVE || msg == WM_SIZE || msg == WM_ACTIVATE)
@@ -311,11 +317,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_LBUTTONUP:
         case WM_MBUTTONUP:
-            if (app.dragging) {
-                endPan();
-                ReleaseCapture();
-            }
-            return 0;
+            return 0;  // the pan ended above
         case WM_LBUTTONDBLCLK:
             if (uiMouse || !inViewport(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) return 0;
             imageDoubleClicked();
