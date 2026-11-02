@@ -229,7 +229,7 @@ void requestOpen(const fs::path& path, OpenMode mode) {
     job->path = path;
     job->mode = mode;
     job->generation = ++latestGeneration;
-    job->channelStats = app.showHistogram;
+    job->channelStats = app.showHistogram || app.showAverage;
     app.loading = true;
     app.loadingSinceMs = nowMs();
     app.loadingProgress = -1.0f;

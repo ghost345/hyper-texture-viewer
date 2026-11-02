@@ -1,4 +1,4 @@
-// Analysis panels over the image: Histogram and Color match.
+// Analysis panels over the image: Histogram, Average color and Color match.
 
 #include "ui_internal.h"
 
@@ -268,6 +268,204 @@ void histogramPanel() {
     ImGui::SetCursorScreenPos(p);
     ImGui::Dummy(ImVec2(width, y - p.y));
     ImGui::End();
+}
+
+// ---- Average color ----
+
+void averageColorPanel() {
+    if (!app.showAverage || !app.hasImage) return;
+    ensureChannelStats();
+    const Theme& t = T();
+    const float width = S(300);
+    // Bottom left, out of the way of the Histogram above it.
+    if (!beginPanel("##average", ImVec2(app.vpX + S(16), app.vpY + std::max(S(16), app.vpH - S(280))), width)) {
+        ImGui::End();
+        return;
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetWindowPos();
+    const float hh = S(26);
+    panelHeader(dl, p, width, hh, "Average color", 12, 9);
+    if (smallButton(dl, "close", Icon::Dismiss, ImVec2(p.x + width - S(3) - S(20), std::round(p.y + (hh - line() - S(20)) * 0.5f)),
+                    20, 14, "Close", keyText(Action::AverageColor)))
+        app.showAverage = false;
+
+    const ImageStats& st = app.stats;
+    const htv::FormatInfo& info = htv::formatInfo(app.image.format);
+    const bool eightBit = !isHighPrecision(app.image);
+    const bool hasAlphaChannel = info.channels == 4 && app.image.format != GpuFormat::BGRX8;
+    const float x0 = p.x + S(10), x1 = p.x + width - S(10);
+    float y = p.y + hh + S(10);
+
+    auto finish = [&](float bottom) {
+        ImGui::SetCursorScreenPos(p);
+        ImGui::Dummy(ImVec2(width, bottom - p.y));
+        ImGui::End();
+    };
+    auto message = [&](const char* text) {
+        drawText(dl, fontRegular, 12, x0, y + S(10), t.tx3, text);
+        y += S(20);
+    };
+    if (!st.channelsValid) {
+        message("Not available for this image");
+        finish(y + S(10));
+        return;
+    }
+
+    // All pixels alike, or weighted by alpha: the colour of what is visible.
+    const bool canWeight = hasAlphaChannel && app.imageAlpha;
+    if (canWeight) {
+        static const char* modes[] = {"All pixels", "Weighted by alpha"};
+        static const char* tips[] = {"Every pixel counts the same, whatever its alpha",
+                                     "Pixels count by their alpha: transparent ones are left out, so the average is "
+                                     "the colour of what is visible"};
+        int mode = app.averageByAlpha ? 1 : 0;
+        if (segmented(dl, "mode", x0, y + S(10), modes, 2, mode, true, tips)) app.averageByAlpha = mode == 1;
+        y += S(20) + S(10);
+    }
+    const bool byAlpha = canWeight && app.averageByAlpha;
+    if (byAlpha && st.alphaSum <= 0.0) {
+        message("Every pixel is fully transparent");
+        finish(y + S(10));
+        return;
+    }
+
+    // Stored values (raw) and the colour as the viewer shows it (display, sRGB 0..1).
+    float raw[4], display[4];
+    for (int c = 0; c < 3; ++c) raw[c] = float(byAlpha ? st.weightedMean[c] : st.channel[c].mean);
+    raw[3] = hasAlphaChannel ? float(st.alphaMean) : 1.0f;
+    const bool encode = isFloatFormat(info) && app.dataIsLinear;
+    for (int c = 0; c < 4; ++c) display[c] = (c < 3 && encode) ? srgbEncode(raw[c]) : std::clamp(raw[c], 0.0f, 1.0f);
+    auto byte = [](float v) { return int(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+
+    // Swatch; a click copies the colour like the value below it.
+    const std::string colorText = formatColor(display, raw, app.colorFormat);
+    {
+        const ImVec2 a(x0, y), b(x1, y + S(44));
+        dl->AddRectFilled(a, b, IM_COL32(byte(display[0]), byte(display[1]), byte(display[2]), 255), S(3));
+        dl->AddRect(a, b, t.bd2, S(3), 0, line());
+        ImGui::SetCursorScreenPos(a);
+        if (ImGui::InvisibleButton("swatch", ImVec2(b.x - a.x, b.y - a.y))) {
+            ImGui::SetClipboardText(colorText.c_str());
+            flashCopied(ImGui::GetID("##avgcolor"));
+        }
+        requestTip(ImRect(a, b),
+                   encode ? "The average colour, as the viewer shows it (linear values encoded to sRGB, clipped to 0-1). "
+                            "Click to copy"
+                          : "The average colour. Click to copy",
+                   nullptr);
+        y = b.y + S(8);
+    }
+
+    // The colour in the pixel readout's format; a click copies it.
+    {
+        const float cy = y + S(11);
+        const ImVec2 a(p.x, y), b(p.x + width, y + S(22));
+        ImGui::SetCursorScreenPos(a);
+        const bool clicked = ImGui::InvisibleButton("value", ImVec2(width, S(22)));
+        const bool hovered = ImGui::IsItemHovered();
+        if (clicked) {
+            ImGui::SetClipboardText(colorText.c_str());
+            flashCopied(ImGui::GetID("##avgcolor"));
+        }
+        if (hovered) dl->AddRectFilled(a, b, t.ctlh);
+        drawText(dl, fontRegular, 12, x0, cy, t.tx2, kColorFormatNames[int(app.colorFormat)]);
+        const float vx = x0 + S(86);
+        if (copiedRecently(ImGui::GetID("##avgcolor"))) drawText(dl, fontMono, 12, vx, cy, t.ok, "Copied");
+        else drawText(dl, fontMono, 12, vx, cy, t.tx, colorText.c_str());
+        if (hovered) {
+            drawIcon(dl, Icon::Copy, ImVec2(x1 - S(13), std::round(cy - S(6.5f))), S(13), t.tx2);
+            requestTip(ImRect(a, b), "Click to copy. The format is the one chosen in the status bar", nullptr);
+        }
+        y = b.y + S(4);
+    }
+    dl->AddRectFilled(ImVec2(p.x + line(), y), ImVec2(p.x + width - line(), y + line()), t.bd);
+    y += S(6);
+
+    // One row per stored channel: a bar for 0..1 and the mean. A click copies the number.
+    struct ChannelRow {
+        const char* name;
+        const char* tip;
+        double value;
+        ImU32 color;
+    };
+    std::vector<ChannelRow> rows;
+    const double lum = 0.2126 * raw[0] + 0.7152 * raw[1] + 0.0722 * raw[2];
+    if (info.channels == 1) {
+        rows.push_back({"V", "Mean of the single channel", raw[0], hex(0xcccccc)});
+    } else {
+        rows.push_back({"R", "Mean of red", raw[0], hex(0xff8a80)});
+        rows.push_back({"G", "Mean of green", raw[1], hex(0x8fe39a)});
+        if (info.channels >= 3) rows.push_back({"B", "Mean of blue", raw[2], hex(0x8ab6ff)});
+        if (hasAlphaChannel) rows.push_back({"A", "Mean of alpha, over all pixels", raw[3], hex(0xcccccc)});
+        if (info.channels >= 3)
+            rows.push_back({"L", "Luminance of the average (Rec. 709 weights on the stored values)", lum, hex(0xcccccc)});
+    }
+    const float barX = x0 + S(22), barW = S(110), numX = barX + barW + S(14);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const ChannelRow& row = rows[i];
+        char value[48], second[48] = "";
+        if (eightBit) {
+            std::snprintf(value, sizeof value, "%.1f", row.value * 255.0);
+            std::snprintf(second, sizeof second, "%.1f%%", row.value * 100.0);
+        } else {
+            std::snprintf(value, sizeof value, "%.5g", row.value);
+        }
+        const ImVec2 a(p.x, y), b(p.x + width, y + S(22));
+        const float cy = y + S(11);
+        ImGui::SetCursorScreenPos(a);
+        ImGui::PushID(int(i));
+        const bool clicked = ImGui::InvisibleButton("channel", ImVec2(width, S(22)));
+        const bool hovered = ImGui::IsItemHovered();
+        const ImGuiID id = ImGui::GetItemID();
+        ImGui::PopID();
+        if (clicked) {
+            ImGui::SetClipboardText(value);
+            flashCopied(id);
+        }
+        if (hovered) dl->AddRectFilled(a, b, t.ctlh);
+        drawText(dl, fontMono, 12, x0, cy, app.darkTheme ? row.color : t.tx2, row.name);
+        // The bar: 0..1; values above 1 fill it and get a mark at the end.
+        const ImVec2 ta(barX, std::round(cy - S(2))), tb(barX + barW, ta.y + S(4));
+        dl->AddRectFilled(ta, tb, t.bd, S(2));
+        const float f = float(std::clamp(row.value, 0.0, 1.0));
+        if (f > 0.0f) dl->AddRectFilled(ta, ImVec2(ta.x + std::max(S(2), barW * f), tb.y), app.darkTheme ? row.color : t.tx2, S(2));
+        if (row.value > 1.0) dl->AddRectFilled(ImVec2(tb.x + S(2), ta.y - S(2)), ImVec2(tb.x + S(4), tb.y + S(2)), t.tx);
+        if (copiedRecently(id)) {
+            drawText(dl, fontMono, 12, numX, cy, t.ok, "Copied");
+        } else {
+            drawText(dl, fontMono, 12, numX, cy, t.tx, value);
+            if (second[0]) drawText(dl, fontMono, 11, x1 - textSize(fontMono, 11, second).x, cy, t.tx3, second);
+        }
+        if (hovered) {
+            std::string tip = row.tip;
+            if (eightBit) tip += ", in 8-bit steps (0-255)";
+            tip += ". Click to copy";
+            requestTip(ImRect(a, b), tip.c_str(), nullptr);
+        }
+        y += S(22);
+    }
+
+    // What the average was taken over.
+    y += S(4);
+    {
+        std::string d = std::to_string(st.pixels - st.nonFinite), counted;
+        for (size_t i = 0; i < d.size(); ++i) {
+            if (i && (d.size() - i) % 3 == 0) counted += ' ';
+            counted += d[i];
+        }
+        char text[128];
+        if (st.nonFinite)
+            std::snprintf(text, sizeof text, "%s px \xC2\xB7 %llu NaN/Inf left out", counted.c_str(),
+                          (unsigned long long)st.nonFinite);
+        else
+            std::snprintf(text, sizeof text, "%s px%s", counted.c_str(), eightBit ? "" : " \xC2\xB7 stored values");
+        drawText(dl, fontRegular, 11, x0, y + S(8), t.tx3, text);
+        tipArea("count", ImRect(ImVec2(x0, y), ImVec2(x1, y + S(16))),
+                "Pixels the average is taken over: the whole image at full size (mip 0), values as stored in the file");
+        y += S(16);
+    }
+    finish(y + S(10));
 }
 
 // ---- Color match ----

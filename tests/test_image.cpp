@@ -1049,6 +1049,20 @@ void testStats() {
     uint64_t logged = 0;  // zero is left out of the log bins, NaN out of everything
     for (uint32_t n : ch.channel[1].log) logged += n;
     CHECK(logged == 2);
+    // Average color: plain alpha mean over the finite pixels, and R weighted by alpha.
+    CHECK(std::fabs(ch.alphaMean - 1.0) < 1e-9 && std::fabs(ch.weightedMean[0] - 1.5) < 1e-9);
+    {
+        Image a = img;
+        float* v = reinterpret_cast<float*>(a.mips[0].data.data());
+        v[3] = 0.0f;   // black pixel transparent
+        v[7] = 0.5f;   // grey pixel half visible
+        v[11] = 2.0f;  // alpha above 1 weighs as 1
+        const ImageStats w = computeStats(a, true);
+        CHECK(std::fabs(w.alphaMean - 2.5 / 3.0) < 1e-6);
+        CHECK(std::fabs(w.alphaSum - 1.5) < 1e-6);
+        CHECK(std::fabs(w.weightedMean[0] - (0.25 + 4.0) / 1.5) < 1e-6);
+        CHECK(std::fabs(w.channel[0].mean - 1.5) < 1e-9);  // the plain mean does not change
+    }
 
     // Two regions: an L shape joined through the row below, and a lone pixel; a diagonal does not join.
     const uint8_t mask[4 * 5] = {1, 0, 1, 0, 0,

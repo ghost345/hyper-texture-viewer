@@ -40,7 +40,7 @@ struct LoadedFile {
     std::string format;  // extension in capitals, for the error card
     htv::Image image;
     htv::ImageStats stats;
-    bool channelStats = false;  // the Histogram panel is open: per-channel statistics too
+    bool channelStats = false;  // the Histogram or Average color panel is open: per-channel statistics too
     bool alpha = false;
     uint64_t fileSize = 0;
     FileStamp stamp;

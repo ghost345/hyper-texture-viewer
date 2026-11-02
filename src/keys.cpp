@@ -69,6 +69,7 @@ const ActionInfo kActions[int(Action::Count)] = {
     {"match_prev_region", "Color match: previous region", {key(VK_OEM_COMMA)}},
     {"match_next_region", "Color match: next region", {key(VK_OEM_PERIOD)}},
     {"histogram", "Histogram", {key('H', C)}},
+    {"average_color", "Average color", {key('E')}},
     {"info", "Info", {key('I')}},
     {"layers", "Layers", {key('L')}},
     {"compare", "Compare", {key('K', C)}},

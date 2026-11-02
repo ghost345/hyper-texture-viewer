@@ -31,7 +31,7 @@ StatsBuilder::StatsBuilder(bool channels) : channels_(channels) {
         }
 }
 
-void StatsBuilder::add(float r, float g, float b) {
+void StatsBuilder::add(float r, float g, float b, float a) {
     ++s_.pixels;
     if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) {
         ++s_.nonFinite;
@@ -42,6 +42,13 @@ void StatsBuilder::add(float r, float g, float b) {
     const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
     maxLum_ = std::max(maxLum_, lum);
     if (channels_) {
+        // A NaN or infinite alpha counts as transparent.
+        const float alpha = std::isfinite(a) ? a : 0.0f, weight = std::clamp(alpha, 0.0f, 1.0f);
+        alphaSum_ += alpha;
+        clampedAlphaSum_ += weight;
+        weightedSum_[0] += double(r) * weight;
+        weightedSum_[1] += double(g) * weight;
+        weightedSum_[2] += double(b) * weight;
         const float v[4] = {r, g, b, lum};
         for (int i = 0; i < 4; ++i) {
             ImageStats::Channel& c = s_.channel[i];
@@ -74,6 +81,9 @@ ImageStats StatsBuilder::finish() {
             s_.channel[i].min = finite ? min_[i] : 0.0f;
             s_.channel[i].max = finite ? max_[i] : 0.0f;
         }
+        s_.alphaMean = finite ? alphaSum_ / double(finite) : 1.0;
+        s_.alphaSum = clampedAlphaSum_;
+        for (int i = 0; i < 3; ++i) s_.weightedMean[i] = clampedAlphaSum_ > 0 ? weightedSum_[i] / clampedAlphaSum_ : 0.0;
         s_.channelsValid = true;
     }
     return std::move(s_);
@@ -100,7 +110,7 @@ ImageStats computeStats(const Image& image, bool channels) {
                 std::memcpy(h, row + size_t(x) * n * 2, size_t(n) * 2);
                 const float r = table[h[0]];
                 if (n == 1) acc.add(r, r, r);
-                else acc.add(r, table[h[1]], n == 2 ? 0.0f : table[h[2]]);
+                else acc.add(r, table[h[1]], n == 2 ? 0.0f : table[h[2]], n == 4 ? table[h[3]] : 1.0f);
             }
         }
     } else {
@@ -109,7 +119,7 @@ ImageStats computeStats(const Image& image, bool channels) {
             for (uint32_t x = 0; x < image.width; ++x) {
                 float px[4];
                 readPixel(image, x, y, px);
-                acc.add(px[0], px[1], px[2]);
+                acc.add(px[0], px[1], px[2], px[3]);
             }
     }
     return acc.finish();

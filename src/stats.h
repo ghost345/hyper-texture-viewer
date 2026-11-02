@@ -34,6 +34,11 @@ struct ImageStats {
     };
     bool channelsValid = false;
     Channel channel[4];
+    // For the Average color panel, filled with the channels: the mean alpha (1 for images without alpha) and
+    // the mean R, G, B weighted by alpha (clamped to 0..1), the colour of what is visible.
+    double alphaMean = 1.0;
+    double alphaSum = 0.0;          // sum of the clamped alphas; 0 when every pixel is transparent
+    double weightedMean[3] = {0, 0, 0};
 
     // Luminance below which `fraction` (0..1) of the finite pixels lie.
     float percentile(double fraction) const;
@@ -47,7 +52,7 @@ public:
     explicit StatsBuilder(bool channels);
     StatsBuilder(const StatsBuilder&) = delete;
     StatsBuilder& operator=(const StatsBuilder&) = delete;
-    void add(float r, float g, float b);
+    void add(float r, float g, float b, float a = 1.0f);
     ImageStats finish();
 
 private:
@@ -55,6 +60,7 @@ private:
     bool channels_;
     float minValue_ = INFINITY, maxValue_ = -INFINITY, minLum_ = INFINITY, maxLum_ = -INFINITY;
     double sum_[4] = {0, 0, 0, 0};
+    double alphaSum_ = 0, clampedAlphaSum_ = 0, weightedSum_[3] = {0, 0, 0};
     float min_[4] = {INFINITY, INFINITY, INFINITY, INFINITY}, max_[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
 };
 

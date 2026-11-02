@@ -261,6 +261,8 @@ struct App {
     bool showInfo = false;
     bool showHelp = false;
     bool showHistogram = false;
+    bool showAverage = false;     // Average color panel
+    bool averageByAlpha = true;   // weight the average by alpha (images with transparency)
     bool showSettings = false;
     int histogramMode = 0;       // RGB, R, G, B, luminance, parade
     bool histogramLog = false;   // pixel counts on a log scale
@@ -311,7 +313,8 @@ void chooseCustomBackground();
 void chooseViewportColor();  // Settings: the colour around the image
 bool pickColor(float rgb[3]);  // the Windows colour dialog; false when cancelled
 void autoRange();
-// Per-channel statistics of the shown image for the Histogram panel, computed once when first needed.
+// Per-channel statistics of the shown image for the Histogram and Average color panels, computed once when
+// first needed.
 void ensureChannelStats();
 void saveSettings();
 // settings.ini next to the exe instead of in %APPDATA%.

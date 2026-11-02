@@ -28,10 +28,14 @@ struct Readout {
     bool outOfRange = false;  // values outside 0..1
 };
 
+}  // namespace
+
 float srgbEncode(float v) {
     v = std::clamp(v, 0.0f, 1.0f);
     return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
 }
+
+namespace {
 
 // n x n stored values around (x, y), edge pixels repeated. Block-compressed formats go through the GPU.
 bool readBlock(int x, int y, int n, float* out) {
@@ -96,6 +100,8 @@ Readout readPixelUnderCursor() {
     return r;
 }
 
+}  // namespace
+
 const char* kColorFormatNames[int(ColorFormat::Count)] = {"HTML", "Hex", "Delphi Hex", "VB Hex", "RGB",
                                                           "RGB Float", "HSV", "HSL", "Long"};
 // The longest text of each format, so the status row does not move as the value changes.
@@ -150,6 +156,8 @@ std::string formatColor(const float display[4], const float raw[4], ColorFormat 
     }
     return buf;
 }
+
+namespace {
 
 Readout lastReadout;  // for Ctrl+C
 
@@ -298,12 +306,12 @@ bool noImage() { return !app.hasImage; }
 
 // Controls that move into the "..." menu one at a time as the window narrows, in bar order.
 enum class Tool { ActualSize, Zoom, RotL, RotR, FlipH, FlipV, Channels, TexMode, AlphaBg, Tiling, Grid, Ruler,
-                  Match, Histogram, Info, Layers, Compare, OnTop, Settings, Help, Count };
+                  Match, Histogram, Average, Info, Layers, Compare, OnTop, Settings, Help, Count };
 
 // Which goes first: the least used, keeping the tools that read the image and the channel switch for last.
 const Tool kHideOrder[] = {Tool::Help,      Tool::Settings, Tool::Ruler, Tool::Grid,       Tool::FlipV,
                            Tool::FlipH,     Tool::RotR,  Tool::RotL,     Tool::Tiling,     Tool::AlphaBg,
-                           Tool::OnTop,     Tool::Layers, Tool::Histogram, Tool::Info,     Tool::Match,
+                           Tool::OnTop,     Tool::Layers, Tool::Average, Tool::Histogram, Tool::Info, Tool::Match,
                            Tool::Compare,   Tool::ActualSize, Tool::Zoom, Tool::TexMode,   Tool::Channels};
 constexpr int kHideable = int(sizeof kHideOrder / sizeof kHideOrder[0]);
 
@@ -508,7 +516,7 @@ void overlaysGroup(Row& r, const TopLayout& L) {
 
 void analysisGroup(Row& r, const TopLayout& L) {
     const bool layers = isAnimation() || hasLayers();  // the button only exists for files with frames or layers
-    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Info) && !(layers && L.shows(Tool::Layers))) return;
+    if (!L.shows(Tool::Match) && !L.shows(Tool::Histogram) && !L.shows(Tool::Average) && !L.shows(Tool::Info) && !(layers && L.shows(Tool::Layers))) return;
     const int off = noImage() ? kDisabled : 0;
     r.separator(16, 5);
     if (L.shows(Tool::Match) && r.button("match", Icon::ColorMatch, nullptr, (app.colorMatch && !off ? kOn : 0) | off, "Color match",
@@ -516,6 +524,9 @@ void analysisGroup(Row& r, const TopLayout& L) {
         toggleColorMatch();
     if (L.shows(Tool::Histogram) && r.button("histogram", Icon::Histogram, nullptr, (app.showHistogram && !off ? kOn : 0) | off, "Histogram", keyText(Action::Histogram)))
         app.showHistogram = !app.showHistogram;
+    if (L.shows(Tool::Average) && r.button("average", Icon::AverageColor, nullptr, (app.showAverage && !off ? kOn : 0) | off,
+                                           "Average color", keyText(Action::AverageColor)))
+        app.showAverage = !app.showAverage;
     const int infoOff = noImage() && app.error.empty() ? kDisabled : 0;
     if (L.shows(Tool::Info) && r.button("info", Icon::Info, nullptr, (app.showInfo && !infoOff ? kOn : 0) | infoOff, "Info", keyText(Action::Info)))
         app.showInfo = !app.showInfo;
@@ -574,6 +585,9 @@ void moreMenuItems(const TopLayout& L) {
     if (item(Tool::Histogram, 4) &&
         menuItem({"Histogram", keyText(Action::Histogram), app.showHistogram, !off, false, Icon::Histogram}))
         app.showHistogram = !app.showHistogram;
+    if (item(Tool::Average, 4) &&
+        menuItem({"Average color", keyText(Action::AverageColor), app.showAverage, !off, false, Icon::AverageColor}))
+        app.showAverage = !app.showAverage;
     if (item(Tool::Info, 4) &&
         menuItem({"Info", keyText(Action::Info), app.showInfo, !(off && app.error.empty()), false, Icon::Info}))
         app.showInfo = !app.showInfo;

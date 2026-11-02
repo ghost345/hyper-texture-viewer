@@ -34,6 +34,7 @@ const IconDef kIcons[int(Icon::Count)] = {
     /* PixelOutline */ {{{"M4 4h3M10.5 4h3M17 4h3v3M20 10.5v3M20 17v3h-3M13.5 20h-3M7 20H4v-3M4 13.5v-3M4 7V4", false}, {"M10 10h4v4h-4z", true}}},
     /* ColorMatch */ {{{"M3 21l1.5-1.5H7l8-8", false}, {"M4.5 19.5V17l8-8", false}, {"M11 7.5l5.5 5.5M14 10l4-4a2.1 2.1 0 0 0-3-3l-4 4", false}}},
     /* Histogram */ {{{"M3 20h18M5.5 20v-6M10 20V6M14.5 20v-9M19 20v-4", false}}},
+    /* AverageColor */ {{{"M3 3h5v5H3zM16 3h5v5h-5zM3 16h5v5H3zM16 16h5v5h-5z", false}, {"M8 8l1.5 1.5M16 8l-1.5 1.5M8 16l1.5-1.5M16 16l-1.5-1.5", false}, {"M10 10h4v4h-4z", true}}},
     /* Info */ {{{"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", false}, {"M12 11v5.5M12 7.8v.01", false}}},
     /* Layers */ {{{"M12 3l9 5-9 5-9-5z", false}, {"M3 13l9 5 9-5", false}}},
     /* Compare */ {{{"M12 3v18", false}, {"M8 8l-4 4 4 4M16 8l4 4-4 4", false}}},

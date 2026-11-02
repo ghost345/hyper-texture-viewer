@@ -303,7 +303,7 @@ void schedulePrefetch() {
         job->path = p;
         job->mode = OpenMode::Browse;
         job->generation = generation;
-        job->channelStats = app.showHistogram;
+        job->channelStats = app.showHistogram || app.showAverage;
         prefetchQueue.push_back(std::move(job));
     }
     if (!prefetchStarted) {
@@ -367,7 +367,7 @@ void requestOpen(const fs::path& path, OpenMode mode) {
     job->path = path;
     job->mode = mode;
     job->generation = ++latestGeneration;
-    job->channelStats = app.showHistogram;
+    job->channelStats = app.showHistogram || app.showAverage;
     reloadPending = false;
     app.loading = true;
     app.loadingSinceMs = nowMs();
