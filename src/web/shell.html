@@ -38,8 +38,9 @@ var Module = {
     s.textContent = message;
     s.className = 'error';
   },
-  // Hands files to the program: purpose 0 opens them as the folder to browse, 1 and 2 load Compare's B or C.
-  htvAddFiles(entries, purpose, first) {
+  // Hands files to the program: purpose 0 opens them as the folder to browse, 1 and 2 load Compare's B or C,
+  // 3 lets it decide (dropped at x, y in CSS pixels).
+  htvAddFiles(entries, purpose, first, x, y) {
     Module._htv_files_begin(purpose);
     for (const { file, path } of entries) {
       const handle = Module.htvFiles.push(file) - 1;
@@ -48,7 +49,8 @@ var Module = {
       Module._free(p);
     }
     const f = stringToNewUTF8(first || '');
-    Module._htv_files_end(f);
+    const r = window.devicePixelRatio || 1;
+    Module._htv_files_end(f, (x || 0) * r, (y || 0) * r);
     Module._free(f);
   },
   async htvReadFile(handle, request) {
@@ -141,6 +143,7 @@ document.addEventListener('dragleave', e => { if (--dragDepth <= 0) { dragDepth 
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', async e => {
   e.preventDefault();
+  const x = e.clientX, y = e.clientY;
   dragDepth = 0;
   document.body.classList.remove('dragging');
   const items = [...e.dataTransfer.items].filter(i => i.kind === 'file');
@@ -151,9 +154,9 @@ document.addEventListener('drop', async e => {
   } else {
     for (const file of e.dataTransfer.files) out.push({ file, path: file.name });
   }
-  // One file dropped opens it with its siblings unknown; one folder opens its first image.
+  // One file dropped opens it with its siblings unknown, or goes to Compare; one folder opens its first image.
   const single = entries.length === 1 && entries[0].isFile;
-  if (out.length) Module.htvAddFiles(out, 0, single ? out[0].path : '');
+  if (out.length) Module.htvAddFiles(out, 3, single ? out[0].path : '', x, y);
 });
 
 // A colour scheme change matters for the "System" theme.

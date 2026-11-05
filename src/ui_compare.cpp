@@ -2,6 +2,7 @@
 
 #include "ui.h"
 #include "ui_internal.h"
+#include "viewer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +19,17 @@ void compareArea(const char* id, ImVec2 a, ImVec2 b) {
 }
 
 const char* kSlotNames[3] = {"A", "B", "C"};
+
+// Where the B and C rows were drawn last frame, for files dropped on them; empty while Compare is closed.
+ImRect slotRects[2];
+
+// The slot "Add to compare" fills: with Compare closed, B, and the image is compared with it alone; with Compare
+// open, the first empty slot, or C when both are taken.
+int dropSlot() {
+    if (!app.compare) return 0;
+    if (app.compareSlots[0].path.empty()) return 0;
+    return 1;
+}
 const int kPairs[3][2] = {{0, 1}, {0, 2}, {1, 2}};
 
 std::string slotName(int i) {
@@ -83,6 +95,7 @@ void slotRow(ImDrawList* dl, float x0, float x1, float y, int i) {
         tipArea("slot a", ImRect(ImVec2(x0, y), ImVec2(x1, y + h)), "A is the image the viewer shows");
         return;
     }
+    slotRects[i - 1] = ImRect(ImVec2(x0 - S(4), y), ImVec2(x1, y + h));
     ImGui::PushID(i);
     ImGui::SetCursorScreenPos(ImVec2(x0, y));
     const bool clicked = ImGui::InvisibleButton("slot", ImVec2(x1 - x0 - S(24), h));
@@ -138,7 +151,7 @@ void toggleCompare() {
 // The dashed shutters and the A / B / C labels over the image.
 void compareOverlay() {
     int ids[3];
-    const int n = app.compare ? compareLayers(ids) : 0;
+    const int n = app.compare && !app.dropAsking ? compareLayers(ids) : 0;  // the question after a drop stays clear
     if (n < 1) return;
     const Theme& t = T();
     ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -210,6 +223,7 @@ void compareOverlay() {
 }
 
 void comparePanel() {
+    slotRects[0] = slotRects[1] = ImRect();
     if (!app.compare) return;
     const Theme& t = T();
     const float width = S(300);
@@ -391,4 +405,105 @@ void comparePanel() {
     ImGui::End();
 }
 
+// After a file is dropped on a shown image: open it instead, or compare the two.
+void dropPrompt() {
+    if (!app.dropAsking) return;
+    if (!app.hasImage) {
+        // The image went away meanwhile: there is nothing to compare with.
+        app.dropAsking = false;
+        finishDrop(-1);
+        return;
+    }
+    const Theme& t = T();
+    const int slot = dropSlot();
+    const bool replaces = app.compare && !app.compareSlots[slot].path.empty();
+    const char* compareTip = !app.compare ? "Open Compare with the shown image as A and this file as B"
+                             : replaces   ? "Put this file into Compare's C instead of the one there"
+                             : slot == 0  ? "Put this file into Compare's B"
+                                          : "Put this file into Compare's C";
+
+    // The buttons decide the width; the name is shortened to fit.
+    Row m;
+    m.measure = true;
+    m.gap = S(8);
+    m.button("open", Icon::Count, "Open this file", kBordered, nullptr, nullptr, 16, 26, 10);
+    m.button("compare", Icon::Count, "Add to compare", kBordered, nullptr, nullptr, 16, 26, 10);
+    m.button("cancel", Icon::Count, "Cancel", kBordered, nullptr, nullptr, 16, 26, 10);
+    const float pad = S(12);
+    const float width = std::max(S(300), m.x - m.gap + 2 * pad);
+    const float hh = S(26), height = hh + S(12) + S(18) + S(14) + S(26) + S(12);
+    const ImVec2 a(std::round(app.vpX + (app.vpW - width) * 0.5f), std::round(app.vpY + (app.vpH - height) * 0.5f));
+
+    ImGui::SetNextWindowPos(a);
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(4));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, line());
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, t.pop);
+    ImGui::PushStyleColor(ImGuiCol_Border, t.bd2);
+    ImGui::Begin("##drop", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+    // Panels opened later must not cover the question.
+    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    panelHeader(dl, a, width, hh, "Dropped file", 12, 12);
+    float y = a.y + hh + S(12);
+    const std::string name = ellipsize(fontRegular, 12, app.dropName, width - 2 * pad);
+    drawText(dl, fontRegular, 12, a.x + pad, y + S(9), t.tx, name.c_str());
+    if (name != app.dropName) tipArea("name", ImRect(ImVec2(a.x + pad, y), ImVec2(a.x + width - pad, y + S(18))),
+                                      app.dropName.c_str());
+    y += S(18) + S(14);
+
+    Row r;
+    r.dl = dl;
+    r.gap = S(8);
+    r.x = a.x + width - pad - (m.x - m.gap);
+    r.cy = y + S(13);
+    int choice = -3;
+    if (r.button("open", Icon::Count, "Open this file", kBordered | kOn, "Show this file instead, with its folder",
+                 "Enter", 16, 26, 10))
+        choice = -1;
+    if (r.button("compare", Icon::Count, "Add to compare", kBordered, compareTip, nullptr, 16, 26, 10))
+        choice = slot;
+    if (r.button("cancel", Icon::Count, "Cancel", kBordered, "Leave everything as it is", "Esc", 16, 26, 10))
+        choice = -2;
+    ImGui::End();
+
+    if (choice == -3) return;
+    app.dropAsking = false;
+    if (choice >= 0) {
+        if (!app.compare) {
+            app.compare = true;
+            loadCompareSlot(1, {});  // a C left from an earlier comparison would join in
+        }
+    }
+    finishDrop(choice);
+    requestRedraw();
+}
+
 }  // namespace htv::ui
+
+namespace htv {
+
+void uiFilesDropped(float x, float y, const char* name, bool single) {
+    using namespace ui;
+    app.dropAsking = false;
+    requestRedraw();
+    if (!single || !app.hasImage) {
+        finishDrop(-1);
+        return;
+    }
+    // Straight onto Compare's B or C row.
+    for (int i = 0; i < 2; ++i)
+        if (app.compare && slotRects[i].GetWidth() > 0 && slotRects[i].Contains(ImVec2(x, y))) {
+            finishDrop(i);
+            return;
+        }
+    app.dropName = name ? name : "";
+    app.dropAsking = true;
+}
+
+}  // namespace htv

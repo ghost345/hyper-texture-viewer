@@ -19,5 +19,8 @@ float uiBottomBarHeight();
 float uiMinWidth();  // the narrowest the window can be with nothing in the bars overlapping; 0 if unknown yet
 bool uiIsCaption(float x, float y);  // empty top bar: drags the window like a title bar
 bool uiKeyDown(int virtualKey);      // keyboard shortcuts; true when handled
+// Files were dropped at (x, y), in the same pixels as the mouse. `name` is the first file's (UTF-8); `single` is
+// false for a folder or several files, which always open. Ends in finishDrop, at once or after asking.
+void uiFilesDropped(float x, float y, const char* name, bool single);
 
 }  // namespace htv

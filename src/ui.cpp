@@ -118,6 +118,7 @@ void uiFrame() {
     framesPanel();
     settingsPanel();
     helpPanel();
+    dropPrompt();
     notices();
     drawTooltip();
     finishMenuFrame();
@@ -213,6 +214,11 @@ bool uiKeyDown(int vk) {
     if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN) return false;
     const KeyBinding pressed{uint16_t(vk), uint8_t((ctrl ? kModCtrl : 0) | (shift ? kModShift : 0) | (alt ? kModAlt : 0))};
     if (settingsKeyDown(pressed)) return true;  // Settings is waiting for a new key
+    if (app.dropAsking && pressed.mods == 0 && (vk == VK_RETURN || vk == VK_ESCAPE)) {
+        app.dropAsking = false;
+        finishDrop(vk == VK_RETURN ? -1 : -2);
+        return true;
+    }
 
     // Fixed keys: recent files and Esc.
     if (pressed.mods == kModCtrl && vk >= '1' && vk <= '9') {

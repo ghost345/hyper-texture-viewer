@@ -204,6 +204,7 @@ void toggleColorMatch();
 void stepMatchRegion(int delta);
 void comparePanel();  // ui_compare.cpp
 void compareOverlay();
+void dropPrompt();  // "Open this file / Add to compare / Cancel" after a drop
 void toggleCompare();
 void framesPanel();  // ui_frames.cpp
 void toggleFramesOrLayers();
