@@ -539,16 +539,7 @@ void viewportOverlays() {
     if (app.hasImage) {
         float x0, y0, x1, y1;
         shownArea(x0, y0, x1, y1);
-        // Pixel grid every `gridStep` image pixels, once the cells are big enough to see.
-        if (app.grid && app.gridStep * app.zoom >= S(4)) {
-            const float stepPx = app.gridStep * app.zoom;
-            const ImU32 c = app.darkTheme ? IM_COL32(0, 0, 0, 90) : IM_COL32(255, 255, 255, 110);
-            const float fx = std::max(x0, va.x - std::fmod(va.x - x0, stepPx)), fy = std::max(y0, va.y - std::fmod(va.y - y0, stepPx));
-            for (float x = fx; x <= std::min(x1, vb.x); x += stepPx)
-                dl->AddRectFilled(ImVec2(std::round(x), std::max(y0, va.y)), ImVec2(std::round(x) + line(), std::min(y1, vb.y)), c);
-            for (float y = fy; y <= std::min(y1, vb.y); y += stepPx)
-                dl->AddRectFilled(ImVec2(std::max(x0, va.x), std::round(y)), ImVec2(std::min(x1, vb.x), std::round(y) + line()), c);
-        }
+        pixelGrid(dl);  // every `gridStep` pixels of each shown image, once the cells are big enough
         // Tile borders for the 3x3 preview.
         if (app.tiling == Tiling::Bordered) {
             const float sw = (x1 - x0) / 3, sh = (y1 - y0) / 3;

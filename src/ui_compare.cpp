@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace htv::ui {
 namespace {
@@ -207,6 +208,150 @@ void compareOverlay() {
     dl->AddRect(a, b, IM_COL32(255, 255, 255, 36), S(4), 0, line());
     drawText(dl, fontMono, 12, a.x + S(10), (a.y + b.y) * 0.5f, hex(0xe8e8e8), text);
     (void)t;
+}
+
+namespace {
+
+// Where one image lies on screen and how big its pixels are, as render.cpp's layerView draws it: B and C
+// cover A's area when sizes are matched, and otherwise start at A's corner at A's zoom.
+struct GridLayer {
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // the shown area, with the tiled copies
+    float stepX = 0, stepY = 0;            // gridStep image pixels on screen
+    float left = 0, right = 0;             // the part of the viewport the image is drawn in
+    float weight = 1;                      // how strongly the image shows (Blend fades between two)
+};
+
+void imageSizeOf(int i, float& w, float& h) {
+    const htv::Image& img = i == 0 ? app.image : app.compareSlots[i - 1].image;
+    w = float(app.rotation & 1 ? img.height : img.width);
+    h = float(app.rotation & 1 ? img.width : img.height);
+}
+
+GridLayer gridLayer(int i, float left, float right, float weight) {
+    float w, h, aw, ah;
+    imageSizeOf(i, w, h);
+    imageSizeOnScreen(aw, ah);
+    float zoom = app.zoom;
+    if (i != 0 && app.compareSameSize && w > 0) zoom = app.zoom * aw / w;
+    const float around = app.tiling != Tiling::Off ? 1.0f : 0.0f;
+    GridLayer g;
+    g.x0 = app.originX - around * w * zoom;
+    g.y0 = app.originY - around * h * zoom;
+    g.x1 = app.originX + (1 + around) * w * zoom;
+    g.y1 = app.originY + (1 + around) * h * zoom;
+    g.stepX = g.stepY = float(app.gridStep) * zoom;
+    g.left = std::max(left, app.vpX);
+    g.right = std::min(right, app.vpX + app.vpW);
+    g.weight = weight;
+    return g;
+}
+
+// Difference reads the pair's second image over the first one's area (render.cpp's setSecond): with matched
+// sizes stretched to it on each axis, otherwise pixel for pixel from the same corner.
+GridLayer secondOver(const GridLayer& first, int firstId, int second) {
+    GridLayer g = gridLayer(second, first.left, first.right, 1.0f);
+    float fw, fh, w, h;
+    imageSizeOf(firstId, fw, fh);
+    imageSizeOf(second, w, h);
+    if (!app.compareSameSize || fw <= 0 || fh <= 0 || w <= 0 || h <= 0) return g;
+    g.x0 = first.x0;
+    g.y0 = first.y0;
+    g.x1 = first.x1;
+    g.y1 = first.y1;
+    g.stepX = first.stepX * fw / w;
+    g.stepY = first.stepY * fh / h;
+    return g;
+}
+
+// One direction's lines of a layer, as whole screen pixels inside [lo, hi].
+std::vector<int> gridLines(float start, float end, float step, float lo, float hi) {
+    std::vector<int> out;
+    if (step <= 0 || end <= start) return out;
+    lo = std::max(lo, start);
+    hi = std::min(hi, end);
+    float p = lo - std::fmod(lo - start, step);
+    if (p < lo) p += step;
+    for (; p <= hi; p += step) {
+        const int r = int(std::round(p));
+        if (out.empty() || out.back() != r) out.push_back(r);
+    }
+    return out;
+}
+
+bool hasLine(const std::vector<int>& lines, int p) { return std::binary_search(lines.begin(), lines.end(), p); }
+
+}  // namespace
+
+void pixelGrid(ImDrawList* dl) {
+    if (!app.grid || !app.hasImage) return;
+    // Which images the viewport shows, and where: the grid follows each one's own pixels, so a smaller image
+    // stretched over A by Match sizes gets bigger cells.
+    GridLayer layers[3];
+    int n = 0;
+    int ids[3];
+    const int shown = app.compare ? compareLayers(ids) : 0;
+    const float vx0 = app.vpX, vx1 = app.vpX + app.vpW;
+    if (shown > 1 && app.compareMode == CompareMode::Split) {
+        float aw, ah;
+        imageSizeOnScreen(aw, ah);
+        for (int k = 0; k < shown; ++k) {
+            const float left = k == 0 ? vx0 : app.originX + app.compareShutters[k - 1] * aw * app.zoom;
+            const float right = k == shown - 1 ? vx1 : app.originX + app.compareShutters[k] * aw * app.zoom;
+            layers[n++] = gridLayer(ids[k], left, right, 1.0f);
+        }
+    } else if (app.compare && app.compareMode != CompareMode::Split && pairReady(app.comparePair)) {
+        // Blend fades the grids with their images; Difference shows both images' pixel edges at once.
+        const int a = kPairs[app.comparePair][0], b = kPairs[app.comparePair][1];
+        if (app.compareMode == CompareMode::Blend) {
+            const float f = std::clamp(app.compareBlend, 0.0f, 1.0f);
+            layers[n++] = gridLayer(a, vx0, vx1, 1.0f - f);
+            layers[n++] = gridLayer(b, vx0, vx1, f);
+        } else {
+            layers[n++] = gridLayer(a, vx0, vx1, 1.0f);
+            layers[n] = secondOver(layers[0], a, b);
+            ++n;
+        }
+    } else {
+        layers[n++] = gridLayer(0, vx0, vx1, 1.0f);
+    }
+
+    const int alpha = app.darkTheme ? 90 : 110;
+    const ImU32 rgb = app.darkTheme ? IM_COL32(0, 0, 0, 0) : IM_COL32(255, 255, 255, 0);
+    const float vy0 = app.vpY, vy1 = app.vpY + app.vpH;
+    std::vector<int> xs[3], ys[3];
+    bool on[3] = {};
+    for (int i = 0; i < n; ++i) {
+        const GridLayer& g = layers[i];
+        on[i] = std::min(g.stepX, g.stepY) >= S(4) && g.weight > 0.01f && g.right > g.left;  // cells big enough to see
+        if (!on[i]) continue;
+        xs[i] = gridLines(g.x0, g.x1, g.stepX, g.left, g.right);
+        ys[i] = gridLines(g.y0, g.y1, g.stepY, vy0, vy1);
+    }
+    // Two grids over the same area (Blend, Difference) share the lines they have in common, so those are
+    // drawn once rather than twice as dark.
+    const bool shared = n == 2 && app.compareMode != CompareMode::Split && layers[0].x0 == layers[1].x0 &&
+                        layers[0].x1 == layers[1].x1 && layers[0].y0 == layers[1].y0 && layers[0].y1 == layers[1].y1;
+    for (int i = 0; i < n; ++i) {
+        if (!on[i]) continue;
+        const GridLayer& g = layers[i];
+        const int other = shared ? 1 - i : -1;
+        auto colour = [&](int p, const std::vector<int>* theirs) -> ImU32 {
+            float w = g.weight;
+            if (other >= 0 && on[other] && hasLine(*theirs, p)) {
+                if (i == 1) return 0;  // drawn with the first grid
+                w = std::min(1.0f, w + layers[other].weight);
+            }
+            return rgb | (ImU32(std::round(alpha * w)) << IM_COL32_A_SHIFT);
+        };
+        const float top = std::max(g.y0, vy0), bottom = std::min(g.y1, vy1);
+        const float left = std::max(g.x0, g.left), right = std::min(g.x1, g.right);
+        for (int x : xs[i])
+            if (const ImU32 c = colour(x, other >= 0 ? &xs[other] : nullptr))
+                dl->AddRectFilled(ImVec2(float(x), top), ImVec2(float(x) + line(), bottom), c);
+        for (int y : ys[i])
+            if (const ImU32 c = colour(y, other >= 0 ? &ys[other] : nullptr))
+                dl->AddRectFilled(ImVec2(left, float(y)), ImVec2(right, float(y) + line()), c);
+    }
 }
 
 void comparePanel() {
