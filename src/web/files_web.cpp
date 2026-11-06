@@ -14,6 +14,7 @@
 #include <new>
 
 #include "imgui.h"
+#include "ui.h"
 #include "keys.h"
 
 namespace fs = std::filesystem;
@@ -244,9 +245,12 @@ void requestOpen(const fs::path& path, OpenMode mode) {
     startRead(std::move(job));
 }
 
-// What the next files the page hands over are for: 0 opening, 1 and 2 Compare's B and C.
+// What the next files the page hands over are for: 0 opening, 1 and 2 Compare's B and C, 3 dropped (the viewer
+// may ask what to do with them).
 int pickPurpose = 0;
 std::vector<WebFile> incoming;
+std::vector<WebFile> dropped;  // dropped files until uiFilesDropped decides
+std::string droppedFirst;
 
 void showResult(const std::string& error) {
     app.error = error;
@@ -458,6 +462,42 @@ void relistFolder() {
     if (!files.empty()) listFolder();
 }
 
+namespace {
+
+// Files the page handed over, put to use: `purpose` 0 makes them the folder to browse and opens `first` (empty for
+// the first in folder order), 1 and 2 load the first into Compare's B or C.
+void useFiles(int purpose, std::vector<WebFile> in, std::string first) {
+    if (purpose == 1 || purpose == 2) {
+        // Compare keeps the folder; the new file joins the known ones.
+        const WebFile f = in.front();
+        if (!findFile(f.path)) files.push_back(f);
+        loadCompareSlot(purpose - 1, f.path);
+        return;
+    }
+    // A new set of files replaces the old ones, except those Compare is showing.
+    std::vector<WebFile> kept;
+    for (const WebFile& f : files)
+        for (const CompareSlot& s : app.compareSlots)
+            if (s.path == f.path) kept.push_back(f);
+    files = std::move(in);
+    for (WebFile& k : kept)
+        if (!findFile(k.path)) files.push_back(std::move(k));
+    cache.clear();
+    app.path = first;
+    listFolder();
+    if (first.empty() || !findFile(first)) first = app.folder.empty() ? std::string() : app.folder.front().string();
+    if (!first.empty()) openPath(first);
+}
+
+}  // namespace
+
+void finishDrop(int target) {
+    std::vector<WebFile> in = std::move(dropped);
+    dropped.clear();
+    if (in.empty() || target == -2) return;
+    useFiles(target == -1 ? 0 : 1 + target, std::move(in), droppedFirst);
+}
+
 }  // namespace htv
 
 using namespace htv;
@@ -480,37 +520,27 @@ EMSCRIPTEN_KEEPALIVE void htv_files_add(int handle, const char* path, double siz
     if (isSupported(f.path)) incoming.push_back(std::move(f));
 }
 
-// The files handed over since htv_files_begin: a new folder to browse, or the file for a Compare slot. `first` is
-// the path to open first, empty for the first in folder order.
-EMSCRIPTEN_KEEPALIVE void htv_files_end(const char* first) {
+// The files handed over since htv_files_begin. `first` is the path to open first, empty for the first in folder
+// order; the page sets it when a single file was picked or dropped. (x, y) is where files were dropped, in canvas
+// pixels like the mouse.
+EMSCRIPTEN_KEEPALIVE void htv_files_end(const char* first, double x, double y) {
     if (incoming.empty()) {
         app.error = "None of these files is an image type the viewer reads.";
         requestRedraw();
         return;
     }
-    if (pickPurpose == 1 || pickPurpose == 2) {
-        // Compare keeps the folder; the new file joins the known ones.
-        const WebFile f = incoming.front();
-        if (!findFile(f.path)) files.push_back(f);
-        loadCompareSlot(pickPurpose - 1, f.path);
-        incoming.clear();
+    std::vector<WebFile> in = std::move(incoming);
+    incoming.clear();
+    const std::string firstPath = first ? first : "";
+    if (pickPurpose == 3) {
+        dropped = std::move(in);
+        droppedFirst = firstPath;
+        const bool single = dropped.size() == 1 && !firstPath.empty();
+        uiFilesDropped(float(x), float(y), narrow(dropped.front().path.filename().wstring()).c_str(), single);
+        requestRedraw();
         return;
     }
-    // A new set of files replaces the old ones, except those Compare is showing.
-    std::vector<WebFile> kept;
-    for (const WebFile& f : files)
-        for (const CompareSlot& s : app.compareSlots)
-            if (s.path == f.path) kept.push_back(f);
-    files = std::move(incoming);
-    for (WebFile& k : kept)
-        if (!findFile(k.path)) files.push_back(std::move(k));
-    incoming.clear();
-    cache.clear();
-    std::string firstPath = first ? first : "";
-    app.path = firstPath;
-    listFolder();
-    if (firstPath.empty() || !findFile(firstPath)) firstPath = app.folder.empty() ? std::string() : app.folder.front().string();
-    if (!firstPath.empty()) openPath(firstPath);
+    useFiles(pickPurpose, std::move(in), firstPath);
 }
 
 // The page read a file: `data` is malloc'd for this side to keep, or null with `error` set.
