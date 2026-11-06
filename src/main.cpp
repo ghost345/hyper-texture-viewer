@@ -86,6 +86,7 @@ namespace {
 double lastInputMs = 0;  // frames keep coming for a moment after input, for hover states and tooltips
 bool redraw = false;     // something changed outside of input, e.g. a load finished
 bool spaceDown = false;  // Space + drag pans, like the left button alone
+fs::path droppedPath;    // the file dropped last, until uiFilesDropped decides
 
 // The app icon at the two sizes Windows shows it in at this DPI. Each size in htv.ico is drawn on its own pixel
 // grid, so the small one is loaded at its size rather than shrunk from the big one.
@@ -370,9 +371,19 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DROPFILES: {
             HDROP drop = reinterpret_cast<HDROP>(wp);
             wchar_t file[MAX_PATH * 4];
-            if (DragQueryFileW(drop, 0, file, UINT(std::size(file)))) openPath(file);
+            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            POINT at{};
+            DragQueryPoint(drop, &at);
+            const bool got = DragQueryFileW(drop, 0, file, UINT(std::size(file))) != 0;
             DragFinish(drop);
             SetForegroundWindow(hwnd);
+            if (got) {
+                droppedPath = file;
+                std::error_code ec;
+                const bool single = count == 1 && !fs::is_directory(droppedPath, ec);
+                uiFilesDropped(float(at.x), float(at.y), narrow(droppedPath.filename().wstring()).c_str(), single);
+                requestRedraw();
+            }
             return 0;
         }
         case WM_DESTROY:
@@ -449,6 +460,14 @@ bool pickImageFile(std::filesystem::path& out) {
 void showOpenDialog() {
     std::filesystem::path path;
     if (pickImageFile(path)) openPath(path);
+}
+
+void finishDrop(int target) {
+    const fs::path path = std::move(droppedPath);
+    droppedPath.clear();
+    if (path.empty() || target == -2) return;
+    if (target == -1) openPath(path);
+    else loadCompareSlot(target, path);
 }
 
 void pickCompareFile(int slot) {

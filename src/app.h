@@ -244,6 +244,10 @@ struct App {
     bool compare = false;
     CompareMode compareMode = CompareMode::Split;
     CompareSlot compareSlots[2];      // B and C
+
+    // A file dropped on the window while an image is shown: the viewer asks whether to open it or compare it.
+    bool dropAsking = false;
+    std::string dropName;  // UTF-8, for the question
     int comparePair = 0;              // Blend and Difference: A and B, A and C, B and C
     float compareBlend = 0.5f;        // how much of the pair's second image shows
     float compareGain = 8.0f;         // Difference: amplification
@@ -277,7 +281,7 @@ struct App {
     bool keepExposure = true;     // keep exposure and range when switching files
     bool autoReload = true;       // reload the shown file when it changes on disk
     int folderSort = 0;           // name (natural), name, date modified, size, type
-    bool singleInstance = true;   // files opened from Explorer go to the running window
+    bool singleInstance = false;  // files opened from Explorer go to the running window
     int cacheMB = 1024;           // decoded images kept for going back and forth
     int prefetch = 1;             // neighbours decoded ahead on each side: 0, 1 or 2
 
@@ -382,6 +386,9 @@ GpuView* layerThumbnail(int index);
 // Compare: slot 0 is B, 1 is C. Loads in the background; an empty path clears the slot.
 void loadCompareSlot(int slot, const std::filesystem::path& path);
 bool pickImageFile(std::filesystem::path& out);  // the Open dialog; false when cancelled
+// Drag and drop: the platform keeps what was dropped and hands it to uiFilesDropped, which decides what to do with
+// it and calls this. `target` -2 forgets the files, -1 opens them, 0 or 1 loads the first into Compare's B or C.
+void finishDrop(int target);
 void pickCompareFile(int slot);  // the Open dialog for a Compare slot; loads the file chosen
 void updateCompareStats();  // recomputes the pair's difference statistics when the images or the pair changed
 // The images Split shows, left to right: 0 for A, 1 for B, 2 for C. Returns how many.
